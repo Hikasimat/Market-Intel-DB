@@ -1,14 +1,9 @@
 import { createSlice } from '@reduxjs/toolkit';
-import { cookieStorage } from '../../utils/cookieStorage';
-
-// Use session cookies so tokens are shared across all tabs and cleared when the browser closes.
-const _storage = cookieStorage;
 
 const initialState = {
   user: null,
-  accessToken: _storage.getItem('accessToken') || null,
-  refreshToken: _storage.getItem('refreshToken') || null,
-  isAuthenticated: !!_storage.getItem('accessToken'),
+  accessToken: null,
+  isAuthenticated: sessionStorage.getItem('isAuthenticated') === 'true',
   loading: false,
   error: null,
 };
@@ -25,10 +20,8 @@ const authSlice = createSlice({
       state.loading = false;
       state.isAuthenticated = true;
       state.accessToken = action.payload.access;
-      state.refreshToken = action.payload.refresh;
       state.user = action.payload.user;
-      _storage.setItem('accessToken', action.payload.access);
-      _storage.setItem('refreshToken', action.payload.refresh);
+      sessionStorage.setItem('isAuthenticated', 'true');
     },
     loginFailure: (state, action) => {
       state.loading = false;
@@ -37,19 +30,13 @@ const authSlice = createSlice({
     logout: (state) => {
       state.user = null;
       state.accessToken = null;
-      state.refreshToken = null;
       state.isAuthenticated = false;
-      // Clear ALL session storage to prevent stale WhatsApp polling or cached data.
-      _storage.clear();
+      sessionStorage.removeItem('isAuthenticated');
     },
     tokenRefreshed: (state, action) => {
       state.accessToken = action.payload.access;
-      // If the server rotated the refresh token, update it too.
-      if (action.payload.refresh) {
-        state.refreshToken = action.payload.refresh;
-        _storage.setItem('refreshToken', action.payload.refresh);
-      }
-      _storage.setItem('accessToken', action.payload.access);
+      sessionStorage.setItem('isAuthenticated', 'true');
+      state.isAuthenticated = true;
     },
   },
 });

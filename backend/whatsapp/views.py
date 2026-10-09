@@ -117,28 +117,6 @@ SESSION_NAME_RE = re.compile(r'^[A-Za-z0-9_\-]{1,80}$')
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, AuthenticationFailed
 
-class QueryParameterJWTAuthentication(JWTAuthentication):
-    """
-    Allows JWT authentication via the ?token= query parameter.
-    Used for <img> and <audio> tags which cannot send the Authorization header.
-    """
-    def authenticate(self, request):
-        # Try the default Authorization header first
-        header = self.get_header(request)
-        if header is not None:
-            return super().authenticate(request)
-            
-        # Fall back to ?token= parameter
-        raw_token = request.query_params.get("token")
-        if not raw_token:
-            return None
-            
-        try:
-            validated_token = self.get_validated_token(raw_token)
-            return self.get_user(validated_token), validated_token
-        except (InvalidToken, AuthenticationFailed):
-            return None
-
 
 def _get_client_ip(request) -> str:
     """Extract client IP from request headers."""
@@ -769,7 +747,11 @@ class WhatsAppConversationsView(APIView):
             )
 
         if session_id:
-            session_obj = WhatsAppSession.objects.filter(id=session_id).first()
+            if request.user.is_superuser:
+                session_obj = WhatsAppSession.objects.filter(id=session_id).first()
+            else:
+                session_obj = WhatsAppSession.objects.filter(id=session_id, assigned_profiles__user=request.user).first()
+
             if session_obj:
                 # If phone_number is missing, try to fetch it dynamically from WAHA
                 if not session_obj.phone_number:
@@ -795,15 +777,13 @@ class WhatsAppConversationsView(APIView):
                         print("Failed to dynamically fetch session phone_number:", e)
                 
                 if session_obj.phone_number:
-                    # Show ALL conversations across any session with this phone number.
-                    qs = WhatsAppConversation.objects.select_related(
-                        "prospect_contact", "prospect", "session"
-                    ).filter(
-                        session__phone_number=session_obj.phone_number,
-                        is_deleted=False,
-                    )
+                    # Filter the existing authorized qs to this phone number
+                    qs = qs.filter(session__phone_number=session_obj.phone_number)
                 else:
                     qs = qs.filter(session_id=session_id)
+            else:
+                # Session not found or not authorized for this user
+                qs = qs.none()
 
         # Deduplicate by chat_id in Python and sort by last_message_at
         conversations = list(qs)
@@ -1261,76 +1241,62 @@ class WhatsAppMediaProxyView(APIView):
 
     GET /api/whatsapp/media-proxy/?url=<waha_url>&message_id=<uuid>
     """
-    authentication_classes = [QueryParameterJWTAuthentication]
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request):
         import urllib.request
         import urllib.error
+        import urllib.parse
+        from django.http import FileResponse
 
-        media_url = request.query_params.get("url", "")
         message_id = request.query_params.get("message_id", "")
+        if not message_id:
+            return Response({"detail": "Missing message_id parameter."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not media_url:
-            return Response({"detail": "Missing url parameter."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Security: only allow WAHA local file URLs or Django-served media.
-        # Allowlist includes both the configured WAHA URL (may be a tunnel) AND
-        # the direct local WAHA address, since stored media URLs may reference
-        # localhost:3000 from when the messages were originally received.
-        waha_base = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:3000").rstrip("/")
-        _ALLOWED_WAHA_PREFIXES = {
-            waha_base,
-            "http://localhost:3000",
-            "http://host.docker.internal:3000",
-        }
-        is_allowed_waha = any(media_url.startswith(p) for p in _ALLOWED_WAHA_PREFIXES)
-        if not is_allowed_waha and not media_url.startswith("/media/"):
-            return Response({"detail": "Forbidden URL."}, status=status.HTTP_403_FORBIDDEN)
-
-        # Ownership verification: if message_id is provided, verify ownership.
-        if message_id:
-            try:
-                if request.user.is_superuser:
-                    msg = WhatsAppMessage.objects.get(pk=message_id)
-                else:
-                    msg = WhatsAppMessage.objects.get(
-                        pk=message_id,
-                        conversation__session__assigned_profiles__user=request.user,
-                    )
-            except (WhatsAppMessage.DoesNotExist, Exception):
-                return Response({"detail": "Media not found."}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            # Without message_id, require that the URL can be linked to an owned conversation
-            # via media_url or media_file field.
-            if not request.user.is_superuser:
-                owned_exists = WhatsAppMessage.objects.filter(
+        # Ownership verification: require message_id and verify ownership.
+        try:
+            if request.user.is_superuser:
+                msg = WhatsAppMessage.objects.select_related("conversation__session").get(pk=message_id)
+            else:
+                msg = WhatsAppMessage.objects.select_related("conversation__session").get(
+                    pk=message_id,
                     conversation__session__assigned_profiles__user=request.user,
-                ).filter(
-                    models_Q(media_url=media_url) | models_Q(media_url__endswith=media_url.split("/")[-1])
-                ).exists()
-                if not owned_exists and not media_url.startswith("/media/"):
-                    # Fallback: allow if URL is within WAHA base (limited exposure).
-                    # Still require auth by being in this authenticated view.
-                    pass
+                )
+        except WhatsAppMessage.DoesNotExist:
+            return Response({"detail": "Media not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Proxy the WAHA media request.
-        if media_url.startswith("/media/"):
-            # Local Django media file.
-            from django.http import FileResponse
-            import urllib.parse
-            file_path = os.path.join(os.environ.get("MEDIA_ROOT", "media"), media_url.lstrip("/media/"))
-            if os.path.exists(file_path):
-                return FileResponse(open(file_path, "rb"))
-            return Response({"detail": "Media file not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not msg.media_url and not msg.media_file:
+             return Response({"detail": "No media associated with this message."}, status=status.HTTP_404_NOT_FOUND)
 
-        api_key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "")
+        # Serve from local storage if available
+        if msg.media_file:
+            try:
+                return FileResponse(msg.media_file.open("rb"))
+            except Exception:
+                pass # fallback to WAHA proxy if file open fails but URL exists
+
+        if not msg.media_url:
+             return Response({"detail": "Media not available."}, status=status.HTTP_404_NOT_FOUND)
+        
         waha_base_url = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:3000").rstrip("/")
+        api_key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "")
 
-        req = urllib.request.Request(media_url)
+        # Only allow deriving local WAHA URLs, preventing DNS rebinding/SSRF
+        if not msg.media_url.startswith(waha_base_url) and not msg.media_url.startswith("http://localhost:3000") and not msg.media_url.startswith("http://host.docker.internal:3000"):
+            return Response({"detail": "Invalid media location."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Construct the WAHA URL securely based on waha_message_id and session
+        session_name = msg.conversation.session.session_name
+        dl_url = (
+            f"{waha_base_url}/api/messages/"
+            f"{urllib.parse.quote(msg.waha_message_id)}/download"
+            f"?session={urllib.parse.quote(session_name)}"
+        )
+
+        req = urllib.request.Request(dl_url)
         if api_key:
             req.add_header("X-Api-Key", api_key)
-
+            
         content = None
         content_type = "application/octet-stream"
         try:
@@ -1338,28 +1304,7 @@ class WhatsAppMediaProxyView(APIView):
                 content = resp.read()
                 content_type = resp.headers.get("Content-Type", "application/octet-stream")
         except urllib.error.HTTPError as e:
-            if e.code == 404 and message_id:
-                # WAHA's temp file is gone. Try re-downloading via the message download API.
-                try:
-                    from .models import WhatsAppMessage as _WM
-                    _msg = _WM.objects.filter(pk=message_id).select_related("conversation__session").first()
-                    if _msg and _msg.waha_message_id and _msg.conversation and _msg.conversation.session:
-                        _session = _msg.conversation.session.session_name
-                        _dl_url = (
-                            f"{waha_base_url}/api/messages/"
-                            f"{urllib.parse.quote(_msg.waha_message_id)}/download"
-                            f"?session={urllib.parse.quote(_session)}"
-                        )
-                        _req2 = urllib.request.Request(_dl_url)
-                        if api_key:
-                            _req2.add_header("X-Api-Key", api_key)
-                        with urllib.request.urlopen(_req2, timeout=15) as _resp2:
-                            content = _resp2.read()
-                            content_type = _resp2.headers.get("Content-Type", "application/octet-stream")
-                except Exception:
-                    pass
             if content is None:
-                # Media is truly gone — return 404 so browser shows broken image gracefully.
                 return Response({"detail": "Media no longer available."}, status=status.HTTP_404_NOT_FOUND)
         except Exception:
             return Response({"detail": "Media unavailable."}, status=status.HTTP_404_NOT_FOUND)
@@ -1527,7 +1472,6 @@ class WhatsAppProfilePicView(APIView):
 
     Requires authentication. Resolves session from the user's owned conversation.
     """
-    authentication_classes = [QueryParameterJWTAuthentication]
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request, chat_id):

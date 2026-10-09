@@ -294,18 +294,15 @@ export default function WhatsappPage() {
     return ''; // Do not display raw LIDs in the UI
   };
 
-  // Build authenticated media proxy URL.
-  // Uses the Redux token so that when the token refreshes, image URLs re-render correctly.
   const buildMediaSrc = useCallback((msg) => {
     const raw = msg.media_url || msg.media_file || '';
     if (!raw) return '';
-    const token = reduxAccessToken || sessionStorage.getItem('accessToken') || '';
     if (raw.startsWith('/media/') || raw.startsWith('http://localhost') || raw.startsWith('http://host.docker')) {
-      return `${API_BASE}/whatsapp/media-proxy/?url=${encodeURIComponent(raw)}&message_id=${msg.id}&token=${token}`;
+      return `${API_BASE}/whatsapp/media-proxy/?url=${encodeURIComponent(raw)}&message_id=${msg.id}`;
     }
     if (raw.startsWith('/')) return HOST_URL + raw;
     return raw;
-  }, [reduxAccessToken]);
+  }, []);
 
   // Message status icon.
   const MessageStatus = ({ msg }) => {
@@ -451,7 +448,7 @@ export default function WhatsappPage() {
               >
                 <div className="w-12 h-12 rounded-full bg-blue-100 flex-shrink-0 flex items-center justify-center text-blue-600 font-bold overflow-hidden relative">
                   <img
-                    src={`${API_BASE}/whatsapp/profile-pic/${chat.chat_id}/?token=${reduxAccessToken || sessionStorage.getItem('accessToken') || ''}`}
+                    src={`${API_BASE}/whatsapp/profile-pic/${chat.chat_id}/`}
                     className="w-full h-full object-cover absolute inset-0 z-10"
                     onError={(e) => e.target.style.display = 'none'}
                     alt=""
@@ -494,7 +491,7 @@ export default function WhatsappPage() {
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold overflow-hidden relative">
                   <img
-                    src={`${API_BASE}/whatsapp/profile-pic/${selectedChat.chat_id}/?token=${sessionStorage.getItem('accessToken') || ''}`}
+                    src={`${API_BASE}/whatsapp/profile-pic/${selectedChat.chat_id}/`}
                     className="w-full h-full object-cover absolute inset-0 z-10"
                     onError={(e) => e.target.style.display = 'none'}
                     alt=""
@@ -708,7 +705,7 @@ export default function WhatsappPage() {
 
           <div className="p-6 flex flex-col items-center border-b border-slate-100">
             <div className="w-32 h-32 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-4xl mb-4 overflow-hidden relative shadow-sm">
-              <img src={`${API_BASE}/whatsapp/profile-pic/${selectedChat.chat_id}/?token=${reduxAccessToken || sessionStorage.getItem('accessToken') || ''}`} className="w-full h-full object-cover relative z-10" onError={(e) => e.target.style.display = 'none'} alt="" />
+              <img src={`${API_BASE}/whatsapp/profile-pic/${selectedChat.chat_id}/`} className="w-full h-full object-cover relative z-10" onError={(e) => e.target.style.display = 'none'} alt="" />
               <span className="absolute inset-0 flex items-center justify-center">{(selectedChat.contact_name || selectedChat.whatsapp_name || (wahaContact && wahaContact.pushname) || '#').charAt(0).toUpperCase()}</span>
             </div>
             <h3 className="text-xl font-bold text-slate-800 text-center">{selectedChat.contact_name || selectedChat.whatsapp_name || (wahaContact && wahaContact.pushname) || "Unknown Contact"}</h3>

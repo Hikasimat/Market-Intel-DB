@@ -8,6 +8,76 @@ from .serializers import UserSerializer
 from .permissions import IsPRE, IsLQ as IsLQPerm
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
+from django.conf import settings
+from django.utils import timezone
+
+class LoginThrottle(AnonRateThrottle):
+    rate = '5/minute'
+
+class RefreshThrottle(UserRateThrottle):
+    rate = '20/minute'
+class RefreshAnonThrottle(AnonRateThrottle):
+    rate = '20/minute'
+
+def set_jwt_cookies(response, access_token, refresh_token):
+    cookie_kwargs = {
+        'httponly': True,
+        'secure': getattr(settings, 'SESSION_COOKIE_SECURE', False),
+        'samesite': getattr(settings, 'SESSION_COOKIE_SAMESITE', 'Lax'),
+        'path': '/',
+    }
+    access_expires = timezone.now() + settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']
+    refresh_expires = timezone.now() + settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME']
+    
+    response.set_cookie('access_token', access_token, expires=access_expires, **cookie_kwargs)
+    response.set_cookie('refresh_token', refresh_token, expires=refresh_expires, **cookie_kwargs)
+    return response
+
+class CookieTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = [LoginThrottle]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            access = response.data.get('access')
+            refresh = response.data.get('refresh')
+            if access and refresh:
+                set_jwt_cookies(response, access, refresh)
+                if 'refresh' in response.data:
+                    del response.data['refresh']
+        return response
+
+class CookieTokenRefreshView(TokenRefreshView):
+    throttle_classes = [RefreshAnonThrottle, RefreshThrottle]
+
+    def post(self, request, *args, **kwargs):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'refresh' not in data:
+            cookie_refresh = request.COOKIES.get('refresh_token')
+            if cookie_refresh:
+                data['refresh'] = cookie_refresh
+            else:
+                return Response({"detail": "Refresh token missing."}, status=status.HTTP_401_UNAUTHORIZED)
+                
+        serializer = self.get_serializer(data=data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except InvalidToken as e:
+            response = Response({"detail": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+            response.delete_cookie('access_token')
+            response.delete_cookie('refresh_token')
+            return response
+
+        response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+        access = serializer.validated_data.get('access')
+        refresh = serializer.validated_data.get('refresh', data.get('refresh'))
+        if access:
+            set_jwt_cookies(response, access, refresh)
+            if 'refresh' in response.data:
+                del response.data['refresh']
+        return response
 
 class IsSuperUser(BasePermission):
     def has_permission(self, request, view):

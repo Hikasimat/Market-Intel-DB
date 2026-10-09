@@ -1,4 +1,4 @@
-﻿import os
+import os
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User
 from accounts.models import UserProfile
@@ -7,6 +7,11 @@ class Command(BaseCommand):
     help = 'Creates demo users for PRE and LQ roles'
 
     def handle(self, *args, **kwargs):
+        from django.conf import settings
+        if not settings.DEBUG:
+            self.stdout.write(self.style.ERROR('This command can only be run in development (DEBUG=True).'))
+            return
+            
         pre_user, created = User.objects.get_or_create(username='pre_demo', defaults={'email': 'pre@example.com', 'first_name': 'PRE', 'last_name': 'Demo'})
         if created:
             pre_user.set_password('demo123')

@@ -6,7 +6,7 @@ A full-stack CRM and market-intelligence platform for Prospect Research Engineer
 
 ```
 Browser
-  └─► Vercel (React + Vite frontend)
+  └─► Static Host (React + Vite frontend)
         └─► AWS EC2 (Nginx → Gunicorn → Django REST API)
               ├─► PostgreSQL / Supabase
               ├─► Gmail IMAP / SMTP (per-user mail accounts)
@@ -22,7 +22,7 @@ Browser
 | Auth | JWT (SimpleJWT) |
 | Database | PostgreSQL (Supabase in production) |
 | Backend hosting | AWS EC2 + Gunicorn + Nginx |
-| Frontend hosting | Vercel |
+| Frontend hosting | Static Host / Nginx |
 
 ## Project Structure
 
@@ -117,15 +117,16 @@ sudo -u marketintel bash /opt/marketintel/repo/deploy/aws/deploy.sh
 
 This pulls the latest code, installs dependencies, runs migrations, collects static files, and restarts Gunicorn.
 
-## Vercel Deployment (Frontend)
+## Frontend Deployment
 
-The frontend is deployed to Vercel. Set the following environment variable in the Vercel project settings:
+The frontend can be built as a static site and hosted on Nginx or any static host.
+Set the following environment variable during build:
 
 ```
 VITE_API_BASE_URL=https://YOUR_BACKEND_DOMAIN/api
 ```
 
-`frontend/vercel.json` is required for SPA client-side routing and must not be removed.
+When using Nginx, ensure you route the SPA correctly by using `try_files $uri $uri/ /index.html`.
 
 ## User Roles
 

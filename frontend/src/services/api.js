@@ -1,10 +1,10 @@
 import axios from 'axios';
 import { store } from '../app/store';
 import { tokenRefreshed, logout } from '../features/auth/authSlice';
-import { cookieStorage } from '../utils/cookieStorage';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -12,7 +12,7 @@ const api = axios.create({
 
 api.interceptors.request.use(
   (config) => {
-    const token = cookieStorage.getItem('accessToken') || store.getState().auth.accessToken;
+    const token = store.getState().auth.accessToken;
     if (token) {
       config.headers['Authorization'] = `Bearer ${token}`;
     }
@@ -54,33 +54,24 @@ api.interceptors.response.use(
 
       originalRequest._retry = true;
       isRefreshing = true;
-      const refreshToken = cookieStorage.getItem('refreshToken') || store.getState().auth.refreshToken;
       
-      if (refreshToken) {
-        try {
-          const response = await axios.post(`${api.defaults.baseURL}/auth/refresh/`, {
-            refresh: refreshToken
-          });
+      try {
+        const response = await axios.post(`${api.defaults.baseURL}/auth/refresh/`, {}, { withCredentials: true });
+        
+        store.dispatch(tokenRefreshed({ access: response.data.access }));
           
-          // The server may return a new refresh token (ROTATE_REFRESH_TOKENS=True).
-          // Pass the full response.data so authSlice can update both tokens.
-          store.dispatch(tokenRefreshed(response.data));
+        const newToken = response.data.access;
+        processQueue(null, newToken);
           
-          const newToken = response.data.access;
-          processQueue(null, newToken);
-          
-          originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
-          return api(originalRequest);
-        } catch (refreshError) {
-          processQueue(refreshError, null);
-          store.dispatch(logout());
-          return Promise.reject(refreshError);
-        } finally {
-          isRefreshing = false;
-        }
-      } else {
-        isRefreshing = false;
+        originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
+        return api(originalRequest);
+      } catch (refreshError) {
+        // Fallback for catch if needed though we handle it inside try block, but just in case
+        processQueue(refreshError, null);
         store.dispatch(logout());
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
     return Promise.reject(error);

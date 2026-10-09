@@ -1,7 +1,7 @@
 # MarketIntel — AWS EC2 Backend Deployment Guide
 
-This guide migrates the Django backend from Vercel to a persistent AWS EC2 instance.  
-The frontend stays on Vercel. The database stays on Supabase. Gmail stays as the mail provider.
+This guide details the deployment of the Django backend to a persistent AWS EC2 instance.  
+The frontend is hosted on a static host. The database stays on Supabase. Gmail stays as the mail provider.
 
 ---
 
@@ -11,7 +11,7 @@ The frontend stays on Vercel. The database stays on Supabase. Gmail stays as the
 Browser
   │
   ▼
-Vercel (React/Vite frontend)
+Static Host (React/Vite frontend)
   │ HTTPS API calls
   ▼
 Cloudflare DNS / HTTPS (YOUR_BACKEND_DOMAIN)
@@ -169,9 +169,9 @@ EMAIL_TRACKING_BASE_URL=https://YOUR_BACKEND_DOMAIN
 EMAIL_OPEN_TRACKING_ENABLED=true
 EMAIL_VERIFICATION_PROVIDER=mx_only
 
-# CORS / CSRF — your Vercel frontend URL
-CORS_ALLOWED_ORIGINS=https://YOUR_FRONTEND_DOMAIN.vercel.app
-CSRF_TRUSTED_ORIGINS=https://YOUR_FRONTEND_DOMAIN.vercel.app
+# CORS / CSRF — your static frontend URL
+CORS_ALLOWED_ORIGINS=https://YOUR_FRONTEND_DOMAIN.com
+CSRF_TRUSTED_ORIGINS=https://YOUR_FRONTEND_DOMAIN.com
 
 # Cloudflare R2 (copy from existing working environment)
 USE_OBJECT_STORAGE=true
@@ -193,7 +193,7 @@ chown marketintel:marketintel /opt/marketintel/.env
 ## PART G — Supabase Direct Connection
 
 > [!IMPORTANT]
-> The previous Vercel deployment used the Supabase **Session Pooler** on port 5432, which caused `EMAXCONNSESSION` (max clients reached) errors. A persistent EC2 process holds connections open longer, which can exhaust pooler limits.
+> If you were previously using a serverless deployment that relied on Supabase **Session Pooler** on port 5432, it could cause `EMAXCONNSESSION` (max clients reached) errors. A persistent EC2 process holds connections open longer, which can exhaust pooler limits.
 >
 > For EC2, use the **direct database connection** from Supabase:
 >
@@ -373,19 +373,11 @@ This pulls the latest code, installs dependencies, runs migrations, collectstati
 
 Only after ALL diagnostics pass and APIs are verified:
 
-1. In your Vercel frontend project → Settings → Environment Variables
-2. Update `VITE_API_BASE_URL` from:
-   ```
-   https://backend-pi-orpin-56.vercel.app/api
-   ```
-   to:
+1. In your frontend hosting environment settings, update the `VITE_API_BASE_URL` to point to your new backend:
    ```
    https://YOUR_BACKEND_DOMAIN/api
    ```
-3. Redeploy the frontend on Vercel.
-
-> [!CAUTION]
-> The current Vercel backend at `backend-pi-orpin-56.vercel.app` remains your rollback target. **Do not delete it** until EC2 is fully verified.
+2. Redeploy the frontend.
 
 ---
 
@@ -401,8 +393,8 @@ Run these checks from the deployed frontend before declaring success:
 - [ ] `GET /api/auth/mail-account/` — MailAccount retrieval
 - [ ] `POST /api/auth/mail-account/{id}/test-smtp/` — SMTP verification
 - [ ] `POST /api/auth/mail-account/{id}/test-imap/` — IMAP verification
-- [ ] `GET /api/auth/mail-account/fetch_emails/` — IMAP fetch (was HTTP 500 on Vercel)
-- [ ] `POST /api/outreach/emails/` — send email (was HTTP 400 on Vercel)
+- [ ] `GET /api/auth/mail-account/fetch_emails/` — IMAP fetch
+- [ ] `POST /api/outreach/emails/` — send email
 - [ ] `GET /api/email-tracking/{token}/` — tracking pixel is reachable publicly
 - [ ] `POST /api/email-verifications/instant-verify/` — email verification
 
@@ -452,16 +444,13 @@ cd /opt/marketintel/repo/backend
 
 ## Rollback Procedure
 
-If EC2 deployment fails at any point:
+If EC2 deployment fails or introduces regressions:
 
-1. Do NOT change `VITE_API_BASE_URL` in Vercel frontend.
-2. The current Vercel backend at `backend-pi-orpin-56.vercel.app` continues working.
-3. Fix the EC2 issue, re-run diagnostics, then retry the frontend cutover.
-
-To roll back after frontend cutover:
-1. Vercel frontend → Settings → Environment Variables
-2. Revert `VITE_API_BASE_URL` to `https://backend-pi-orpin-56.vercel.app/api`
-3. Redeploy frontend on Vercel
+1. SSH into your EC2 instance.
+2. Navigate to `/opt/marketintel/repo`.
+3. Check out the previous stable git commit or tag.
+4. Run `sudo -u marketintel bash deploy/aws/deploy.sh` to redeploy the previous stable state.
+5. If the issue is with the instance itself, provision a new instance from a previous working AMI snapshot and update your DNS records to point to the new IP.
 
 ---
 

@@ -8,21 +8,20 @@ Verification stages:
                                OR when running outside serverless (local dev)
 
 Why the split:
-  Vercel Functions block all outbound SMTP on port 25.  Attempting a direct
-  SMTP probe against the recipient MX server always raises OSError / timeout,
-  which previously returned UNKNOWN even when the domain/MX were perfectly
-  valid.
+  Many hosting providers and serverless environments block all outbound SMTP on port 25.
+  Attempting a direct SMTP probe against the recipient MX server often raises OSError / timeout,
+  which previously returned UNKNOWN even when the domain/MX were perfectly valid.
 
-  In production (Vercel) the engine now returns:
+  When mx_only is used, the engine returns:
     VALID   → syntax OK + domain has MX records
     INVALID → syntax error OR domain has no MX / does not exist
     UNKNOWN → MX found but mailbox-level probe is unavailable or inconclusive
 
 Environment variables (all optional):
   EMAIL_VERIFICATION_PROVIDER=mx_only|smtp_local
-    mx_only     (default) — skip direct SMTP probe; safe for Vercel
-    smtp_local  — attempt direct SMTP port-25 probe; suitable for local dev
-                  where the ISP does not block port 25
+    mx_only     (default) — skip direct SMTP probe; safe for environments blocking port 25
+    smtp_local  — attempt direct SMTP port-25 probe; suitable for environments
+                  where outbound port 25 is unrestricted
 
   Future extension: add provider=zerobounce|abstract|mailboxlayer etc.
   to call an HTTPS verification API instead of direct SMTP.
@@ -161,12 +160,12 @@ def verify_email_engine(email: str) -> Dict[str, Any]:
 
     # ── 3. Mailbox-level probe ────────────────────────────────────────────────
     # Read the verification provider from environment.
-    #   mx_only     → skip SMTP probe (safe on Vercel), returns VALID if MX exists
+    #   mx_only     → skip SMTP probe (safe for restricted environments), returns VALID if MX exists
     #   smtp_local  → attempt direct port-25 SMTP probe (local dev only)
     provider = os.getenv('EMAIL_VERIFICATION_PROVIDER', 'mx_only').strip().lower()
 
     if provider == 'mx_only':
-        # Vercel / any environment where port-25 is blocked.
+        # Any environment where port-25 is blocked.
         # MX exists → we know the domain can receive mail. Mailbox-level
         # existence is skipped. We return VALID so the frontend accepts it.
         result['status'] = 'VALID'

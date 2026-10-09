@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
-from .views import UserMeView, UserViewSet, MailAccountViewSet
+from .views import UserMeView, UserViewSet, MailAccountViewSet, CookieTokenObtainPairView, CookieTokenRefreshView
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
@@ -27,21 +27,15 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        refresh_token = request.data.get("refresh")
-        if not refresh_token:
-            return Response(
-                {"detail": "Refresh token required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-        except Exception as exc:
-            # Log the error but don't reveal whether the token was valid.
-            import logging
-            logging.getLogger(__name__).warning("Logout token blacklist error: %s", exc)
+        refresh_token = request.data.get("refresh") or request.COOKIES.get("refresh_token")
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Logout token blacklist error: %s", exc)
 
-        # Write WhatsApp audit log for the logout action.
         try:
             from whatsapp.models import WhatsAppAuditLog
             from whatsapp.services import _write_audit_log
@@ -54,13 +48,15 @@ class LogoutView(APIView):
         except Exception:
             pass
 
-        return Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
-
+        response = Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
+        response.delete_cookie('access_token')
+        response.delete_cookie('refresh_token')
+        return response
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('login/', CookieTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('me/', UserMeView.as_view(), name='user_me'),
     path('logout/', LogoutView.as_view(), name='auth_logout'),
 ]
