@@ -81,20 +81,29 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # ── Database ──────────────────────────────────────────────────────────────────
 # Local development: uses individual DB_* vars.
-# Production (EC2 + Supabase): uses DATABASE_URL.
+# Production (EC2 + RDS): uses DATABASE_URL.
 _database_url = os.getenv('DATABASE_URL')
 
 if _database_url:
     DATABASES = {
         'default': dj_database_url.config(
             default=_database_url,
-            conn_max_age=0,
+            conn_max_age=int(os.environ.get('CONN_MAX_AGE', 600)),
             conn_health_checks=True,
+            ssl_require=os.getenv('DB_SSL_REQUIRE', 'true').lower() == 'true',
         )
     }
-    DATABASES['default']['OPTIONS'] = {'sslmode': 'require'}
-    if '6543' in _database_url:
-        DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+    # If the user provides an RDS CA bundle path, support verify-full
+    _sslrootcert = os.getenv('DB_SSL_ROOT_CERT')
+    if _sslrootcert:
+        DATABASES['default'].setdefault('OPTIONS', {})
+        DATABASES['default']['OPTIONS'].update({
+            'sslmode': 'verify-full',
+            'sslrootcert': _sslrootcert,
+        })
+    elif os.getenv('DB_SSL_REQUIRE', 'true').lower() == 'true':
+        DATABASES['default'].setdefault('OPTIONS', {})
+        DATABASES['default']['OPTIONS'].setdefault('sslmode', 'require')
 else:
     DATABASES = {
         'default': {
@@ -171,6 +180,9 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Allow cookies (JWT access/refresh) to be sent cross-origin
+CORS_ALLOW_CREDENTIALS = True
+
 # ── CSRF ──────────────────────────────────────────────────────────────────────
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
@@ -185,8 +197,9 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
-    SESSION_COOKIE_SAMESITE = 'Lax'
-    CSRF_COOKIE_SAMESITE = 'Lax'
+    # For cross-origin cookie sharing between Amplify and EC2, SameSite must be None and Secure must be True
+    SESSION_COOKIE_SAMESITE = 'None'
+    CSRF_COOKIE_SAMESITE = 'None'
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -222,13 +235,26 @@ if os.getenv('USE_OBJECT_STORAGE', 'false').lower() == 'true':
             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
-    AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-    AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+    # If credentials are not provided in environment, boto3 will automatically use the attached EC2 IAM Role.
+    _aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+    _aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    if _aws_access_key and _aws_secret_key:
+        AWS_ACCESS_KEY_ID = _aws_access_key
+        AWS_SECRET_ACCESS_KEY = _aws_secret_key
+
     AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME')
-    AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL')
-    AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME')
+    
+    _endpoint_url = os.getenv('AWS_S3_ENDPOINT_URL')
+    if _endpoint_url:
+        AWS_S3_ENDPOINT_URL = _endpoint_url
+        
+    AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME', 'ap-south-1')
     AWS_DEFAULT_ACL = None
     AWS_S3_FILE_OVERWRITE = False
+    
+    # Enable Server Side Encryption for S3
+    AWS_S3_ENCRYPTION = True
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
 
 # ── Manager Dashboard Timezone ────────────────────────────────────────────────
 # Override via MANAGER_REPORT_TIMEZONE env var (e.g., 'Asia/Kolkata').

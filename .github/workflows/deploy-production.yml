@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'backend/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy-production.yml'
   workflow_dispatch:
 
 permissions:
@@ -13,12 +17,6 @@ permissions:
 concurrency:
   group: marketintel-production
   cancel-in-progress: false
-
-env:
-  AWS_REGION: ap-south-1
-  ECR_REPOSITORY: marketintel-backend
-  EC2_INSTANCE_ID: i-0877b41c24efbf2a8
-  PARAMETER_NAME: /marketintel/production/env
 
 jobs:
   deploy:
@@ -35,19 +33,21 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::404571418561:role/marketintel-github-deploy-role
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS identity
         run: |
           aws sts get-caller-identity
 
       - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push Docker image
         env:
-          ECR_REGISTRY: 404571418561.dkr.ecr.ap-south-1.amazonaws.com
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
         run: |
           docker build \
@@ -61,7 +61,13 @@ jobs:
       - name: Deploy to EC2
         id: deploy
         env:
-          IMAGE_URI: 404571418561.dkr.ecr.ap-south-1.amazonaws.com/marketintel-backend:${{ github.sha }}-${{ github.run_attempt }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          PARAMETER_NAME: ${{ vars.SSM_PARAMETER_NAME }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ github.run_attempt }}
         run: |
           COMMAND_ID=$(aws ssm send-command \
             --region "$AWS_REGION" \
@@ -72,7 +78,7 @@ jobs:
               \"set -e\",
               \"mkdir -p /opt/marketintel/staticfiles\",
               \"chmod 755 /opt/marketintel\",
-              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin 404571418561.dkr.ecr.ap-south-1.amazonaws.com\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY\",
               \"aws ssm get-parameter --name $PARAMETER_NAME --with-decryption --query 'Parameter.Value' --output text > /opt/marketintel/.env\",
               \"chmod 600 /opt/marketintel/.env\",
               \"chown 10001:10001 /opt/marketintel/staticfiles\",
