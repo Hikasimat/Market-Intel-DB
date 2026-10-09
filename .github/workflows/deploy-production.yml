@@ -1,9 +1,10 @@
+
 name: Deploy MarketIntel Backend
 
 on:
   push:
     branches:
-      - main
+      - fix-architecture-security
     paths:
       - 'backend/**'
       - 'deploy/**'
@@ -22,6 +23,7 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     environment:
       name: marketintel-production
@@ -30,15 +32,81 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Validate deployment configuration
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          SSM_PARAMETER_NAME: ${{ vars.SSM_PARAMETER_NAME }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/fix-architecture-security" ]]; then
+            echo "::error::Production deployments are permitted only from fix-architecture-security."
+            exit 1
+          fi
+
+          missing=()
+
+          [[ -n "${AWS_ROLE_ARN:-}" ]] || missing+=("AWS_ROLE_ARN")
+          [[ -n "${AWS_REGION:-}" ]] || missing+=("AWS_REGION")
+          [[ -n "${AWS_ACCOUNT_ID:-}" ]] || missing+=("AWS_ACCOUNT_ID")
+          [[ -n "${EC2_INSTANCE_ID:-}" ]] || missing+=("EC2_INSTANCE_ID")
+          [[ -n "${SSM_PARAMETER_NAME:-}" ]] || missing+=("SSM_PARAMETER_NAME")
+          [[ -n "${ECR_REPOSITORY:-}" ]] || missing+=("ECR_REPOSITORY")
+
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing GitHub environment variables: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          if [[ "$AWS_REGION" != "ap-south-1" ]]; then
+            echo "::error::AWS_REGION must be ap-south-1 for this deployment."
+            exit 1
+          fi
+
+          if [[ "$AWS_ACCOUNT_ID" != "796498481393" ]]; then
+            echo "::error::AWS_ACCOUNT_ID does not match the production account."
+            exit 1
+          fi
+
+          if [[ "$ECR_REPOSITORY" != "marketintel-backend" ]]; then
+            echo "::error::Unexpected ECR repository name."
+            exit 1
+          fi
+
+          if [[ "$SSM_PARAMETER_NAME" != "/marketintel/production/env" ]]; then
+            echo "::error::Unexpected production parameter name."
+            exit 1
+          fi
+
+          echo "Deployment configuration validated."
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: MarketIntelProductionDeploy
 
       - name: Verify AWS identity
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           aws sts get-caller-identity
+
+          CALLER_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+
+          if [[ "$CALLER_ACCOUNT" != "$AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Authenticated AWS account does not match the production account."
+            exit 1
+          fi
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -46,17 +114,35 @@ jobs:
 
       - name: Build and push Docker image
         env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
+        shell: bash
         run: |
+          set -euo pipefail
+
+          EXPECTED_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          if [[ "$ECR_REGISTRY" != "$EXPECTED_REGISTRY" ]]; then
+            echo "::error::ECR registry does not match the configured account and region."
+            exit 1
+          fi
+
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Building image: ${ECR_REPOSITORY}:${IMAGE_TAG}"
+
           docker build \
+            --pull \
             -f deploy/aws/backend.Dockerfile \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$IMAGE_URI" \
             .
 
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$IMAGE_URI"
+
+          echo "Docker image pushed successfully."
 
       - name: Deploy to EC2
         id: deploy
@@ -68,66 +154,107 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ github.run_attempt }}
+        shell: bash
         run: |
-          COMMAND_ID=$(aws ssm send-command \
+          set -euo pipefail
+
+          # Build a remote script. GitHub Actions expands the known deployment
+          # values here, then jq safely encodes the entire script as SSM JSON.
+          REMOTE_SCRIPT="$(cat <<EOF
+          set -eu
+
+          mkdir -p /opt/marketintel/staticfiles
+          chmod 755 /opt/marketintel
+
+          aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+          aws ssm get-parameter --region "${AWS_REGION}" --name "${PARAMETER_NAME}" --with-decryption --query 'Parameter.Value' --output text > /opt/marketintel/.env
+
+          chmod 600 /opt/marketintel/.env
+          chown 10001:10001 /opt/marketintel/staticfiles
+
+          docker pull "${IMAGE_URI}"
+
+          docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py check --deploy
+
+          docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py migrate --noinput
+
+          docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py collectstatic --noinput
+
+          docker rm -f marketintel-api 2>/dev/null || true
+
+          docker run -d --name marketintel-api --restart unless-stopped --env-file /opt/marketintel/.env -p 127.0.0.1:8000:8000 -v /opt/marketintel/staticfiles:/app/staticfiles --init --stop-timeout 30 --security-opt no-new-privileges:true --log-opt max-size=10m --log-opt max-file=3 "${IMAGE_URI}"
+
+          sleep 5
+
+          docker inspect --format='{{.State.Status}}' marketintel-api | grep -qx running
+
+          docker exec marketintel-api python manage.py check
+          EOF
+          )"
+
+          PARAMETERS_JSON="$(jq -n --arg script "$REMOTE_SCRIPT" '{commands: [$script]}')"
+
+          COMMAND_ID="$(aws ssm send-command \
             --region "$AWS_REGION" \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy MarketIntel backend $GITHUB_SHA" \
-            --parameters commands="[
-              \"set -e\",
-              \"mkdir -p /opt/marketintel/staticfiles\",
-              \"chmod 755 /opt/marketintel\",
-              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY\",
-              \"aws ssm get-parameter --name $PARAMETER_NAME --with-decryption --query 'Parameter.Value' --output text > /opt/marketintel/.env\",
-              \"chmod 600 /opt/marketintel/.env\",
-              \"chown 10001:10001 /opt/marketintel/staticfiles\",
-              \"docker pull $IMAGE_URI\",
-              \"docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles $IMAGE_URI python manage.py check --deploy\",
-              \"docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles $IMAGE_URI python manage.py migrate --noinput\",
-              \"docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles $IMAGE_URI python manage.py collectstatic --noinput\",
-              \"docker rm -f marketintel-api 2>/dev/null || true\",
-              \"docker run -d --name marketintel-api --restart unless-stopped --env-file /opt/marketintel/.env -p 127.0.0.1:8000:8000 -v /opt/marketintel/staticfiles:/app/staticfiles --init --stop-timeout 30 --security-opt no-new-privileges:true --log-opt max-size=10m --log-opt max-file=3 $IMAGE_URI\",
-              \"sleep 5\",
-              \"docker inspect --format='{{.State.Status}}' marketintel-api\",
-              \"docker exec marketintel-api python manage.py check\"
-            ]" \
+            --comment "Deploy MarketIntel backend ${GITHUB_SHA}" \
+            --parameters "$PARAMETERS_JSON" \
             --query "Command.CommandId" \
-            --output text)
+            --output text)"
 
-          echo "SSM command: $COMMAND_ID"
+          echo "SSM command submitted: ${COMMAND_ID}"
 
-          for i in {1..30}; do
-            STATUS=$(aws ssm get-command-invocation \
+          for i in {1..60}; do
+            if INVOCATION_JSON="$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
               --instance-id "$EC2_INSTANCE_ID" \
-              --query "Status" \
-              --output text)
+              --output json 2>&1)"; then
 
-            echo "Deployment status: $STATUS"
+              STATUS="$(jq -r '.Status' <<< "$INVOCATION_JSON")"
+              echo "Deployment status: ${STATUS}"
 
-            case "$STATUS" in
-              Success)
-                echo "Deployment completed successfully."
-                exit 0
-                ;;
-              Failed|Cancelled|TimedOut|Undelivered|Terminated)
-                echo "Deployment failed with status: $STATUS"
+              case "$STATUS" in
+                Success)
+                  aws ssm get-command-invocation \
+                    --region "$AWS_REGION" \
+                    --command-id "$COMMAND_ID" \
+                    --instance-id "$EC2_INSTANCE_ID" \
+                    --query '{Status:Status,ResponseCode:ResponseCode,StandardOutput:StandardOutputContent,StandardError:StandardErrorContent}' \
+                    --output json
 
-                aws ssm get-command-invocation \
-                  --region "$AWS_REGION" \
-                  --command-id "$COMMAND_ID" \
-                  --instance-id "$EC2_INSTANCE_ID" \
-                  --query "{Status:Status,StandardOutput:StandardOutputContent,StandardError:StandardErrorContent}" \
-                  --output json
+                  echo "Deployment completed successfully."
+                  exit 0
+                  ;;
 
+                Failed|Cancelled|TimedOut|Undelivered|Terminated)
+                  echo "::error::Deployment failed with status: ${STATUS}"
+
+                  aws ssm get-command-invocation \
+                    --region "$AWS_REGION" \
+                    --command-id "$COMMAND_ID" \
+                    --instance-id "$EC2_INSTANCE_ID" \
+                    --query '{Status:Status,ResponseCode:ResponseCode,StandardOutput:StandardOutputContent,StandardError:StandardErrorContent}' \
+                    --output json || true
+
+                  exit 1
+                  ;;
+              esac
+
+            else
+              if [[ "$INVOCATION_JSON" == *InvocationDoesNotExist* ]]; then
+                echo "Waiting for SSM invocation to become available..."
+              else
+                echo "::error::Unable to retrieve SSM command status."
+                echo "$INVOCATION_JSON"
                 exit 1
-                ;;
-            esac
+              fi
+            fi
 
             sleep 10
           done
 
-          echo "Deployment timed out waiting for SSM."
+          echo "::error::Timed out waiting for SSM deployment to finish."
           exit 1
