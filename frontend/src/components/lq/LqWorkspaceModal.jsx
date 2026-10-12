@@ -20,6 +20,7 @@ import { confirmReverification } from '../../features/lqPipeline/lqPipelineSlice
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
+import TemplatePicker from './TemplatePicker';
 
 const TimeSelect = ({ value, onChange, className }) => {
   const parseTime = (val) => {
@@ -90,6 +91,7 @@ export default function LqWorkspaceModal({
   const [customRecipientInput, setCustomRecipientInput] = useState('');
   const [emailSubject, setEmailSubject] = useState(`Company Introduction & Solutions Overview — ${prospect.company_name || ''}`);
   const [emailBody, setEmailBody] = useState(`Dear ${prospect.company_name || 'Team'},\n\nWe are pleased to introduce our solution portfolio tailored for ${prospect.primary_industries || 'your industry'}. We would love to schedule a brief introductory discussion to explore potential alignment.\n\nBest regards,\nLead Qualification Team`);
+  const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -344,6 +346,11 @@ const handleAddCustomRecipient = (e) => {
       formData.append('prospect', prospect.id);
       formData.append('subject', emailSubject);
       formData.append('body', emailBody);
+      if (templateSelection.templateId || templateSelection.signatureId) {
+        if (templateSelection.templateId) formData.append('template_id', templateSelection.templateId);
+        if (templateSelection.signatureId) formData.append('signature_id', templateSelection.signatureId);
+        formData.append('body_edited', String(!templateSelection.templateId || emailBody !== templateSelection.baseBody));
+      }
       
       const recList = [
         ...toEmails.map(r => ({ email_address: r, recipient_type: 'TO' })),
@@ -1011,6 +1018,18 @@ const handleAddCustomRecipient = (e) => {
                           </div>
 
                         </div>
+                        <TemplatePicker
+                          prospect={prospect}
+                          toEmails={toEmails}
+                          ccEmails={ccEmails}
+                          emailSubject={emailSubject}
+                          emailBody={emailBody}
+                          setEmailSubject={setEmailSubject}
+                          setEmailBody={setEmailBody}
+                          disabled={isEmailSent}
+                          selection={templateSelection}
+                          setSelection={setTemplateSelection}
+                        />
                         <div>
                           <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Email Subject</label>
                           <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} disabled={isEmailSent} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-900 text-xs disabled:bg-slate-100 disabled:text-slate-500" />
@@ -1018,7 +1037,7 @@ const handleAddCustomRecipient = (e) => {
                         <div>
                           <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Email Message Content</label>
                           <textarea rows={4} value={emailBody} onChange={(e) => setEmailBody(e.target.value)} disabled={isEmailSent} className="w-full p-3 bg-white border border-slate-200 rounded-t-xl text-xs font-medium text-slate-800 leading-relaxed focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-100 disabled:text-slate-500" />
-                          {senderMailStatus && senderMailStatus.default_signature && (
+                          {senderMailStatus && senderMailStatus.default_signature && !templateSelection.signatureId && (
                             <div className="w-full p-3 bg-slate-50 border border-t-0 border-slate-200 rounded-b-xl text-xs text-slate-500 whitespace-pre-wrap">
                               {senderMailStatus.default_signature}
                             </div>

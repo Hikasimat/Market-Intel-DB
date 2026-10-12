@@ -112,7 +112,8 @@ const Layout = () => {
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
       { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
-      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle }
+      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
+      { path: '/settings', label: 'Settings', icon: Settings }
     );
   } else if (user?.role === 'MANAGER') {
     navItems.push(

@@ -261,5 +261,11 @@ if os.getenv('USE_OBJECT_STORAGE', 'false').lower() == 'true':
 # Defaults to Django's TIME_ZONE so the reporting boundary is consistent.
 MANAGER_REPORT_TIMEZONE = os.getenv('MANAGER_REPORT_TIMEZONE', TIME_ZONE)
 
+# ── Upload and Request Body Limits ───────────────────────────────────────────
+# Django default is 2.5MB (2621440), which causes RequestDataTooBig on rich email
+# template payloads and when uploading attachments (which allows up to 25MB).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 35 * 1024 * 1024  # 35 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 30 * 1024 * 1024  # 30 MB
+
 
 

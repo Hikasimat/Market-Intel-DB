@@ -23,6 +23,7 @@ import LqCalendarPage from '../pages/LqCalendarPage';
 import ManagerDashboardPage from '../pages/ManagerDashboardPage';
 import ManagerAuditPage from '../pages/ManagerAuditPage';
 import WhatsappPage from '../pages/WhatsappPage';
+import SettingsPage from '../pages/SettingsPage';
 
 import Layout from '../components/layout/Layout';
 
@@ -132,6 +133,7 @@ const AppRouter = () => {
           <Route path="inbox" element={<RoleRoute allowedRoles={['LQ']}><InboxPage /></RoleRoute>} />
           <Route path="calendar" element={<RoleRoute allowedRoles={['LQ']}><LqCalendarPage /></RoleRoute>} />
           <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
+          <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
         </Route>
       </Routes>
     </Router>

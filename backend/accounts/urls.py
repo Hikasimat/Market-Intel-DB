@@ -7,10 +7,13 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from .views import UserMeView, UserViewSet, MailAccountViewSet, CookieTokenObtainPairView, CookieTokenRefreshView
+from .template_views import EmailTemplateViewSet, EmailSignatureTemplateViewSet
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
 router.register(r'mail-account', MailAccountViewSet, basename='mail-account')
+router.register(r'email-templates', EmailTemplateViewSet, basename='email-template')
+router.register(r'email-signatures', EmailSignatureTemplateViewSet, basename='email-signature')
 
 
 class LogoutView(APIView):

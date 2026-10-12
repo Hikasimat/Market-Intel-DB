@@ -54,3 +54,53 @@ class MailAccount(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.email_address})"
+
+
+import uuid as _uuid
+
+
+class _OwnedDesignBase(models.Model):
+    """Shared fields for LQ-owned reusable email designs (templates / signatures)."""
+    id = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    name = models.CharField(max_length=150)
+    project_data = models.JSONField(default=dict, blank=True)
+    html = models.TextField(blank=True, default='')
+    text = models.TextField(blank=True, default='')
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        ordering = ['-is_default', '-updated_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.owner_id})"
+
+    def save(self, *args, **kwargs):
+        from django.db import transaction
+        with transaction.atomic():
+            if self.is_default:
+                type(self).objects.filter(owner=self.owner, is_default=True).exclude(pk=self.pk).update(is_default=False)
+            super().save(*args, **kwargs)
+
+
+class EmailTemplate(_OwnedDesignBase):
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_templates')
+    description = models.CharField(max_length=500, blank=True, default='')
+    subject = models.CharField(max_length=255, blank=True, default='')
+
+    class Meta(_OwnedDesignBase.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=['owner'], condition=models.Q(is_default=True), name='uniq_default_email_template_per_owner'),
+        ]
+
+
+class EmailSignatureTemplate(_OwnedDesignBase):
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_signatures')
+
+    class Meta(_OwnedDesignBase.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=['owner'], condition=models.Q(is_default=True), name='uniq_default_email_signature_per_owner'),
+        ]

@@ -990,24 +990,66 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         tracking_token = uuid.uuid4()
         tracking_url = f"{settings.EMAIL_TRACKING_BASE_URL}/api/email-tracking/{tracking_token}/"
 
+        # Optional saved template / signature (owner-validated at send time).
+        template_id = request.data.get('template_id') or None
+        signature_id = request.data.get('signature_id') or None
+        composed = None
+        if template_id or signature_id:
+            from accounts.template_utils import build_email_content, ComposeError
+            try:
+                composed = build_email_content(
+                    user, mail_account, prospect, to_emails + cc_emails, subject, body,
+                    template_id=template_id, signature_id=signature_id,
+                    body_edited=str(request.data.get('body_edited', 'true')).lower() != 'false',
+                )
+            except (ComposeError, ValueError) as exc:
+                return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
+            subject = composed['subject']
+            del msg['Subject']
+            msg['Subject'] = subject
+            body = composed['text_body']
+
+        effective_signature = mail_account.default_signature
+        if composed and composed['has_signature']:
+            effective_signature = composed['signature_text']
+
         full_body = body
-        if mail_account.default_signature:
-            full_body += f"\n\n{mail_account.default_signature}"
+        if effective_signature:
+            full_body += f"\n\n{effective_signature}"
 
         msg.set_content(full_body)
         
         # HTML alternative with tracking pixel
         html_body = html.escape(body).replace('\n', '<br>')
         html_signature = ""
-        if mail_account.default_signature:
+        if composed and composed['has_signature']:
+            html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
+        elif mail_account.default_signature:
             sig_safe = html.escape(mail_account.default_signature).replace('\n', '<br>')
             html_signature = f"\n<div>\n{sig_safe}\n</div>\n"
 
+        if composed and composed['has_template'] and composed['html_body']:
+            main_html = composed['html_body']
+        else:
+            main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
+
         html_content = f"""<html><body>
-<div style="font-family: sans-serif;">{html_body}</div><br>{html_signature}
+{main_html}<br>{html_signature}
 <img src="{tracking_url}" width="1" height="1" alt="" style="display:none;width:1px;height:1px;border:0;">
 </body></html>"""
+
+        # Convert embedded Base64 images to inline MIME CID attachments for cross-client
+        # rendering (major clients like Gmail and Outlook block or print raw data:image URIs)
+        from accounts.template_utils import convert_base64_images_to_cid
+        email_domain = mail_account.email_address.split('@')[-1] if '@' in mail_account.email_address else 'local'
+        html_content, inline_images = convert_base64_images_to_cid(html_content, domain=email_domain)
         msg.add_alternative(html_content, subtype='html')
+
+        if inline_images:
+            html_part = next((p for p in msg.iter_parts() if p.get_content_type() == 'text/html'), None)
+            if html_part:
+                for cid, subtype, img_bytes in inline_images:
+                    html_part.add_related(img_bytes, maintype='image', subtype=subtype, cid=f'<{cid}>')
 
         # Handle Attachments
         files = request.FILES.getlist('attachments')
@@ -1072,7 +1114,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             from_name=mail_account.display_name,
             subject=subject,
             body=full_body,
-            signature=mail_account.default_signature,
+            signature=effective_signature,
             status='WAITING FOR RESPONSE',
             sent_at=timezone.now(),
             message_id=msg_id,
@@ -1126,6 +1168,36 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(outreach_email)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='compose-preview')
+    def compose_preview(self, request):
+        """Render exactly what would be sent for a saved template/signature. Never sends."""
+        if not hasattr(request.user, 'profile') or request.user.profile.role != 'LQ':
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only LQ users can preview emails.")
+        from accounts.template_utils import build_email_content, ComposeError
+        mail_account = MailAccount.objects.filter(id=request.user.profile.mail_account_id, is_active=True).first()
+        prospect = Prospect.objects.filter(id=request.data.get('prospect')).first()
+        to_emails = request.data.get('to_emails') or []
+        try:
+            composed = build_email_content(
+                request.user, mail_account, prospect, list(to_emails),
+                request.data.get('subject') or '', request.data.get('body') or '',
+                template_id=request.data.get('template_id') or None,
+                signature_id=request.data.get('signature_id') or None,
+                body_edited=bool(request.data.get('body_edited', True)),
+            )
+        except (ComposeError, ValueError) as exc:
+            return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
+        sig_html = composed['signature_html'] if composed['has_signature'] else ''
+        if not composed['has_signature'] and mail_account and mail_account.default_signature:
+            import html as _h
+            sig_html = _h.escape(mail_account.default_signature).replace('\n', '<br>')
+        return Response({
+            'subject': composed['subject'],
+            'text_body': composed['text_body'],
+            'html': composed['html_body'] + ('<br><div>' + sig_html + '</div>' if sig_html else ''),
+        })
 
     @action(detail=False, methods=['post'])
     def sync_imap(self, request):
