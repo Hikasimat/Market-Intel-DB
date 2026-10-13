@@ -296,9 +296,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         try:
             password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
             if mail_account.imap_security == 'SSL':
-                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
             else:
-                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
                 mail.starttls()
 
             mail.login(mail_account.imap_username, password)
@@ -633,9 +633,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 if not is_gmail:
                     try:
                         if mail_account.imap_security == 'SSL':
-                            imap = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                            imap = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
                         else:
-                            imap = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                            imap = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
                             imap.starttls()
                         imap.login(mail_account.imap_username, password)
                         sent_folder = 'Sent'
@@ -737,9 +737,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         try:
             password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
             if mail_account.imap_security == 'SSL':
-                mail_conn = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                mail_conn = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
             else:
-                mail_conn = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                mail_conn = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
                 mail_conn.starttls()
 
             mail_conn.login(mail_account.imap_username, password)
@@ -1007,9 +1007,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         try:
             password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
             if mail_account.imap_security == 'SSL':
-                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
             else:
-                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
                 mail.starttls()
 
             mail.login(mail_account.imap_username, password)
@@ -1213,9 +1213,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         try:
             password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
             if mail_account.imap_security == 'SSL':
-                server = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                server = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
             else:
-                server = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                server = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
                 server.starttls()
             server.login(mail_account.imap_username, password)
             mail_account.imap_status = 'CONNECTED'

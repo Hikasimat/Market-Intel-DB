@@ -9,6 +9,7 @@ import {
   ChevronUp,
   TrendingUp,
   Clock,
+  Shield,
   ArrowLeft,
   X,
   Building2,

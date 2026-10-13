@@ -35,6 +35,7 @@ const GrapesEditor = forwardRef(function GrapesEditor({ projectData, initialHtml
   const changeCount = useRef(0);
 
   useEffect(() => {
+    const presetPlugin = typeof newsletterPreset === 'function' ? newsletterPreset : (newsletterPreset?.default || newsletterPreset);
     const editor = grapesjs.init({
       container: containerRef.current,
       height,
@@ -42,7 +43,7 @@ const GrapesEditor = forwardRef(function GrapesEditor({ projectData, initialHtml
       fromElement: false,
       storageManager: false,
       assetManager: { embedAsBase64: true, dropzone: true },
-      plugins: [newsletterPreset],
+      plugins: [presetPlugin],
       // Scripts in imported/pasted markup are never executed in the canvas.
       allowScripts: 0,
     });

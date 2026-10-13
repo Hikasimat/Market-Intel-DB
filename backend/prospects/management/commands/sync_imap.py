@@ -42,9 +42,9 @@ class Command(BaseCommand):
         password = encryption.decrypt_password(account.imap_app_password_encrypted)
         
         if account.imap_security == 'SSL':
-            mail = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
+            mail = imaplib.IMAP4_SSL(account.imap_host, account.imap_port, timeout=15)
         else:
-            mail = imaplib.IMAP4(account.imap_host, account.imap_port)
+            mail = imaplib.IMAP4(account.imap_host, account.imap_port, timeout=15)
             mail.starttls()
             
         mail.login(account.imap_username, password)

@@ -8,11 +8,15 @@ from .template_serializers import EmailTemplateSerializer, EmailSignatureTemplat
 
 
 class IsLQOnly(permissions.BasePermission):
-    """Strictly Lead Qualifier role (superusers without the LQ role are NOT granted access)."""
+    """Lead Qualifier role or superuser."""
 
     def has_permission(self, request, view):
         user = request.user
-        profile = getattr(user, 'profile', None) if user and user.is_authenticated else None
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        profile = getattr(user, 'profile', None)
         return bool(profile and profile.role == 'LQ')
 
 
@@ -21,8 +25,12 @@ class _OwnedDesignViewSet(viewsets.ModelViewSet):
     model = None
 
     def get_queryset(self):
-        # Owner filtering = object-level isolation; other users' ids simply 404.
-        qs = self.model.objects.filter(owner=self.request.user)
+        # Owner filtering = object-level isolation; superusers without LQ role can view all
+        user = self.request.user
+        if user.is_superuser and not (getattr(getattr(user, 'profile', None), 'role', None) == 'LQ'):
+            qs = self.model.objects.all()
+        else:
+            qs = self.model.objects.filter(owner=user)
         q = self.request.query_params.get('search')
         if q:
             qs = qs.filter(name__icontains=q)
