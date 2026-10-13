@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ProspectViewSet, LQPipelineViewSet, CallbackReminderViewSet, MeetingViewSet, ProspectContactViewSet, CommunicationActivityViewSet, CallActivityViewSet, OutreachEmailViewSet, EmailTrackingView, pre_dashboard_stats, AuditReverificationRequestViewSet, GovernmentEntityViewSet
+from .views import ProspectViewSet, LQPipelineViewSet, CallbackReminderViewSet, MeetingViewSet, ProspectContactViewSet, CommunicationActivityViewSet, CallActivityViewSet, OutreachEmailViewSet, EmailTrackingView, EmailLinkClickTrackingView, pre_dashboard_stats, AuditReverificationRequestViewSet, GovernmentEntityViewSet
 from .verification_views import EmailVerificationViewSet
 from .manager_views import manager_dashboard
 
@@ -20,6 +20,7 @@ router.register(r'email-verifications', EmailVerificationViewSet, basename='emai
 
 urlpatterns = [
     path('email-tracking/<uuid:tracking_token>/', EmailTrackingView.as_view(), name='email-tracking'),
+    path('email-tracking/click/<uuid:tracking_token>/', EmailLinkClickTrackingView.as_view(), name='email-click-tracking'),
     path('pre-dashboard-stats/', pre_dashboard_stats, name='pre-dashboard-stats'),
     path('manager-dashboard/', manager_dashboard, name='manager-dashboard'),
     path('', include(router.urls)),

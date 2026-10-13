@@ -173,7 +173,6 @@ export default function WhatsappPage() {
   };
 
   const handleDeleteMessage = async (messageId) => {
-    if (!window.confirm('Delete this message?')) return;
     try {
       await api.delete(`/whatsapp/messages/${messageId}/`);
       setMessages(prev => prev.filter(m => m.id !== messageId));
@@ -185,7 +184,6 @@ export default function WhatsappPage() {
 
   const handleDeleteChat = async () => {
     if (!selectedChat) return;
-    if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
     try {
       await api.delete(`/whatsapp/conversations/${selectedChat.id}/`);
       setChats(prev => prev.filter(c => c.id !== selectedChat.id));

@@ -233,7 +233,7 @@ class Meeting(models.Model):
         return f"Meeting for {self.prospect.company_name} at {self.scheduled_datetime}"
 
 class OutreachEmail(models.Model):
-    prospect = models.ForeignKey(Prospect, on_delete=models.CASCADE, related_name='outreach_emails')
+    prospect = models.ForeignKey(Prospect, on_delete=models.CASCADE, null=True, blank=True, related_name='outreach_emails')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     sender_mail_account = models.ForeignKey('accounts.MailAccount', on_delete=models.SET_NULL, null=True, blank=True)
     from_email = models.CharField(max_length=255)
@@ -253,6 +253,11 @@ class OutreachEmail(models.Model):
     tracking_token = models.UUIDField(default=uuid.uuid4, db_index=True, editable=False)
     is_opened = models.BooleanField(default=False)
     opened_at = models.DateTimeField(null=True, blank=True)
+    open_count = models.PositiveIntegerField(default=0)
+    first_opened_at = models.DateTimeField(null=True, blank=True)
+    last_opened_at = models.DateTimeField(null=True, blank=True)
+    total_seconds_spent = models.PositiveIntegerField(default=0)
+    open_history = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

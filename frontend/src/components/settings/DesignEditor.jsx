@@ -6,13 +6,78 @@ import { designApi, errorMessage } from '../../services/designApi';
 // GrapesJS (+ preset, CSS) is large: load only when an editor is opened.
 const GrapesEditor = React.lazy(() => import('./GrapesEditor'));
 
-export const PLACEHOLDERS = ['contact_name', 'company_name', 'sender_name', 'sender_email', 'designation', 'website'];
+export const SMART_TAGS = [
+  {
+    key: 'contact_name',
+    token: '{{contact_name}}',
+    label: 'Contact Name',
+    icon: '👤',
+    desc: "Recipient's full name",
+    sample: 'Jane Doe',
+    color: 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100 hover:border-blue-300',
+  },
+  {
+    key: 'company_name',
+    token: '{{company_name}}',
+    label: 'Company Name',
+    icon: '🏢',
+    desc: "Recipient's company name",
+    sample: 'Acme Corp',
+    color: 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100 hover:border-indigo-300',
+  },
+  {
+    key: 'designation',
+    token: '{{designation}}',
+    label: 'Job Title',
+    icon: '💼',
+    desc: "Recipient's designation or role",
+    sample: 'Managing Director',
+    color: 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100 hover:border-violet-300',
+  },
+  {
+    key: 'website',
+    token: '{{website}}',
+    label: 'Company Website',
+    icon: '🌐',
+    desc: "Recipient's website link",
+    sample: 'https://acme.example',
+    color: 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 hover:border-emerald-300',
+  },
+  {
+    key: 'sender_name',
+    token: '{{sender_name}}',
+    label: 'Your Name (Sender)',
+    icon: '✍️',
+    desc: 'Your sender display name',
+    sample: 'Alex Morgan',
+    color: 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100 hover:border-amber-300',
+  },
+  {
+    key: 'sender_email',
+    token: '{{sender_email}}',
+    label: 'Your Email (Sender)',
+    icon: '✉️',
+    desc: 'Your sender email address',
+    sample: 'alex@company.com',
+    color: 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 hover:border-rose-300',
+  },
+];
 
-const SAMPLE = {
-  contact_name: 'Jane Doe', company_name: 'Acme Corp', sender_name: 'Your Name',
-  sender_email: 'you@company.com', designation: 'CTO', website: 'https://acme.example',
+export const PLACEHOLDERS = SMART_TAGS.map((t) => t.key);
+
+const SAMPLE = SMART_TAGS.reduce((acc, t) => {
+  acc[t.key] = t.sample;
+  return acc;
+}, {});
+
+export const fillSample = (html) => {
+  if (!html) return '';
+  return html.replace(/\{\{\s*([a-zA-Z0-9_\s]+)\s*\}\}/g, (m, k) => {
+    const raw = k.trim().toLowerCase().replace(' ', '_');
+    const matched = SMART_TAGS.find((t) => t.key === raw || t.key.replace('_', '') === raw);
+    return matched ? matched.sample : (SAMPLE[raw] ?? m);
+  });
 };
-const fillSample = (html) => html.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => SAMPLE[k] ?? m);
 
 /**
  * Shared metadata form + GrapesJS canvas + preview + unsaved-change guard.
@@ -58,7 +123,9 @@ const DesignEditor = ({ kind, id, noun, starterHtml, withSubject, withDescriptio
   }, [dirty]);
 
   const guardedClose = () => {
-    if (dirty && !window.confirm('You have unsaved changes. Discard them?')) return;
+    if (dirty) {
+      toast.info('Unsaved changes discarded.');
+    }
     onClose();
   };
 
@@ -150,21 +217,45 @@ const DesignEditor = ({ kind, id, noun, starterHtml, withSubject, withDescriptio
       {preview && (
         <div className="fixed inset-0 z-[100] bg-slate-900/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between p-3 border-b border-slate-100">
-              <h3 className="font-bold text-slate-800 text-sm">{preview.source ? 'HTML output' : 'Rendered preview (sample data)'}</h3>
+            <div className="flex items-center justify-between p-3.5 border-b border-slate-100 bg-slate-50">
+              <div className="flex items-center gap-2.5">
+                <h3 className="font-extrabold text-slate-800 text-sm">
+                  {preview.source ? 'HTML Source Code' : '✨ Live Email Preview'}
+                </h3>
+                {!preview.source && (
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Previewing with sample customer data
+                  </span>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 {!preview.source && (
-                  <button onClick={() => setPreview((p) => ({ ...p, mobile: !p.mobile }))} className="px-3 py-1 text-xs font-bold border border-slate-200 rounded-lg">{preview.mobile ? 'Desktop' : 'Mobile'} width</button>
+                  <button onClick={() => setPreview((p) => ({ ...p, mobile: !p.mobile }))} className="px-3 py-1 text-xs font-bold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 transition cursor-pointer">
+                    {preview.mobile ? '🖥️ Desktop View' : '📱 Mobile View'}
+                  </button>
                 )}
-                <button onClick={() => setPreview(null)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+                <button onClick={() => setPreview(null)} className="text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-200/50 transition cursor-pointer">
+                  <X className="w-5 h-5" />
+                </button>
               </div>
             </div>
             {preview.source ? (
               <pre className="flex-1 overflow-auto p-4 text-xs bg-slate-50 whitespace-pre-wrap break-all">{preview.html}</pre>
             ) : (
               <div className="flex-1 bg-slate-100 overflow-auto flex justify-center p-4">
-                {/* sandbox="" => no scripts, no same-origin: stored HTML cannot execute in the app origin */}
-                <iframe title="Email preview" sandbox="" srcDoc={fillSample(preview.html)} style={{ width: preview.mobile ? 375 : '100%', height: '100%', background: '#fff', border: 0 }} />
+                <iframe
+                  title="Email preview"
+                  sandbox="allow-same-origin allow-popups"
+                  srcDoc={fillSample(
+                    (() => {
+                      const doc = preview.html || '';
+                      const respStyle = '<style>img { max-width: 100% !important; height: auto !important; }</style>';
+                      return doc.includes('<head>') ? doc.replace('<head>', `<head>${respStyle}`) : `${respStyle}${doc}`;
+                    })()
+                  )}
+                  style={{ width: preview.mobile ? 375 : '100%', height: '100%', background: '#fff', border: 0, borderRadius: preview.mobile ? 12 : 0, boxShadow: preview.mobile ? '0 10px 25px -5px rgba(0,0,0,0.1)' : 'none' }}
+                />
               </div>
             )}
           </div>

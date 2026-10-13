@@ -418,9 +418,23 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                             prospect_company_name = oe.prospect.company_name
                             break
 
-                # --- OWNERSHIP FILTERING (REMOVED) ---
-                # User requested to display all mail, so we no longer filter by ownership.
-                # All emails will be displayed.
+                tracking_info = None
+                clean_mid = message_id.strip().strip('<>').strip()
+                if clean_mid:
+                    matched_oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
+                    if matched_oe:
+                        tracking_info = {
+                            'id': matched_oe.id,
+                            'tracking_token': str(matched_oe.tracking_token),
+                            'is_opened': matched_oe.is_opened,
+                            'open_count': matched_oe.open_count,
+                            'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
+                            'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
+                            'total_seconds_spent': matched_oe.total_seconds_spent,
+                            'open_history': matched_oe.open_history,
+                            'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
+                            'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
+                        }
 
                 emails_list.append({
                     'uid': uid_str,
@@ -433,6 +447,7 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                     'is_unread': is_unread,
                     'folder': folder,
                     'prospect_company_name': prospect_company_name,
+                    'tracking': tracking_info,
                 })
 
             return Response({
@@ -458,24 +473,148 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         mail_account = MailAccount.objects.filter(id=profile.mail_account_id if profile else None, is_active=True).first()
         if not mail_account:
             return Response({'error': 'No active mail account.'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         to_address = request.data.get('to')
+        cc_address = request.data.get('cc')
+        bcc_address = request.data.get('bcc')
         subject = request.data.get('subject', '')
         body = request.data.get('body', '')
-        
-        if not to_address:
+
+        def _parse_addrs(val):
+            if not val:
+                return []
+            if isinstance(val, list):
+                raw_items = val
+            elif isinstance(val, str) and val.strip().startswith('['):
+                import json
+                try:
+                    parsed = json.loads(val)
+                    raw_items = parsed if isinstance(parsed, list) else [val]
+                except Exception:
+                    raw_items = [val]
+            else:
+                raw_items = str(val).replace(';', ',').split(',')
+
+            import email.utils
+            extracted = []
+            for item in raw_items:
+                for _, addr in email.utils.getaddresses([str(item)]):
+                    addr_clean = addr.strip()
+                    if addr_clean and addr_clean.lower() not in [e.lower() for e in extracted]:
+                        extracted.append(addr_clean)
+            return extracted
+
+        to_list = _parse_addrs(to_address)
+        cc_list = [c for c in _parse_addrs(cc_address) if c.lower() not in [t.lower() for t in to_list]]
+        bcc_list = [b for b in _parse_addrs(bcc_address) if b.lower() not in [t.lower() for t in to_list] and b.lower() not in [c.lower() for c in cc_list]]
+
+        if not to_list:
             return Response({'error': 'To address is required.'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
+        # Optional saved template / signature
+        template_id = request.data.get('template_id') or None
+        signature_id = request.data.get('signature_id') or None
+        composed = None
+        if template_id or signature_id:
+            from accounts.template_utils import build_email_content, ComposeError
+            try:
+                composed = build_email_content(
+                    user, mail_account, None, to_list + cc_list, subject, body,
+                    template_id=template_id, signature_id=signature_id,
+                    body_edited=str(request.data.get('body_edited', 'true')).lower() != 'false',
+                )
+                subject = composed['subject'] or subject
+                body = composed['text_body']
+            except (ComposeError, ValueError) as exc:
+                return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        effective_signature = mail_account.default_signature if (mail_account.default_signature and mail_account.default_signature.strip() != "''") else ''
+        if composed and composed['has_signature']:
+            effective_signature = composed['signature_text']
+        elif not effective_signature and mail_account:
+            effective_signature = f"--\n{mail_account.display_name or mail_account.email_address}\n{mail_account.email_address}"
+
+        full_body = body
+        if effective_signature:
+            full_body += f"\n\n{effective_signature}"
+
         from email.message import EmailMessage
+        from email.utils import make_msgid
+        import html
+
+        email_domain = mail_account.email_address.split('@')[-1] if '@' in mail_account.email_address else 'local'
         msg = EmailMessage()
         msg['Subject'] = subject
         msg['From'] = f"{mail_account.display_name} <{mail_account.email_address}>" if mail_account.display_name else mail_account.email_address
-        msg['To'] = to_address
-        msg.set_content(body)
-        
+        msg['To'] = ', '.join(to_list)
+        if cc_list:
+            msg['Cc'] = ', '.join(cc_list)
+        if bcc_list:
+            msg['Bcc'] = ', '.join(bcc_list)
+        import uuid
+        from django.conf import settings
+        from django.utils import timezone
+        tracking_token = uuid.uuid4()
+        tracking_url = f"{settings.EMAIL_TRACKING_BASE_URL}/api/email-tracking/{tracking_token}/"
+
+        msg['Message-ID'] = make_msgid(domain=email_domain)
+        msg.set_content(full_body)
+
+        # HTML alternative
+        html_body = html.escape(body).replace('\n', '<br>')
+        html_signature = ""
+        if composed and composed['has_signature']:
+            html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
+        elif mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
+            sig_safe = html.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
+            html_signature = f"\n<div>\n{sig_safe}\n</div>\n"
+        elif mail_account:
+            s_name = mail_account.display_name or mail_account.email_address
+            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(s_name)}</strong><br>{html.escape(mail_account.email_address)}</div>\n"
+
+        if composed and composed['has_template'] and composed['html_body']:
+            main_html = composed['html_body']
+        else:
+            main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
+
+        html_content = f"""<html><body>
+{main_html}<br>{html_signature}
+<img src="{tracking_url}" width="1" height="1" alt="" style="display:none;width:1px;height:1px;border:0;">
+</body></html>"""
+
+        from accounts.template_utils import convert_base64_images_to_cid
+        html_content, inline_images = convert_base64_images_to_cid(html_content, domain=email_domain)
+        msg.add_alternative(html_content, subtype='html')
+
+        if inline_images:
+            html_part = next((p for p in msg.iter_parts() if p.get_content_type() == 'text/html'), None)
+            if html_part:
+                for cid, subtype, img_bytes in inline_images:
+                    html_part.add_related(img_bytes, maintype='image', subtype=subtype, cid=f'<{cid}>')
+
+        # Handle Attachments
+        files = request.FILES.getlist('attachments')
+        total_size = sum(f.size for f in files)
+        if total_size > 25 * 1024 * 1024:
+            return Response({'error': 'Total attachment size exceeds 25MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        import mimetypes
+        for f in files:
+            if f.size > 10 * 1024 * 1024:
+                return Response({'error': f'File {f.name} exceeds 10MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
+            ext = f.name.split('.')[-1].lower() if '.' in f.name else ''
+            if ext in ['exe', 'bat', 'cmd', 'js', 'ps1', 'vbs', 'scr']:
+                return Response({'error': f'File type .{ext} is not allowed.'}, status=status.HTTP_400_BAD_REQUEST)
+            mtype, _ = mimetypes.guess_type(f.name)
+            maintype, subtype = (mtype.split('/', 1)) if (mtype and '/' in mtype) else ('application', 'octet-stream')
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f.name)
+            f.seek(0)
+
         def send_smtp_and_imap():
             import time
             import imaplib
+            import smtplib
+            import utils.encryption as encryption
             try:
                 password = encryption.decrypt_password(mail_account.smtp_app_password_encrypted)
                 if mail_account.smtp_security == 'SSL':
@@ -486,28 +625,84 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 server.login(mail_account.smtp_username, password)
                 server.send_message(msg)
                 server.quit()
-                
-                try:
-                    if mail_account.imap_security == 'SSL':
-                        imap = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
-                    else:
-                        imap = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
-                        imap.starttls()
-                    imap.login(mail_account.imap_username, password)
-                    # Attempt to save to Sent folder
-                    sent_folder = '"[Gmail]/Sent Mail"' if 'gmail' in mail_account.imap_host.lower() else 'Sent'
-                    imap.append(sent_folder, '\\Seen', imaplib.Time2Internaldate(time.time()), msg.as_bytes())
-                    imap.logout()
-                except Exception as e:
-                    print(f"Background IMAP append failed: {e}")
+
+                # For Gmail accounts, Gmail SMTP automatically places sent messages into "[Gmail]/Sent Mail".
+                # Appending via IMAP creates an identical duplicate copy of the sent email in the mailbox.
+                # Only non-Gmail IMAP servers require manual appending to the Sent folder.
+                is_gmail = 'gmail' in (mail_account.imap_host or '').lower() or 'gmail' in (mail_account.smtp_host or '').lower()
+                if not is_gmail:
+                    try:
+                        if mail_account.imap_security == 'SSL':
+                            imap = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port)
+                        else:
+                            imap = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port)
+                            imap.starttls()
+                        imap.login(mail_account.imap_username, password)
+                        sent_folder = 'Sent'
+                        imap.append(sent_folder, '\\Seen', imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+                        imap.logout()
+                    except Exception as e:
+                        print(f"Background IMAP append failed: {e}")
             except Exception as e:
                 print(f"Background SMTP send failed: {e}")
 
         import threading
         t = threading.Thread(target=send_smtp_and_imap)
         t.start()
-        
-        return Response({'success': True})
+
+        # Create OutreachEmail tracking record for inbox email
+        matched_prospect = None
+        from prospects.models import OutreachEmail, Prospect, ProspectContact, OutreachEmailRecipient
+        contact = ProspectContact.objects.filter(official_email__in=[t.lower() for t in to_list]).select_related('prospect').first()
+        if contact and contact.prospect:
+            matched_prospect = contact.prospect
+        else:
+            matched_prospect = Prospect.objects.filter(official_email_address__in=[t.lower() for t in to_list]).first()
+
+        cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        sender_ip = cf_ip or (x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', ''))
+
+        outreach_email = OutreachEmail.objects.create(
+            prospect=matched_prospect,
+            created_by=user,
+            sender_mail_account=mail_account,
+            from_email=mail_account.email_address,
+            from_name=mail_account.display_name,
+            subject=subject,
+            body=body,
+            signature=effective_signature,
+            status='SENT',
+            sent_at=timezone.now(),
+            message_id=str(msg['Message-ID']),
+            tracking_token=tracking_token,
+            references=f"sender_ip:{sender_ip}"
+        )
+
+        for addr in to_list:
+            OutreachEmailRecipient.objects.create(outreach_email=outreach_email, email_address=addr, recipient_type='TO')
+        for addr in cc_list:
+            OutreachEmailRecipient.objects.create(outreach_email=outreach_email, email_address=addr, recipient_type='CC')
+        for addr in bcc_list:
+            OutreachEmailRecipient.objects.create(outreach_email=outreach_email, email_address=addr, recipient_type='BCC')
+
+        if matched_prospect:
+            from prospects.models import CommunicationActivity
+            CommunicationActivity.objects.create(
+                prospect=matched_prospect,
+                prospect_contact=contact if (contact and contact.prospect_id == matched_prospect.id) else None,
+                performed_by=user,
+                activity_type='EMAIL_SENT',
+                direction='OUTBOUND',
+                outreach_email=outreach_email,
+                notes=f"Email sent from Inbox to {', '.join(to_list)}\nSubject: {subject}\n\n{body}"
+            )
+
+        return Response({
+            'success': True,
+            'tracking_id': outreach_email.id,
+            'tracking_token': str(tracking_token),
+        })
 
     @action(detail=False, methods=['get'], url_path='fetch-email-body')
     def fetch_email_body(self, request):
@@ -561,63 +756,194 @@ class MailAccountViewSet(viewsets.ModelViewSet):
 
             html_body = ''
             text_body = ''
-            attachments = []
+            cid_map = {}
+            parts_list = []
             import base64
+            import re
+            import mimetypes
+            import urllib.parse
+            import html as html_module
 
-            def process_attachment(part):
-                filename = part.get_filename()
-                if not filename:
-                    filename = 'unknown_attachment'
-                else:
-                    decoded_headers = email.header.decode_header(filename)
-                    filename = ''.join([str(t[0], t[1] or 'utf-8') if isinstance(t[0], bytes) else t[0] for t in decoded_headers])
-                payload = part.get_payload(decode=True)
-                if payload:
-                    b64_data = base64.b64encode(payload).decode('utf-8')
-                    attachments.append({
-                        'filename': filename,
-                        'content_type': part.get_content_type(),
-                        'data': b64_data,
-                        'size': len(payload)
-                    })
+            def get_filename(part):
+                fname = part.get_filename()
+                if not fname:
+                    fname = part.get_param('name', header='content-type')
+                if not fname:
+                    fname = part.get_param('filename', header='content-disposition')
+                if fname:
+                    try:
+                        decoded_headers = email.header.decode_header(fname)
+                        parts = []
+                        for t in decoded_headers:
+                            if isinstance(t[0], bytes):
+                                parts.append(t[0].decode(t[1] or 'utf-8', errors='ignore'))
+                            else:
+                                parts.append(str(t[0]))
+                        fname = ''.join(parts)
+                    except Exception:
+                        pass
+                return fname
 
             for part in msg_data:
                 if isinstance(part, tuple):
                     msg = email.message_from_bytes(part[1])
-                    if msg.is_multipart():
-                        for mp in msg.walk():
-                            content_type = mp.get_content_type()
-                            disposition = str(mp.get('Content-Disposition', ''))
-                            if 'attachment' in disposition or mp.get_filename():
-                                process_attachment(mp)
-                                continue
-                            payload = mp.get_payload(decode=True)
-                            if payload is None:
-                                continue
+                    for mp in msg.walk():
+                        if mp.is_multipart():
+                            continue
+
+                        content_type = mp.get_content_type()
+                        payload = mp.get_payload(decode=True)
+                        if payload is None:
+                            continue
+
+                        disposition = str(mp.get('Content-Disposition') or '')
+                        cid = mp.get('Content-ID')
+                        filename = get_filename(mp)
+
+                        # Capture main HTML or text body
+                        if content_type == 'text/html' and not html_body and 'attachment' not in disposition.lower():
                             charset = mp.get_content_charset() or 'utf-8'
-                            decoded = payload.decode(charset, errors='ignore')
-                            if content_type == 'text/html' and not html_body:
-                                html_body = decoded
-                            elif content_type == 'text/plain' and not text_body:
-                                text_body = decoded
-                    else:
-                        disposition = str(msg.get('Content-Disposition', ''))
-                        if 'attachment' in disposition or msg.get_filename():
-                            process_attachment(msg)
+                            html_body = payload.decode(charset, errors='ignore')
+                        elif content_type == 'text/plain' and not text_body and 'attachment' not in disposition.lower():
+                            charset = mp.get_content_charset() or 'utf-8'
+                            text_body = payload.decode(charset, errors='ignore')
                         else:
-                            payload = msg.get_payload(decode=True)
-                            if payload:
-                                charset = msg.get_content_charset() or 'utf-8'
-                                decoded = payload.decode(charset, errors='ignore')
-                                if msg.get_content_type() == 'text/html':
-                                    html_body = decoded
-                                else:
-                                    text_body = decoded
+                            parts_list.append({
+                                'mp': mp,
+                                'content_type': content_type,
+                                'disposition': disposition,
+                                'cid': cid,
+                                'filename': filename,
+                                'payload': payload
+                            })
+
+            # Build CID map for inline parts
+            for item in parts_list:
+                cid = item['cid']
+                ct = item['content_type']
+                payload = item['payload']
+                fname = item['filename']
+                if cid:
+                    clean_cid = cid.strip('<>').strip()
+                    b64_data = base64.b64encode(payload).decode('utf-8')
+                    data_uri = f"data:{ct};base64,{b64_data}"
+                    for key in [
+                        clean_cid,
+                        cid.strip(),
+                        f"<{clean_cid}>",
+                        urllib.parse.quote(clean_cid),
+                        urllib.parse.unquote(clean_cid),
+                        html_module.escape(clean_cid),
+                        html_module.unescape(clean_cid)
+                    ]:
+                        if key:
+                            cid_map[key] = data_uri
+                    if fname:
+                        cid_map[fname] = data_uri
+
+            # Replace any CID references in html_body with base64 data URIs
+            orig_html = html_body
+            if html_body and cid_map:
+                for cid_key, data_uri in cid_map.items():
+                    # Replace src="cid:..." or src='cid:...'
+                    html_body = re.sub(
+                        rf'(?i)src\s*=\s*(["\'])cid:{re.escape(cid_key)}\1',
+                        lambda m, u=data_uri: f'src="{u}"',
+                        html_body
+                    )
+                    # Replace bare cid: references (e.g. background, CSS url, src without quotes)
+                    html_body = re.sub(
+                        rf'(?i)cid:{re.escape(cid_key)}',
+                        lambda m, u=data_uri: u,
+                        html_body
+                    )
+
+            # Determine downloadable attachments
+            attachments = []
+            for item in parts_list:
+                cid = item['cid']
+                clean_cid = cid.strip('<>').strip() if cid else ''
+                disp = item['disposition']
+                fname = item['filename']
+                ct = item['content_type']
+                payload = item['payload']
+
+                # Check if this part was used as an inline CID image in the HTML body
+                is_inline_cid_used = bool(
+                    clean_cid and orig_html and (
+                        clean_cid in orig_html or 
+                        (cid and cid.strip() in orig_html)
+                    )
+                )
+
+                is_att = False
+                if 'attachment' in disp.lower():
+                    is_att = True
+                elif is_inline_cid_used and 'attachment' not in disp.lower():
+                    # Part is an inline image rendered directly in HTML body
+                    is_att = False
+                elif fname:
+                    is_att = True
+                elif not ct.startswith('text/') and not is_inline_cid_used:
+                    is_att = True
+
+                if is_att:
+                    if not fname:
+                        ext = mimetypes.guess_extension(ct) or ''
+                        fname = f"attachment_{len(attachments)+1}{ext}"
+                    attachments.append({
+                        'filename': fname,
+                        'content_type': ct,
+                        'data': base64.b64encode(payload).decode('utf-8'),
+                        'size': len(payload)
+                    })
+
+            if html_body:
+                from accounts.template_utils import ensure_responsive_images
+                html_body = ensure_responsive_images(html_body)
+                # Strip email tracking pixels before returning to client to prevent sender self-tracking
+                html_body = re.sub(r'<img[^>]*?email-tracking[^>]*?>', '', html_body, flags=re.IGNORECASE)
+
+            tracking_info = None
+            clean_mid = ''
+            if msg_data:
+                for item in msg_data:
+                    if isinstance(item, tuple) and len(item) > 1:
+                        try:
+                            p_hdr = email.message_from_bytes(item[1])
+                            clean_mid = (p_hdr.get('Message-ID') or '').strip().strip('<>').strip()
+                            if clean_mid:
+                                break
+                        except Exception:
+                            pass
+
+            token_match = re.search(r'email-tracking/([a-f0-9\-]{36})', orig_html or '')
+            matched_oe = None
+            from prospects.models import OutreachEmail
+            if token_match:
+                matched_oe = OutreachEmail.objects.filter(tracking_token=token_match.group(1)).first()
+            if not matched_oe and clean_mid:
+                matched_oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
+
+            if matched_oe:
+                tracking_info = {
+                    'id': matched_oe.id,
+                    'tracking_token': str(matched_oe.tracking_token),
+                    'is_opened': matched_oe.is_opened,
+                    'open_count': matched_oe.open_count,
+                    'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
+                    'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
+                    'total_seconds_spent': matched_oe.total_seconds_spent,
+                    'open_history': matched_oe.open_history,
+                    'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
+                    'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
+                }
 
             return Response({
                 'html_body': html_body,
                 'text_body': text_body,
                 'attachments': attachments,
+                'tracking': tracking_info,
             }, status=status.HTTP_200_OK)
 
         except Exception as e:

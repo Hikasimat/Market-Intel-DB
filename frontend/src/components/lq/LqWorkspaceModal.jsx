@@ -9,10 +9,14 @@ import {
   ChevronUp,
   TrendingUp,
   Clock,
-  Shield,
   ArrowLeft,
   X,
-  Building2
+  Building2,
+  BarChart2,
+  Eye,
+  Activity,
+  Zap,
+  RefreshCw
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncImap } from '../../features/outreach/outreachSlice';
@@ -96,6 +100,10 @@ export default function LqWorkspaceModal({
   const [attachmentError, setAttachmentError] = useState('');
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [senderMailStatus, setSenderMailStatus] = useState(null);
+  const [showTrackingModal, setShowTrackingModal] = useState(false);
+  const [liveTrackingData, setLiveTrackingData] = useState(null);
+  const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
+  const [isSimulatingOpen, setIsSimulatingOpen] = useState(false);
 
   // Call Outcome State
   const [callStatus, setCallStatus] = useState('Connected');
@@ -284,6 +292,77 @@ export default function LqWorkspaceModal({
   }, [selectedContactId]);
   const isEmailSent = ['Sent', 'Waiting for Response', 'Received Response'].includes(emailProgress);
   const sentEmailData = outreachLogs.find(log => log.activity_type === 'EMAIL_SENT')?.outreach_email_detail;
+
+  const handleOpenTrackingModal = async () => {
+    setShowTrackingModal(true);
+    if (sentEmailData?.id) {
+      setIsRefreshingTracking(true);
+      try {
+        const res = await api.get(`/outreach/emails/${sentEmailData.id}/tracking-stats/`);
+        setLiveTrackingData(res.data);
+      } catch (err) {
+        console.error("Failed to load tracking stats", err);
+        setLiveTrackingData(sentEmailData);
+      } finally {
+        setIsRefreshingTracking(false);
+      }
+    } else {
+      setLiveTrackingData(sentEmailData || null);
+    }
+  };
+
+  const handleRefreshTracking = async () => {
+    if (!sentEmailData?.id) return;
+    setIsRefreshingTracking(true);
+    try {
+      await fetchOutreachLogs();
+      const res = await api.get(`/outreach/emails/${sentEmailData.id}/tracking-stats/`);
+      setLiveTrackingData(res.data);
+      toast.success("Tracking stats refreshed!");
+    } catch (err) {
+      console.error("Failed to refresh tracking", err);
+      toast.error("Could not refresh tracking stats");
+    } finally {
+      setIsRefreshingTracking(false);
+    }
+  };
+
+  const handleSimulateOpen = async () => {
+    if (!sentEmailData?.id) return;
+    setIsSimulatingOpen(true);
+    try {
+      const res = await api.post(`/outreach/emails/${sentEmailData.id}/simulate-open/`);
+      if (res.data?.data) {
+        setLiveTrackingData(res.data.data);
+      }
+      await fetchOutreachLogs();
+      toast.success("Test open ping recorded!");
+    } catch (err) {
+      console.error("Failed to simulate open", err);
+      toast.error("Could not record test open");
+    } finally {
+      setIsSimulatingOpen(false);
+    }
+  };
+
+  const formatTrackingDateTime = (dtStr) => {
+    if (!dtStr) return '—';
+    try {
+      const d = new Date(dtStr);
+      return d.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true
+      });
+    } catch {
+      return dtStr;
+    }
+  };
+
+  const activeEmailTracking = liveTrackingData || sentEmailData;
 
   const toggleToRecipient = (email) => {
     if (toEmails.includes(email)) setToEmails(toEmails.filter(e => e !== email));
@@ -918,13 +997,18 @@ const handleAddCustomRecipient = (e) => {
                             <h4 className="text-sm font-extrabold text-white">{prospect.company_name}</h4>
                             {/* Email open tracking indicator */}
                             {isEmailSent && (
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase border ${
-                                sentEmailData?.is_opened
-                                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
-                                  : 'bg-slate-700 text-slate-300 border-slate-600'
-                              }`}>
-                                {sentEmailData?.is_opened ? '👁 Viewed' : 'Not Viewed'}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenTrackingModal()}
+                                className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold uppercase border flex items-center gap-1 cursor-pointer transition hover:scale-105 ${
+                                  sentEmailData?.is_opened
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                                    : 'bg-slate-700 text-slate-300 border-slate-600'
+                                }`}
+                                title="Click to view detailed email tracking analytics"
+                              >
+                                {sentEmailData?.is_opened ? `👁 Viewed${(sentEmailData?.open_count || 1) > 1 ? ` (${sentEmailData.open_count}x)` : ''}` : 'Not Viewed'}
+                              </button>
                             )}
                           </div>
                           <p className="text-xs text-slate-300 mt-0.5">{isEmailSent ? '' : 'Send introductory email to enable call outcomes.'}</p>
@@ -936,6 +1020,18 @@ const handleAddCustomRecipient = (e) => {
                             <button key={st} disabled={true} className={`px-2.5 py-1 rounded-lg font-bold transition cursor-not-allowed ${emailProgress === st ? 'bg-indigo-600 text-white' : 'text-slate-400 opacity-70'}`}>{st}</button>
                           ))}
                         </div>
+                        {/* EMAIL TRACK BUTTON ON HEADER */}
+                        {isEmailSent && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenTrackingModal()}
+                            className="px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs rounded-xl transition flex items-center gap-1.5 border border-indigo-400/40 shadow-sm cursor-pointer"
+                            title="Open advanced email tracking analytics"
+                          >
+                            <BarChart2 className="w-3.5 h-3.5 text-indigo-200" />
+                            <span>Email Track</span>
+                          </button>
+                        )}
                         {(emailProgress === 'Sent' || emailProgress === 'Waiting for Response') && (
                           <button
                             type="button"
@@ -1501,6 +1597,228 @@ const handleAddCustomRecipient = (e) => {
             Done / Close Workspace
           </button>
         </div>
+
+        {/* Email Tracking Modal Pop-up */}
+        {showTrackingModal && (
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-200">
+              {/* Modal Header */}
+              <div className="bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 p-5 text-white flex items-center justify-between border-b border-indigo-900/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 flex items-center justify-center font-bold shadow-inner">
+                    <BarChart2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-extrabold tracking-tight text-white">Email Tracking & Engagement Analytics</h3>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
+                        activeEmailTracking?.is_opened
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${activeEmailTracking?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                        {activeEmailTracking?.is_opened ? `Viewed (${activeEmailTracking?.open_count || 1}x)` : 'Awaiting Open'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 mt-0.5 truncate max-w-md">
+                      {prospect.company_name} &bull; <span className="text-indigo-200 font-semibold">{activeEmailTracking?.subject || 'Introductory Email'}</span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowTrackingModal(false)}
+                  className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Modal Body - Scrollable */}
+              <div className="p-6 space-y-6 overflow-y-auto flex-1 text-slate-700 text-xs">
+                {/* 4 KPI Metrics */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* Total Opens */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Total Opens</span>
+                      <Eye className="w-3.5 h-3.5 text-indigo-600" />
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-2xl font-black text-slate-900 tracking-tight">
+                        {activeEmailTracking?.open_count || (activeEmailTracking?.is_opened ? 1 : 0)}
+                      </span>
+                      <span className="text-[10px] text-slate-400 ml-1">times</span>
+                    </div>
+                    <span className={`text-[10px] font-bold mt-1 ${
+                      (activeEmailTracking?.open_count || 0) > 1 ? 'text-indigo-600' : activeEmailTracking?.is_opened ? 'text-emerald-600' : 'text-slate-400'
+                    }`}>
+                      {(activeEmailTracking?.open_count || 0) > 2 ? '🔥 Highly Engaged' : activeEmailTracking?.is_opened ? 'Opened & Seen' : 'Not opened yet'}
+                    </span>
+                  </div>
+
+                  {/* Time Spent */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Time Spent</span>
+                      <Clock className="w-3.5 h-3.5 text-violet-600" />
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-2xl font-black text-slate-900 tracking-tight">
+                        {activeEmailTracking?.estimated_read_time_formatted || (activeEmailTracking?.total_seconds_spent ? `${activeEmailTracking.total_seconds_spent}s` : '0s')}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-bold text-violet-600 mt-1">
+                      {activeEmailTracking?.reading_engagement || (activeEmailTracking?.is_opened ? 'Read in Detail' : 'No Reading Time')}
+                    </span>
+                  </div>
+
+                  {/* First Opened */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider">First Opened</span>
+                      <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-xs font-bold text-slate-900 line-clamp-2">
+                        {formatTrackingDateTime(activeEmailTracking?.first_opened_at || activeEmailTracking?.opened_at)}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1">Initial Read</span>
+                  </div>
+
+                  {/* Last Opened */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Most Recent</span>
+                      <Activity className="w-3.5 h-3.5 text-sky-600" />
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-xs font-bold text-slate-900 line-clamp-2">
+                        {formatTrackingDateTime(activeEmailTracking?.last_opened_at || activeEmailTracking?.opened_at)}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1">Latest Open</span>
+                  </div>
+                </div>
+
+                {/* Engagement Level Progress Card */}
+                <div className="p-4 bg-gradient-to-br from-indigo-50/60 to-slate-50 border border-indigo-100/80 rounded-2xl space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-extrabold text-slate-900 uppercase tracking-wider">Reading & Engagement Level</span>
+                    <span className="text-xs font-extrabold text-indigo-700">
+                      {activeEmailTracking?.reading_engagement || (activeEmailTracking?.is_opened ? 'Read in Detail' : 'Unopened')}
+                    </span>
+                  </div>
+                  {/* Visual meter */}
+                  <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden flex">
+                    <div className={`h-full transition-all duration-500 ${
+                      !activeEmailTracking?.is_opened ? 'w-0' :
+                      (activeEmailTracking?.open_count >= 3 || (activeEmailTracking?.total_seconds_spent || 0) >= 60) ? 'w-full bg-gradient-to-r from-indigo-500 to-emerald-500' :
+                      (activeEmailTracking?.open_count >= 2 || (activeEmailTracking?.total_seconds_spent || 0) >= 15) ? 'w-2/3 bg-indigo-600' :
+                      'w-1/3 bg-amber-500'
+                    }`} />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-semibold pt-0.5">
+                    <span>Skimmed (&lt;10s)</span>
+                    <span>Read in Detail (10s - 45s)</span>
+                    <span>Deeply Engaged (1m+)</span>
+                  </div>
+                </div>
+
+                {/* Detailed Open Event History */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                      Open History & Device Timeline
+                    </h4>
+                    <span className="text-[11px] text-slate-400">
+                      {activeEmailTracking?.open_history?.length || 0} event{activeEmailTracking?.open_history?.length === 1 ? '' : 's'} recorded
+                    </span>
+                  </div>
+
+                  {activeEmailTracking?.open_history && activeEmailTracking.open_history.length > 0 ? (
+                    <div className="divide-y divide-slate-100 border border-slate-200 rounded-2xl overflow-hidden bg-white max-h-48 overflow-y-auto">
+                      {[...activeEmailTracking.open_history].reverse().map((ev, idx) => (
+                        <div key={ev.id || idx} className="p-3 flex items-center justify-between gap-3 hover:bg-slate-50/80 transition text-[11px]">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-7 h-7 rounded-xl bg-indigo-50 border border-indigo-200/60 text-indigo-700 flex items-center justify-center font-extrabold text-xs shrink-0">
+                              #{ev.id || activeEmailTracking.open_history.length - idx}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-extrabold text-slate-800 flex items-center gap-1.5 truncate">
+                                <span>{ev.client || 'Mail Client'}</span>
+                                <span className="px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded text-[9px] font-semibold border border-slate-200 shrink-0">
+                                  {ev.device || 'Desktop'}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                <span>{formatTrackingDateTime(ev.timestamp)}</span>
+                                {ev.ip && <span>&bull; IP: {ev.ip}</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 font-extrabold rounded-md text-[10px] border border-emerald-200/60 block">
+                              +{ev.dwell_seconds || 15}s read
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : activeEmailTracking?.is_opened ? (
+                    <div className="p-4 border border-slate-200 rounded-2xl bg-slate-50 text-center space-y-1">
+                      <p className="text-xs font-bold text-slate-700">Email was opened on {formatTrackingDateTime(activeEmailTracking?.opened_at)}</p>
+                      <p className="text-[11px] text-slate-400">Timestamps and device details are recorded for each open.</p>
+                    </div>
+                  ) : (
+                    <div className="p-6 border border-dashed border-slate-200 rounded-2xl bg-slate-50/60 text-center space-y-2">
+                      <Mail className="w-8 h-8 text-slate-300 mx-auto" />
+                      <p className="text-xs font-extrabold text-slate-700">No Open Events Recorded Yet</p>
+                      <p className="text-[11px] text-slate-400 max-w-sm mx-auto">
+                        When the recipient opens this email, the opening timestamp, device, and reading duration will appear here.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSimulateOpen}
+                    disabled={isSimulatingOpen || !sentEmailData?.id}
+                    className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-extrabold text-xs rounded-xl border border-indigo-200/80 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                    title="Simulate recipient opening the email (test live tracking)"
+                  >
+                    <Zap className={`w-3.5 h-3.5 ${isSimulatingOpen ? 'animate-bounce text-indigo-600' : 'text-indigo-500'}`} />
+                    <span>{isSimulatingOpen ? 'Recording...' : '⚡ Test Open Ping'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRefreshTracking}
+                    disabled={isRefreshingTracking || !sentEmailData?.id}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-700 font-extrabold text-xs rounded-xl border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? 'animate-spin text-slate-500' : 'text-slate-400'}`} />
+                    <span>{isRefreshingTracking ? 'Refreshing...' : 'Refresh'}</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowTrackingModal(false)}
+                  className="px-5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

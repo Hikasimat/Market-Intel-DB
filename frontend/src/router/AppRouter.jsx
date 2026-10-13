@@ -54,7 +54,7 @@ const AppRouter = () => {
 
   useEffect(() => {
     const fetchUser = async () => {
-      if (isAuthenticated && !user && accessToken) {
+      if (isAuthenticated && !user) {
         try {
           const response = await api.get('/auth/me/');
           dispatch(loginSuccess({ access: accessToken, refresh: refreshToken, user: response.data }));

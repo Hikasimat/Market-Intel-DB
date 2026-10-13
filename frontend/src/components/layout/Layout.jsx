@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
+import { toast } from 'react-toastify';
 import SearchableSelect from '../common/SearchableSelect';
 import { LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, Building2 } from 'lucide-react';
 import { logout, loginSuccess } from '../../features/auth/authSlice';
@@ -23,8 +24,9 @@ const Layout = () => {
       const res = await api.get('/auth/me/');
       dispatch(loginSuccess({ access: accessToken, refresh: refreshToken, user: res.data }));
       setIsSettingsOpen(false);
+      toast.success('Timezone updated successfully.');
     } catch(err) {
-      alert('Failed to update timezone');
+      toast.error('Failed to update timezone.');
     }
   };
 

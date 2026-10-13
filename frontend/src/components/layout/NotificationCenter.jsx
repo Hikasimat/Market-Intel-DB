@@ -44,12 +44,14 @@ export default function NotificationCenter() {
   // ─── Reminder logic (unchanged) ─────────────────────────────────────────
 
   useEffect(() => {
+    if (!user) return;
     fetchReminders();
     const intervalId = setInterval(fetchReminders, REMINDER_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user]);
 
   const fetchReminders = async () => {
+    if (!userRef.current) return;
     try {
       const [cbRes, mRes] = await Promise.all([
         api.get('/reminders/pending/'),
@@ -248,14 +250,13 @@ export default function NotificationCenter() {
   };
 
   useEffect(() => {
-    // Only start mail polling for LQ users (inbox is an LQ feature)
-    if (user?.role !== 'LQ') return;
+    // Only start mail polling for authenticated LQ users
+    if (!user || user.role !== 'LQ') return;
 
-    // Run immediately on mount, then every 60 seconds
     checkNewMail();
     const intervalId = setInterval(checkNewMail, NEW_MAIL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [user?.role, checkNewMail]);
+  }, [user, checkNewMail]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 

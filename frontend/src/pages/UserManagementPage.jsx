@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { toast } from 'react-toastify';
 import { fetchUsers, deleteUser } from '../features/users/userSlice';
 import UserForm from '../components/users/UserForm';
 import { Users, Plus, Edit2, Trash2, Eye } from 'lucide-react';
@@ -50,9 +51,12 @@ const UserManagementPage = () => {
     setIsFormOpen(true);
   };
 
-  const handleDelete = (id) => {
-    if (window.confirm('Are you sure you want to delete this user?')) {
-      dispatch(deleteUser(id));
+  const handleDelete = async (id) => {
+    try {
+      await dispatch(deleteUser(id)).unwrap();
+      toast.success('User deleted successfully.');
+    } catch (err) {
+      toast.error('Failed to delete user.');
     }
   };
 

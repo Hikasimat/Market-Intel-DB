@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
+import { toast } from 'react-toastify';
 import { fetchProspectById, clearSelectedProspect } from '../features/prospects/prospectSlice';
 import CorporateStructureTree from '../components/prospects/CorporateStructureTree';
 import ShareholderStructureTree from '../components/prospects/ShareholderStructureTree';
@@ -24,9 +25,10 @@ const ProspectDetailPage = () => {
         email_address: email
       });
       dispatch(fetchProspectById(id));
+      toast.success('Email verification initiated.');
     } catch (err) {
       console.error('Failed to verify email:', err);
-      alert('Failed to verify email. Please try again.');
+      toast.error('Failed to verify email. Please try again.');
     } finally {
       setVerifyingEmail(null);
     }

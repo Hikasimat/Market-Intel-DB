@@ -497,6 +497,30 @@ class OutreachEmailRecipientSerializer(serializers.ModelSerializer):
 class OutreachEmailSerializer(serializers.ModelSerializer):
     recipients = OutreachEmailRecipientSerializer(many=True, read_only=True)
     attachments = EmailAttachmentSerializer(many=True, read_only=True)
+    estimated_read_time_formatted = serializers.SerializerMethodField()
+    reading_engagement = serializers.SerializerMethodField()
+
+    def get_estimated_read_time_formatted(self, obj):
+        seconds = obj.total_seconds_spent or 0
+        if not obj.is_opened and seconds == 0:
+            return "0s"
+        if seconds < 60:
+            return f"{seconds}s"
+        mins = seconds // 60
+        secs = seconds % 60
+        return f"{mins}m {secs}s" if secs else f"{mins}m"
+
+    def get_reading_engagement(self, obj):
+        if not obj.is_opened:
+            return "Not Viewed"
+        secs = obj.total_seconds_spent or 0
+        opens = obj.open_count or 1
+        if opens >= 3 or secs >= 60:
+            return "Deeply Engaged"
+        elif secs >= 15 or opens >= 2:
+            return "Read in Detail"
+        else:
+            return "Quick Skim"
 
     class Meta:
         model = OutreachEmail
@@ -504,9 +528,16 @@ class OutreachEmailSerializer(serializers.ModelSerializer):
             'id', 'prospect', 'created_by', 'sender_mail_account', 'from_email', 'from_name',
             'subject', 'body', 'signature', 'status', 'sent_at', 'message_id', 'thread_id',
             'in_reply_to', 'references', 'created_at', 'updated_at', 'recipients', 'attachments',
-            'is_opened', 'opened_at'
+            'is_opened', 'opened_at', 'tracking_token', 'open_count', 'first_opened_at',
+            'last_opened_at', 'total_seconds_spent', 'open_history',
+            'estimated_read_time_formatted', 'reading_engagement'
         ]
-        read_only_fields = ['id', 'created_by', 'sender_mail_account', 'status', 'sent_at', 'message_id', 'thread_id', 'in_reply_to', 'references', 'created_at', 'updated_at', 'is_opened', 'opened_at']
+        read_only_fields = [
+            'id', 'created_by', 'sender_mail_account', 'status', 'sent_at', 'message_id',
+            'thread_id', 'in_reply_to', 'references', 'created_at', 'updated_at', 'is_opened',
+            'opened_at', 'tracking_token', 'open_count', 'first_opened_at', 'last_opened_at',
+            'total_seconds_spent', 'open_history'
+        ]
 
 class CallActivitySerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()

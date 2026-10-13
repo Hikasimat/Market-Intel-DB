@@ -2,77 +2,114 @@
 # Root .gitignore — MarketIntel
 # ============================================================
 
-# Python
+# Python bytecode & compiled files
 __pycache__/
 *.py[cod]
+*$py.class
 *.pyo
 *.pyd
 *.pdb
-
-# Databases & local SQLite test DBs
-*.sqlite3
-*.sqlite
-*.db
-db.sqlite3
-backend/settings_*test*.py
-backend/settings_local*.py
 
 # Virtual environments
 .venv/
 venv/
 env/
+ENV/
 backend/.venv/
 backend/venv/
 backend/env/
 
-# Environment secrets — NEVER commit
+# Environment secrets & credentials — NEVER commit
 .env
 .env.*
 !.env.example
 backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
 frontend/.env.local
 frontend/.env.production.local
 frontend/.env.development.local
+service-account*.json
+credentials*.json
 
-# Django generated & media
+# Cloudflare Tunnel & SSL Certificates
+.cloudflared/
+*.pem
+*.key
+*.crt
+*.pfx
+cert.pem
+tunnel-*.json
+
+# Databases & local SQLite DBs
+*.sqlite3
+*.sqlite
+*.db
+db.sqlite3
+backend/db.sqlite3
+backend/test_*.sqlite3
+test_*.db
+backend/settings_*test*.py
+backend/settings_local*.py
+
+# Django generated static & user media
 staticfiles/
+backend/staticfiles/
 media/
 backend/media/
 uploads/
+backend/uploads/
 backend/attachments/
+attachments/
 
-# Testing & coverage
+# Testing, typing & coverage
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 .coverage
 htmlcov/
+.tox/
+.nox/
 
-# Node
+# Frontend, Node & Bundlers
 node_modules/
 frontend/node_modules/
 dist/
 build/
 frontend/dist/
 frontend/dist-ssr/
+frontend/.vite/
+.vite/
 .eslintcache
-
-# Vercel
 .vercel/
 
-# Logs
+# Logs & temporary files
 *.log
+backend/*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+scratch/
+*.tmp
+*.temp
 
-# IDEs
+# IDEs & Editors
 .vscode/
 .idea/
+*.sublime-workspace
+*.sublime-project
 
-# OS
+# Operating System files
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 *.swp
 *.swo
 *~
-

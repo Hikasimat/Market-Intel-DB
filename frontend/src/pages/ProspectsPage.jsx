@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { toast } from 'react-toastify';
 import { fetchProspects, deleteProspect } from '../features/prospects/prospectSlice';
 import { fetchMarketEvents } from '../features/marketEvents/marketEventSlice';
 import ProspectForm from '../components/prospects/ProspectForm';
@@ -78,9 +79,12 @@ const ProspectsPage = () => {
     setIsFormOpen(true);
   };
 
-  const handleDelete = (id) => {
-    if (window.confirm('Are you sure you want to delete this prospect?')) {
-      dispatch(deleteProspect(id));
+  const handleDelete = async (id) => {
+    try {
+      await dispatch(deleteProspect(id)).unwrap();
+      toast.success('Prospect deleted successfully.');
+    } catch (err) {
+      toast.error('Failed to delete prospect.');
     }
   };
 

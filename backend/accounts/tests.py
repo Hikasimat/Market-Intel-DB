@@ -149,3 +149,34 @@ class AccountsTestCase(APITestCase):
         url = '/api/accounts/users/'
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_send_email_action_with_template_and_attachments(self):
+        """Test send-email endpoint with template, Cc, Bcc, and file attachments."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from accounts.models import EmailTemplate
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.lq_user)
+        tpl = EmailTemplate.objects.create(
+            name='Inbox Test Template',
+            subject='Welcome to our company',
+            html='<p>Hello, this is a test template.</p>',
+            owner=self.lq_user
+        )
+
+        dummy_file = SimpleUploadedFile("test_doc.pdf", b"%PDF-1.4 test content", content_type="application/pdf")
+        
+        with patch('threading.Thread') as mock_thread:
+            response = self.client.post('/api/auth/mail-account/send-email/', {
+                'to': 'recipient@example.com',
+                'cc': 'cc_recipient@example.com',
+                'bcc': 'bcc_recipient@example.com',
+                'subject': 'Custom Subject',
+                'body': 'Hello, this is edited body.',
+                'template_id': str(tpl.id),
+                'attachments': [dummy_file]
+            }, format='multipart')
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data.get('success'), True)
+            self.assertTrue(mock_thread.called)

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'react-toastify';
 import { Calendar, Search, Plus, MapPin, Eye, Edit2, Trash2 } from 'lucide-react';
 import { fetchMarketEvents, deleteMarketEvent, setSearch, setPage } from '../features/marketEvents/marketEventSlice';
 import MarketEventForm from '../components/marketEvents/MarketEventForm';
@@ -66,9 +67,12 @@ const MarketEventsPage = () => {
   const handleDelete = async (id, e) => {
     if (!canMutate) return;
     e.stopPropagation();
-    if (window.confirm("Delete this market event?\n\nAssociated event participation links will also be removed.")) {
-      await dispatch(deleteMarketEvent(id));
+    try {
+      await dispatch(deleteMarketEvent(id)).unwrap();
       dispatch(fetchMarketEvents({ search }));
+      toast.success('Market event deleted successfully.');
+    } catch (err) {
+      toast.error('Failed to delete market event.');
     }
   };
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Calendar as CalendarIcon, Clock, ChevronRight, Activity, Users, UserCircle, CheckCircle, Mail, PhoneCall, X } from 'lucide-react';
+import { toast } from 'react-toastify';
 import api from '../services/api';
 import SearchableSelect from '../components/common/SearchableSelect';
 const ManagerAuditPage = () => {
@@ -20,7 +21,7 @@ const ManagerAuditPage = () => {
 
   const handleReverifySubmit = async () => {
     if (!selectedAuditRecord || reverifyFields.length === 0) {
-      alert('Please select at least one field to re-verify.');
+      toast.warning('Please select at least one field to re-verify.');
       return;
     }
     setIsSubmitting(true);
@@ -29,13 +30,13 @@ const ManagerAuditPage = () => {
         highlighted_fields: reverifyFields,
         manager_notes: reverifyNotes
       });
-      alert('Audit Report sent to PRE user for correction.');
+      toast.success('Audit Report sent to PRE user for correction.');
       setSelectedAuditRecord(null);
       setReverifyFields([]);
       setReverifyNotes('');
     } catch (err) {
       console.error(err);
-      alert('Failed to send re-verify request.');
+      toast.error('Failed to send re-verify request.');
     } finally {
       setIsSubmitting(false);
     }

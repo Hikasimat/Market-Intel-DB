@@ -2,7 +2,7 @@ import uuid
 from django.utils import timezone
 from rest_framework.decorators import action, api_view
 from accounts.permissions import IsPRE, IsLQ, IsPREOrLQ, IsManagerOrSuperuser
-from rest_framework import viewsets, filters, status
+from rest_framework import viewsets, filters, status, permissions
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
@@ -910,22 +910,55 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     serializer_class = OutreachEmailSerializer
 
     def get_permissions(self):
-        # Emails are LQ-only; Manager cannot mutate and effectively sees nothing
+        if self.action in ['tracking_stats', 'simulate_open', 'by_token']:
+            return [permissions.IsAuthenticated()]
         return [IsPREOrLQ()]
 
     def get_queryset(self):
-        if hasattr(self.request.user, 'profile') and self.request.user.profile.role != 'LQ':
+        user = self.request.user
+        if self.action in ['tracking_stats', 'simulate_open', 'by_token']:
+            return OutreachEmail.objects.all()
+        if hasattr(user, 'profile') and user.profile.role not in ['LQ', 'PRE', 'MANAGER'] and not user.is_superuser:
             return OutreachEmail.objects.none()
         queryset = OutreachEmail.objects.all().order_by('-created_at')
         prospect_id = self.request.query_params.get('prospect')
         if prospect_id:
             queryset = queryset.filter(prospect_id=prospect_id)
             
-        user = self.request.user
         if not user.is_superuser and hasattr(user, 'profile') and user.profile.role == 'LQ':
             queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             
         return queryset
+
+    @action(detail=True, methods=['get'], url_path='tracking-stats')
+    def tracking_stats(self, request, pk=None):
+        email = self.get_object()
+        serializer = self.get_serializer(email)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='simulate-open')
+    def simulate_open(self, request, pk=None):
+        email = self.get_object()
+        record_email_open_event(email, request, simulated=True)
+        serializer = self.get_serializer(email)
+        return Response({'success': True, 'data': serializer.data})
+
+    @action(detail=False, methods=['get'], url_path='by-token')
+    def by_token(self, request):
+        token = request.query_params.get('token')
+        mid = request.query_params.get('message_id')
+        oe = None
+        if token:
+            oe = OutreachEmail.objects.filter(tracking_token=token).first()
+        elif mid:
+            clean_mid = mid.strip().strip('<>').strip()
+            if clean_mid:
+                oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
+        if not oe:
+            return Response({'error': 'Tracking data not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(oe)
+        return Response(serializer.data)
+
 
     def create(self, request, *args, **kwargs):
         if hasattr(self.request.user, 'profile') and self.request.user.profile.role != 'LQ':
@@ -1009,9 +1042,11 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             msg['Subject'] = subject
             body = composed['text_body']
 
-        effective_signature = mail_account.default_signature
+        effective_signature = mail_account.default_signature if (mail_account.default_signature and mail_account.default_signature.strip() != "''") else ''
         if composed and composed['has_signature']:
             effective_signature = composed['signature_text']
+        elif not effective_signature and mail_account:
+            effective_signature = f"--\n{mail_account.display_name or mail_account.email_address}\n{mail_account.email_address}"
 
         full_body = body
         if effective_signature:
@@ -1024,9 +1059,12 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         html_signature = ""
         if composed and composed['has_signature']:
             html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
-        elif mail_account.default_signature:
-            sig_safe = html.escape(mail_account.default_signature).replace('\n', '<br>')
+        elif mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
+            sig_safe = html.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
             html_signature = f"\n<div>\n{sig_safe}\n</div>\n"
+        elif mail_account:
+            s_name = mail_account.display_name or mail_account.email_address
+            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(s_name)}</strong><br>{html.escape(mail_account.email_address)}</div>\n"
 
         if composed and composed['has_template'] and composed['html_body']:
             main_html = composed['html_body']
@@ -1105,6 +1143,10 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
                     except Exception:
                         pass
 
+        cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        sender_ip = cf_ip or (x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', ''))
+
         # Persistence
         outreach_email = OutreachEmail.objects.create(
             prospect=prospect,
@@ -1119,7 +1161,8 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             sent_at=timezone.now(),
             message_id=msg_id,
             thread_id=msg_id,
-            tracking_token=tracking_token
+            tracking_token=tracking_token,
+            references=f"sender_ip:{sender_ip}"
         )
 
         for rcpt in recipients_data:
@@ -1190,13 +1233,99 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         except (ComposeError, ValueError) as exc:
             return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
         sig_html = composed['signature_html'] if composed['has_signature'] else ''
-        if not composed['has_signature'] and mail_account and mail_account.default_signature:
+        if not sig_html and mail_account and mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
             import html as _h
-            sig_html = _h.escape(mail_account.default_signature).replace('\n', '<br>')
+            sig_html = _h.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
+        if not sig_html and mail_account:
+            import html as _h
+            s_name = mail_account.display_name or mail_account.email_address
+            sig_html = f'<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;">--<br><strong style="color:#1e293b;">{_h.escape(s_name)}</strong><br>{_h.escape(mail_account.email_address)}</div>'
+
+        from_display = f"{mail_account.display_name} <{mail_account.email_address}>" if (mail_account and mail_account.display_name) else (mail_account.email_address if mail_account else '')
+
+        full_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * {{
+    box-sizing: border-box;
+    scrollbar-width: thin !important;
+    scrollbar-color: #cbd5e1 transparent !important;
+  }}
+  ::-webkit-scrollbar, *::-webkit-scrollbar {{
+    width: 4px !important;
+    height: 4px !important;
+  }}
+  ::-webkit-scrollbar-track, *::-webkit-scrollbar-track {{
+    background: transparent !important;
+  }}
+  ::-webkit-scrollbar-thumb, *::-webkit-scrollbar-thumb {{
+    background: #cbd5e1 !important;
+    border-radius: 9999px !important;
+  }}
+  ::-webkit-scrollbar-thumb:hover, *::-webkit-scrollbar-thumb:hover {{
+    background: #94a3b8 !important;
+  }}
+  ::-webkit-scrollbar-button, *::-webkit-scrollbar-button {{
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }}
+  ::-webkit-scrollbar-corner, *::-webkit-scrollbar-corner {{
+    background: transparent !important;
+  }}
+  body {{
+    margin: 0;
+    padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background-color: #ffffff;
+    color: #1e293b;
+    overflow-x: hidden;
+    word-break: break-word;
+  }}
+  #editable-email-body {{
+    outline: none;
+    min-height: 80px;
+    cursor: text;
+    border-radius: 6px;
+    transition: box-shadow 0.15s ease;
+  }}
+  #editable-email-body:hover {{
+    outline: 1px dashed #cbd5e1;
+    outline-offset: 4px;
+  }}
+  #editable-email-body:focus {{
+    outline: 2px solid #6366f1;
+    outline-offset: 4px;
+  }}
+  img {{
+    max-width: 100% !important;
+    height: auto !important;
+    display: inline-block;
+  }}
+  table {{
+    max-width: 100% !important;
+  }}
+</style>
+</head>
+<body>
+<div id="editable-email-body" contenteditable="true" spellcheck="false" title="Click anywhere to edit the email message">
+{composed['html_body']}
+</div>
+<div id="email-signature-block" contenteditable="false" style="user-select: none;">
+{('<br>' + sig_html) if sig_html else ''}
+</div>
+</body>
+</html>"""
+
         return Response({
             'subject': composed['subject'],
             'text_body': composed['text_body'],
-            'html': composed['html_body'] + ('<br><div>' + sig_html + '</div>' if sig_html else ''),
+            'html': full_html,
+            'from_address': from_display,
+            'signature_html': sig_html,
         })
 
     @action(detail=False, methods=['post'])
@@ -1214,27 +1343,209 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             return Response({'error': f"Error running sync_imap: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 from django.views import View
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
+
+def parse_client_and_device(ua_string):
+    ua = (ua_string or '').lower()
+    
+    # Client detection
+    if 'googleimageproxy' in ua:
+        client = 'Gmail Web (Proxy)'
+    elif 'applewebkit' in ua and ('iphone' in ua or 'ipad' in ua or 'ipod' in ua):
+        client = 'Apple Mail (iOS)'
+    elif 'macintosh' in ua and 'safari' in ua and 'chrome' not in ua:
+        client = 'Apple Mail (macOS)'
+    elif 'outlook' in ua or 'microsoft office' in ua or 'thunderbird' in ua:
+        client = 'Outlook / Desktop Client'
+    elif 'edg/' in ua or 'edge/' in ua:
+        client = 'Microsoft Edge'
+    elif 'chrome' in ua:
+        client = 'Google Chrome'
+    elif 'firefox' in ua:
+        client = 'Mozilla Firefox'
+    elif 'safari' in ua:
+        client = 'Apple Safari'
+    else:
+        client = 'Standard Mail Client'
+
+    # Device detection
+    if 'iphone' in ua or 'ipad' in ua or 'ipod' in ua or 'android' in ua or 'mobile' in ua:
+        device = 'Mobile'
+    elif 'tablet' in ua:
+        device = 'Tablet'
+    else:
+        device = 'Desktop'
+        
+    return client, device
+
+
+def record_email_open_event(email, request, simulated=False):
+    now = timezone.now()
+    now_iso = now.isoformat()
+
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    ip = x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', '127.0.0.1')
+    if simulated:
+        ip = f"{ip} (Simulated)"
+
+    ua = request.META.get('HTTP_USER_AGENT', 'Simulated Browser' if simulated else '')
+    client, device = parse_client_and_device(ua)
+    if simulated:
+        client = f"{client} (Test Ping)"
+
+    history = list(email.open_history or [])
+    session_dwell = 15
+
+    last_open_time = None
+    if history and history[-1].get('timestamp'):
+        try:
+            from dateutil.parser import parse as parse_date
+            last_open_time = parse_date(history[-1]['timestamp'])
+        except Exception:
+            pass
+
+    if last_open_time:
+        delta_seconds = int((now - last_open_time).total_seconds())
+        if 0 < delta_seconds <= 600:
+            session_dwell = min(delta_seconds, 120)
+            email.total_seconds_spent = (email.total_seconds_spent or 0) + session_dwell
+            if history:
+                history[-1]['dwell_seconds'] = (history[-1].get('dwell_seconds', 0)) + session_dwell
+        else:
+            email.total_seconds_spent = (email.total_seconds_spent or 0) + 15
+    else:
+        email.total_seconds_spent = (email.total_seconds_spent or 0) + 15
+
+    new_event = {
+        'id': len(history) + 1,
+        'type': 'OPEN',
+        'timestamp': now_iso,
+        'client': client,
+        'device': device,
+        'ip': ip,
+        'user_agent': ua[:200],
+        'dwell_seconds': session_dwell
+    }
+    history.append(new_event)
+    if len(history) > 50:
+        history = history[-50:]
+
+    email.open_history = history
+    email.open_count = (email.open_count or 0) + 1
+    email.is_opened = True
+    if not email.first_opened_at:
+        email.first_opened_at = now
+    if not email.opened_at:
+        email.opened_at = now
+    email.last_opened_at = now
+
+    email.save(update_fields=[
+        'is_opened', 'opened_at', 'open_count',
+        'first_opened_at', 'last_opened_at',
+        'total_seconds_spent', 'open_history'
+    ])
+    return email
+
+
+def record_email_click_event(email, request, dest_url):
+    now = timezone.now()
+    now_iso = now.isoformat()
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    ip = x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', '127.0.0.1')
+    ua = request.META.get('HTTP_USER_AGENT', '')
+    client, device = parse_client_and_device(ua)
+
+    history = list(email.open_history or [])
+    elapsed_seconds = 20
+    if email.last_opened_at:
+        elapsed_seconds = max(10, int((now - email.last_opened_at).total_seconds()))
+    email.total_seconds_spent = max((email.total_seconds_spent or 0), elapsed_seconds)
+
+    new_event = {
+        'id': len(history) + 1,
+        'type': 'CLICK',
+        'url': dest_url[:200],
+        'timestamp': now_iso,
+        'client': client,
+        'device': device,
+        'ip': ip,
+        'user_agent': ua[:200],
+        'dwell_seconds': elapsed_seconds
+    }
+    history.append(new_event)
+    if len(history) > 50:
+        history = history[-50:]
+
+    email.open_history = history
+    email.is_opened = True
+    email.last_opened_at = now
+    email.save(update_fields=['is_opened', 'last_opened_at', 'total_seconds_spent', 'open_history'])
+    return email
+
 
 class EmailTrackingView(View):
     def get(self, request, tracking_token, *args, **kwargs):
         # 1x1 transparent GIF base64 decoded
         PIXEL_GIF_DATA = b'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
 
+        response = HttpResponse(PIXEL_GIF_DATA, content_type='image/gif')
+        response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+        response['Pragma'] = 'no-cache'
+        response['Expires'] = '0'
+
         try:
             email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
-            if email and not email.is_opened:
-                email.is_opened = True
-                email.opened_at = timezone.now()
-                email.save(update_fields=['is_opened', 'opened_at'])
+            if email:
+                # ── SENDER SELF-OPEN FILTERING ──────────────────────────
+                # 1. Ignore if request has referer or origin from our app
+                referer = (request.META.get('HTTP_REFERER') or '').lower()
+                origin = (request.META.get('HTTP_ORIGIN') or '').lower()
+                app_hosts = ['localhost', '127.0.0.1', ':5173', ':8000', 'trycloudflare.com', 'marketintel']
+                if any(h in referer for h in app_hosts) or any(h in origin for h in app_hosts):
+                    return response
+
+                # 2. Ignore if request is from an authenticated user
+                if request.user and request.user.is_authenticated:
+                    return response
+
+                # 3. Resolve request IP
+                cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
+                x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+                remote_addr = request.META.get('REMOTE_ADDR', '')
+                req_ip = cf_ip or (x_forwarded_for.split(',')[0].strip() if x_forwarded_for else remote_addr)
+
+                if req_ip in ['127.0.0.1', '::1', 'localhost', '']:
+                    return response
+
+                # 4. Ignore if request IP matches the sender's recorded send IP (unless it's an external proxy)
+                sender_ip = ''
+                if email.references and 'sender_ip:' in email.references:
+                    sender_ip = email.references.split('sender_ip:')[-1].split(';')[0].strip()
+
+                ua = (request.META.get('HTTP_USER_AGENT') or '').lower()
+                is_proxy = 'googleimageproxy' in ua
+
+                if sender_ip and req_ip == sender_ip and not is_proxy:
+                    return response
+
+                record_email_open_event(email, request)
         except Exception:
             pass  # Fail silently to avoid leaking info or breaking the pixel
 
-        response = HttpResponse(PIXEL_GIF_DATA, content_type='image/gif')
-        response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        response['Pragma'] = 'no-cache'
-        response['Expires'] = '0'
         return response
+
+
+class EmailLinkClickTrackingView(View):
+    def get(self, request, tracking_token, *args, **kwargs):
+        dest_url = request.GET.get('url', '/')
+        try:
+            email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
+            if email:
+                record_email_click_event(email, request, dest_url)
+        except Exception:
+            pass
+        return HttpResponseRedirect(dest_url)
+
 
 @api_view(['GET'])
 def pre_dashboard_stats(request):

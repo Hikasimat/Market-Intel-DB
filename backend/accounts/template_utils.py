@@ -6,6 +6,7 @@ Helpers for LQ email templates / signatures.
 * build_email_content  - shared by the compose-preview endpoint and the real send path
                          so that the preview always equals what is sent.
 """
+import difflib
 import html as _html
 import re
 
@@ -17,7 +18,27 @@ MAX_PROJECT_BYTES = 10_000_000
 ALLOWED_PLACEHOLDERS = (
     'contact_name', 'company_name', 'sender_name', 'sender_email', 'designation', 'website',
 )
-_PLACEHOLDER_RE = re.compile(r'\{\{\s*([a-zA-Z_]+)\s*\}\}')
+_PLACEHOLDER_RE = re.compile(r'\{\{\s*([a-zA-Z0-9_\s]+)\s*\}\}')
+
+NORMALIZE_MAP = {
+    'contact_name': 'contact_name',
+    'contact': 'contact_name',
+    'recipient_name': 'contact_name',
+    'client_name': 'contact_name',
+    'company_name': 'company_name',
+    'company': 'company_name',
+    'sender_name': 'sender_name',
+    'my_name': 'sender_name',
+    'your_name': 'sender_name',
+    'sender_email': 'sender_email',
+    'my_email': 'sender_email',
+    'your_email': 'sender_email',
+    'designation': 'designation',
+    'job_title': 'designation',
+    'title': 'designation',
+    'website': 'website',
+    'company_website': 'website',
+}
 
 _TAGS = {
     'a', 'abbr', 'b', 'blockquote', 'br', 'center', 'code', 'col', 'colgroup', 'div', 'em', 'font',
@@ -58,11 +79,35 @@ def _attribute_filter(tag, attr, value):
     return value
 
 
+def ensure_responsive_images(html_str):
+    """
+    Ensure all <img> tags have max-width: 100% and height: auto so they adapt cleanly
+    to desktop, tablet, and mobile email clients without overflowing.
+    """
+    if not html_str or '<img' not in html_str.lower():
+        return html_str
+
+    def _fix_img(match):
+        tag = match.group(0)
+        style_match = re.search(r'style=(["\'])(.*?)\1', tag, flags=re.IGNORECASE)
+        if style_match:
+            style_content = style_match.group(2)
+            if 'max-width' not in style_content.lower():
+                new_style = f"max-width: 100%; height: auto; {style_content}".strip()
+                tag = tag[:style_match.start(2)] + new_style + tag[style_match.end(2):]
+        else:
+            tag = re.sub(r'(?i)<img\b', '<img style="max-width: 100%; height: auto;"', tag, count=1)
+        return tag
+
+    return re.sub(r'(?i)<img\b[^>]*>', _fix_img, html_str)
+
+
 def sanitize_email_html(raw):
     """Return sanitized, email-safe HTML. Never trusts client-side GrapesJS output."""
     if not raw:
         return ''
-    return _clean_with_generic(raw)
+    cleaned = _clean_with_generic(raw)
+    return ensure_responsive_images(cleaned)
 
 
 def _clean_with_generic(raw):
@@ -72,7 +117,7 @@ def _clean_with_generic(raw):
     return nh3.clean(
         raw,
         tags=_TAGS,
-        clean_content_tags={'script', 'style', 'iframe', 'object', 'embed', 'noscript', 'template'},
+        clean_content_tags={'script', 'style', 'iframe', 'object', 'embed', 'noscript', 'template', 'head', 'title', 'meta'},
         attributes=attrs,
         link_rel='noopener noreferrer',
         url_schemes={'http', 'https', 'mailto', 'tel', 'data'},
@@ -95,10 +140,12 @@ def html_to_text(html_str):
 def render_placeholders(content, context, escape=True):
     """Replace whitelisted {{placeholders}}; unknown/missing -> ''. Values are HTML-escaped by default."""
     def repl(m):
-        key = m.group(1)
-        if key not in ALLOWED_PLACEHOLDERS:
+        raw_key = m.group(1).strip()
+        norm_key = raw_key.lower().replace(' ', '_')
+        canonical_key = NORMALIZE_MAP.get(norm_key, norm_key)
+        if canonical_key not in ALLOWED_PLACEHOLDERS:
             return m.group(0)
-        val = str(context.get(key) or '')
+        val = str(context.get(canonical_key) or '')
         return _html.escape(val) if escape else val
     return _PLACEHOLDER_RE.sub(repl, content or '')
 
@@ -116,6 +163,80 @@ def placeholder_context(mail_account, prospect, contact):
 
 class ComposeError(Exception):
     pass
+
+
+def update_template_html_with_body(template_html, base_text, edited_text, ctx):
+    """
+    Applies edited body text into template_html so that the template design,
+    tables, styling, headers, footers, and embedded images are fully preserved.
+    """
+    rendered_html = render_placeholders(template_html, ctx, escape=True)
+    if not edited_text or edited_text.strip() == (base_text or '').strip():
+        return rendered_html
+
+    base_lines = [l.strip() for l in (base_text or '').splitlines() if l.strip()]
+    edited_lines = [l.strip() for l in edited_text.splitlines() if l.strip()]
+
+    if not base_lines:
+        content_html = "".join(f'<p style="margin: 0 0 12px 0; color: #334155; font-size: 14px; line-height: 1.6;">{_html.escape(l)}</p>' for l in edited_lines)
+        m = re.search(r'(<td[^>]*>)(.*?)(</td>)', rendered_html, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            return rendered_html[:m.start(2)] + content_html + rendered_html[m.end(2):]
+        return rendered_html + content_html
+
+    sm = difflib.SequenceMatcher(None, base_lines, edited_lines)
+    opcodes = sm.get_opcodes()
+    has_match = any(tag == 'equal' for tag, _, _, _, _ in opcodes)
+
+    result_html = rendered_html
+    replaced_any = False
+
+    if has_match:
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == 'replace':
+                old_chunk = " ".join(base_lines[i1:i2])
+                new_chunk = "<br>".join(_html.escape(l) for l in edited_lines[j1:j2])
+                escaped_old = _html.escape(old_chunk)
+                if escaped_old in result_html:
+                    result_html = result_html.replace(escaped_old, new_chunk, 1)
+                    replaced_any = True
+                else:
+                    for old_line, new_line in zip(base_lines[i1:i2], edited_lines[j1:j2]):
+                        esc_l = _html.escape(old_line)
+                        if esc_l in result_html:
+                            result_html = result_html.replace(esc_l, _html.escape(new_line), 1)
+                            replaced_any = True
+            elif tag == 'delete':
+                for old_line in base_lines[i1:i2]:
+                    esc_l = _html.escape(old_line)
+                    if esc_l in result_html:
+                        result_html = result_html.replace(esc_l, '', 1)
+                        replaced_any = True
+            elif tag == 'insert':
+                new_chunk = "".join(f'<p style="margin: 12px 0 0 0; color: #334155; font-size: 14px; line-height: 1.6;">{_html.escape(l)}</p>' for l in edited_lines[j1:j2])
+                if i1 > 0 and i1 - 1 < len(base_lines):
+                    prev_esc = _html.escape(base_lines[i1 - 1])
+                    idx = result_html.find(prev_esc)
+                    if idx != -1:
+                        end_tag = result_html.find('</', idx)
+                        if end_tag != -1:
+                            close_tag_end = result_html.find('>', end_tag) + 1
+                            result_html = result_html[:close_tag_end] + new_chunk + result_html[close_tag_end:]
+                            replaced_any = True
+
+    if not replaced_any:
+        content_html = "".join(f'<p style="margin: 0 0 12px 0; color: #334155; font-size: 14px; line-height: 1.6;">{_html.escape(l)}</p>' for l in edited_lines)
+        m = re.search(r'(<td[^>]*>)(.*?)(</td>)', result_html, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            result_html = result_html[:m.start(2)] + content_html + result_html[m.end(2):]
+        else:
+            subbed, count = re.subn(r'<(p|h[1-6]|div)[^>]*>.*?</\1>', content_html, result_html, count=1, flags=re.DOTALL | re.IGNORECASE)
+            if count > 0:
+                result_html = subbed
+            else:
+                result_html = f'<div style="font-family: Arial, sans-serif;">{content_html}</div>'
+
+    return result_html
 
 
 def build_email_content(user, mail_account, prospect, to_emails, subject, body,
@@ -158,10 +279,16 @@ def build_email_content(user, mail_account, prospect, to_emails, subject, body,
     if template:
         if not out_subject and template.subject:
             out_subject = render_placeholders(template.subject, ctx, escape=False)
-        if not body_edited and template.html:
-            # Untouched template -> send the designed HTML (re-sanitized at send time).
+        base_text = render_placeholders(template.text or html_to_text(template.html), ctx, escape=False)
+        if not body_edited or not text_body or text_body.strip() == base_text.strip():
+            # Untouched template -> send the designed HTML
             html_body = sanitize_email_html(render_placeholders(template.html, ctx, escape=True))
-            text_body = render_placeholders(template.text or html_to_text(template.html), ctx, escape=False)
+            text_body = base_text
+        elif template.html:
+            # Body edited -> apply the edited text into the designed template HTML
+            html_body = sanitize_email_html(
+                update_template_html_with_body(template.html, base_text, text_body, ctx)
+            )
 
     if html_body is None:
         html_body = '<div style="font-family: sans-serif;">%s</div>' % _html.escape(text_body).replace('\n', '<br>')
