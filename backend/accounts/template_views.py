@@ -59,6 +59,40 @@ class _OwnedDesignViewSet(viewsets.ModelViewSet):
         obj.save()
         return Response(self.get_serializer(obj).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=False, methods=['post'], url_path='upload-image')
+    def upload_image(self, request):
+        uploaded_file = request.FILES.get('file') or request.FILES.get('image')
+        if not uploaded_file:
+            return Response({'error': 'No image file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate size (max 5 MB)
+        if uploaded_file.size > 5 * 1024 * 1024:
+            return Response({'error': 'Image file is too large (max 5 MB).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate content type
+        content_type = getattr(uploaded_file, 'content_type', '') or ''
+        allowed_types = {'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'}
+        if content_type.lower() not in allowed_types:
+            return Response({'error': 'Unsupported file type. Only JPEG, PNG, GIF, and WebP images are allowed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        import os, uuid
+        from django.conf import settings
+        from django.core.files.storage import default_storage
+
+        ext = os.path.splitext(uploaded_file.name)[1].lower() or '.png'
+        filename = f"template_images/{uuid.uuid4().hex}{ext}"
+        saved_name = default_storage.save(filename, uploaded_file)
+        url = default_storage.url(saved_name)
+
+        if not url.startswith(('http://', 'https://')):
+            base_url = getattr(settings, 'EMAIL_TRACKING_BASE_URL', '').rstrip('/')
+            if base_url and 'trycloudflare.com' not in base_url and not getattr(settings, 'DEBUG', False):
+                url = f"{base_url}{url}"
+            else:
+                url = request.build_absolute_uri(url)
+
+        return Response({'url': url, 'filename': uploaded_file.name}, status=status.HTTP_201_CREATED)
+
     def perform_destroy(self, instance):
         was_default = instance.is_default
         owner = instance.owner

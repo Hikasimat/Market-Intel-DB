@@ -1300,6 +1300,16 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     outline: 2px solid #6366f1;
     outline-offset: 4px;
   }}
+  p, h1, h2, h3, h4, h5, h6 {{
+    margin: 0;
+    padding: 0;
+  }}
+  p {{
+    margin-bottom: 3px;
+  }}
+  p:last-child {{
+    margin-bottom: 0;
+  }}
   img {{
     max-width: 100% !important;
     height: auto !important;

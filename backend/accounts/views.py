@@ -1,3 +1,5 @@
+import socket
+import logging
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, BasePermission
@@ -455,6 +457,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 'messages': emails_list,
             }, status=status.HTTP_200_OK)
 
+        except (TimeoutError, socket.timeout, OSError) as e:
+            logging.getLogger(__name__).warning("IMAP fetch_emails timed out: %s", e)
+            return Response({'error': 'Mail server connection timed out', 'messages': []}, status=status.HTTP_200_OK)
         except Exception as e:
             if isinstance(e, ValueError) and "Decryption failed" in str(e):
                 return Response({'error': str(e)}, status=status.HTTP_200_OK)
@@ -946,6 +951,9 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 'tracking': tracking_info,
             }, status=status.HTTP_200_OK)
 
+        except (TimeoutError, socket.timeout, OSError) as e:
+            logging.getLogger(__name__).warning("IMAP fetch_email_body timed out: %s", e)
+            return Response({'error': 'Mail server connection timed out'}, status=status.HTTP_200_OK)
         except Exception as e:
             if isinstance(e, ValueError) and "Decryption failed" in str(e):
                 return Response({'error': str(e)}, status=status.HTTP_200_OK)
@@ -1135,11 +1143,15 @@ class MailAccountViewSet(viewsets.ModelViewSet):
             response_data['new_messages'] = new_messages
             return Response(response_data, status=status.HTTP_200_OK)
 
+        except (TimeoutError, socket.timeout, OSError) as e:
+            import logging
+            logging.getLogger(__name__).warning("IMAP check_new_mail timed out: %s", e)
+            return Response({'error': 'Mail server connection timed out', 'new_messages': []}, status=status.HTTP_200_OK)
         except Exception as e:
             if isinstance(e, ValueError) and "Decryption failed" in str(e):
                 return Response({'error': str(e)}, status=status.HTTP_200_OK)
-            import traceback
-            traceback.print_exc()
+            import logging
+            logging.getLogger(__name__).warning("Error in check_new_mail: %s", e)
             return Response({'error': str(e)}, status=status.HTTP_200_OK)
         finally:
             if mail is not None:

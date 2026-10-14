@@ -29,7 +29,13 @@ const SettingsPage = () => {
         editing.kind === 'email' ? (
           <EmailTemplateEditor key={editing.id || 'new'} id={editing.id} onClose={close} onSaved={close} />
         ) : (
-          <SignatureTemplateEditor key={editing.id || 'new'} id={editing.id} onClose={close} onSaved={close} />
+          <SignatureTemplateEditor
+            key={`${editing.id || 'new'}_${editing.isCustom ? 'custom' : 'standard'}`}
+            id={editing.id}
+            isCustom={editing.isCustom}
+            onClose={close}
+            onSaved={close}
+          />
         )
       ) : (
         <>
@@ -48,7 +54,12 @@ const SettingsPage = () => {
           {tab === 'email' ? (
             <EmailTemplateList refreshKey={refreshKey} onCreate={() => setEditing({ kind: 'email', id: null })} onEdit={(id) => setEditing({ kind: 'email', id })} />
           ) : (
-            <SignatureTemplateList refreshKey={refreshKey} onCreate={() => setEditing({ kind: 'signature', id: null })} onEdit={(id) => setEditing({ kind: 'signature', id })} />
+            <SignatureTemplateList
+              refreshKey={refreshKey}
+              onCreate={() => setEditing({ kind: 'signature', id: null, isCustom: false })}
+              onCreateCustom={() => setEditing({ kind: 'signature', id: null, isCustom: true })}
+              onEdit={(id, isCustom) => setEditing({ kind: 'signature', id, isCustom })}
+            />
           )}
         </>
       )}

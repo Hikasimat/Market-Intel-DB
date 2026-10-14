@@ -12,6 +12,13 @@ export const designApi = {
   remove: async (kind, id) => api.delete(`${base[kind]}${id}/`),
   duplicate: async (kind, id) => (await api.post(`${base[kind]}${id}/duplicate/`)).data,
   setDefault: async (kind, id) => (await api.post(`${base[kind]}${id}/set-default/`)).data,
+  uploadImage: async (kind, file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return (await api.post(`${base[kind]}upload-image/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })).data;
+  },
 };
 
 export const composePreview = async (payload) =>

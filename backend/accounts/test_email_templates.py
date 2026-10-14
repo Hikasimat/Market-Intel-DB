@@ -114,6 +114,23 @@ class EmailTemplateApiTests(APITestCase):
         self.assertEqual(r.status_code, 201)
         self.assertIn('data:image/png;base64,ivborw0kggo=', r.data['html'].lower())
 
+    def test_upload_image_success(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.client.force_authenticate(user=self.lq1)
+        img_bytes = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4'
+        upload = SimpleUploadedFile("logo.png", img_bytes, content_type="image/png")
+        r = self.client.post(f"{self.url}upload-image/", {'file': upload}, format='multipart')
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertIn('url', r.data)
+        self.assertTrue(r.data['url'].endswith('.png'))
+
+    def test_upload_image_rejects_invalid(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.client.force_authenticate(user=self.lq1)
+        bad_file = SimpleUploadedFile("malicious.exe", b"MZ...", content_type="application/octet-stream")
+        r = self.client.post(f"{self.url}upload-image/", {'file': bad_file}, format='multipart')
+        self.assertEqual(r.status_code, 400)
+
     def test_persists_across_login(self):
         self._create(self.lq1, 'Persist')
         self.client.force_authenticate(user=None)

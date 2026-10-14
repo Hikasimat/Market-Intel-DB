@@ -70,8 +70,14 @@ def _attribute_filter(tag, attr, value):
         if attr in ('src', 'background'):
             if v.lower().startswith('data:'):
                 return v if _SAFE_DATA_IMAGE.match(v) else None
+            if v.startswith(('/', '/media/', '/static/')):
+                return v
+            if v.lower().startswith('cid:'):
+                return v
             if not v.lower().startswith(('http://', 'https://')):
                 return None
+            return v
+        if v.startswith('/'):
             return v
         if not _SAFE_URL.match(v):
             return None
@@ -103,7 +109,7 @@ def ensure_responsive_images(html_str):
 
 
 def sanitize_email_html(raw):
-    """Return sanitized, email-safe HTML. Never trusts client-side GrapesJS output."""
+    """Return sanitized, email-safe HTML. Never trusts client-side editor output."""
     if not raw:
         return ''
     cleaned = _clean_with_generic(raw)
@@ -120,7 +126,7 @@ def _clean_with_generic(raw):
         clean_content_tags={'script', 'style', 'iframe', 'object', 'embed', 'noscript', 'template', 'head', 'title', 'meta'},
         attributes=attrs,
         link_rel='noopener noreferrer',
-        url_schemes={'http', 'https', 'mailto', 'tel', 'data'},
+        url_schemes={'http', 'https', 'mailto', 'tel', 'data', 'cid'},
         attribute_filter=_attribute_filter,
         strip_comments=True,
     )
@@ -317,17 +323,22 @@ _B64_IMG_PATTERN = re.compile(
 
 def convert_base64_images_to_cid(html_str, domain='local'):
     """
-    Finds all embedded data:image/... URIs in HTML, converts them to standard inline
-    cid: references for cross-client compatibility (especially Gmail and Outlook),
+    Finds all embedded data:image/... URIs and local /media/... images in HTML,
+    converts them to standard inline cid: references for cross-client compatibility
+    (so images render flawlessly in Gmail, Outlook, Apple Mail without external host proxy issues),
     and returns (modified_html, list_of_inline_images).
     list_of_inline_images: [(cid, subtype, bytes), ...]
     """
+    import os
     import base64
     from email.utils import make_msgid
+    from django.conf import settings
+    from django.core.files.storage import default_storage
 
     inline_images = []
 
-    def repl(match):
+    # 1. Convert base64 data URIs to inline CID
+    def repl_b64(match):
         subtype = match.group('subtype').lower()
         if subtype == 'jpg':
             subtype = 'jpeg'
@@ -341,5 +352,50 @@ def convert_base64_images_to_cid(html_str, domain='local'):
         inline_images.append((cid, subtype, img_bytes))
         return f'src="cid:{cid}"'
 
-    modified_html = _B64_IMG_PATTERN.sub(repl, html_str)
+    modified_html = _B64_IMG_PATTERN.sub(repl_b64, html_str)
+
+    # 2. Convert local /media/ image URLs to inline CID attachments
+    media_img_re = re.compile(r'src\s*=\s*["\'](?P<url>[^"\']*?/media/[^"\']+)["\']', re.IGNORECASE)
+
+    def repl_media(match):
+        url = match.group('url')
+        if 'track' in url.lower():
+            return match.group(0)
+
+        rel_path = url.split('/media/')[-1].split('?')[0].split('#')[0]
+        if not rel_path:
+            return match.group(0)
+        import urllib.parse
+        rel_path = urllib.parse.unquote(rel_path)
+
+        img_bytes = None
+        try:
+            if default_storage.exists(rel_path):
+                with default_storage.open(rel_path, 'rb') as f:
+                    img_bytes = f.read()
+        except Exception:
+            pass
+
+        if not img_bytes and hasattr(settings, 'MEDIA_ROOT') and settings.MEDIA_ROOT:
+            local_path = os.path.join(settings.MEDIA_ROOT, rel_path.replace('/', os.sep))
+            if os.path.isfile(local_path):
+                try:
+                    with open(local_path, 'rb') as f:
+                        img_bytes = f.read()
+                except Exception:
+                    pass
+
+        if not img_bytes:
+            return match.group(0)
+
+        ext = os.path.splitext(rel_path)[1].lower().lstrip('.')
+        subtype = ext if ext in ('png', 'jpeg', 'jpg', 'gif', 'webp') else 'png'
+        if subtype == 'jpg':
+            subtype = 'jpeg'
+
+        cid = make_msgid(domain=domain)[1:-1]
+        inline_images.append((cid, subtype, img_bytes))
+        return f'src="cid:{cid}"'
+
+    modified_html = media_img_re.sub(repl_media, modified_html)
     return modified_html, inline_images
