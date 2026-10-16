@@ -808,8 +808,6 @@ class ProspectContactViewSet(viewsets.ModelViewSet):
 from .models import OutreachEmail, OutreachEmailRecipient, EmailAttachment, CallActivity, CommunicationActivity, ProspectContact
 from .serializers import OutreachEmailSerializer, CallActivitySerializer, CommunicationActivitySerializer
 from django.utils import timezone
-from accounts.models import MailAccount
-import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid
 import utils.encryption as encryption
@@ -965,12 +963,14 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Only LQ users can send emails.")
         user = request.user
-        mail_account = MailAccount.objects.filter(id=user.profile.mail_account_id, is_active=True).first()
-        if not mail_account:
-            return Response({'error': 'No active mail account found for the current user.'}, status=status.HTTP_400_BAD_REQUEST)
+        from accounts.models import GoogleMailCredentials
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
 
-        if mail_account.smtp_status != 'VERIFIED':
-            return Response({'error': 'Sender SMTP account is not verified.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not google_creds:
+            return Response({'error': 'Google Mail connection not found. Please connect your Google account to send emails.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        sender_email = google_creds.email
+        sender_display_name = user.get_full_name() or user.username
 
         prospect_id = request.data.get('prospect')
         subject = request.data.get('subject')
@@ -981,8 +981,8 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         from email.utils import formatdate
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = f"{mail_account.display_name} <{mail_account.email_address}>"
-        msg['Reply-To'] = mail_account.email_address
+        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
+        msg['Reply-To'] = sender_email
         msg['Date'] = formatdate(localtime=True)
 
         to_emails = []
@@ -1013,7 +1013,8 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         if cc_emails: msg['Cc'] = ', '.join(cc_emails)
         if bcc_emails: msg['Bcc'] = ', '.join(bcc_emails)
 
-        msg_id = make_msgid(domain=mail_account.email_address.split('@')[-1] if '@' in mail_account.email_address else 'local')
+        sender_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
+        msg_id = make_msgid(domain=sender_domain)
         msg['Message-ID'] = msg_id
 
         # Email open tracking
@@ -1031,7 +1032,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             from accounts.template_utils import build_email_content, ComposeError
             try:
                 composed = build_email_content(
-                    user, mail_account, prospect, to_emails + cc_emails, subject, body,
+                    user, None, prospect, to_emails + cc_emails, subject, body,
                     template_id=template_id, signature_id=signature_id,
                     body_edited=str(request.data.get('body_edited', 'true')).lower() != 'false',
                 )
@@ -1042,11 +1043,11 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             msg['Subject'] = subject
             body = composed['text_body']
 
-        effective_signature = mail_account.default_signature if (mail_account.default_signature and mail_account.default_signature.strip() != "''") else ''
+        effective_signature = ''
         if composed and composed['has_signature']:
             effective_signature = composed['signature_text']
-        elif not effective_signature and mail_account:
-            effective_signature = f"--\n{mail_account.display_name or mail_account.email_address}\n{mail_account.email_address}"
+        else:
+            effective_signature = f"--\n{sender_display_name}\n{sender_email}"
 
         full_body = body
         if effective_signature:
@@ -1059,12 +1060,8 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         html_signature = ""
         if composed and composed['has_signature']:
             html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
-        elif mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
-            sig_safe = html.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
-            html_signature = f"\n<div>\n{sig_safe}\n</div>\n"
-        elif mail_account:
-            s_name = mail_account.display_name or mail_account.email_address
-            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(s_name)}</strong><br>{html.escape(mail_account.email_address)}</div>\n"
+        else:
+            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(sender_display_name)}</strong><br>{html.escape(sender_email)}</div>\n"
 
         if composed and composed['has_template'] and composed['html_body']:
             main_html = composed['html_body']
@@ -1079,7 +1076,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         # Convert embedded Base64 images to inline MIME CID attachments for cross-client
         # rendering (major clients like Gmail and Outlook block or print raw data:image URIs)
         from accounts.template_utils import convert_base64_images_to_cid
-        email_domain = mail_account.email_address.split('@')[-1] if '@' in mail_account.email_address else 'local'
+        email_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
         html_content, inline_images = convert_base64_images_to_cid(html_content, domain=email_domain)
         msg.add_alternative(html_content, subtype='html')
 
@@ -1104,45 +1101,6 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             msg.add_attachment(f.read(), maintype='application', subtype='octet-stream', filename=f.name)
             f.seek(0)
 
-        # Send via SMTP in background
-        def send_smtp():
-            import smtplib
-            import utils.encryption as encryption
-            
-            _SMTP_TIMEOUT = 30
-            server = None
-            try:
-                password = encryption.decrypt_password(mail_account.smtp_app_password_encrypted)
-                if mail_account.smtp_security == 'SSL':
-                    server = smtplib.SMTP_SSL(mail_account.smtp_host, mail_account.smtp_port, timeout=_SMTP_TIMEOUT)
-                else:
-                    server = smtplib.SMTP(mail_account.smtp_host, mail_account.smtp_port, timeout=_SMTP_TIMEOUT)
-                    server.starttls()
-                server.login(mail_account.smtp_username, password)
-                server.send_message(msg)
-            except smtplib.SMTPRecipientsRefused as e:
-                for rcpt_email, (code, msg_bytes) in e.recipients.items():
-                    if code >= 500:
-                        verification = EmailVerification.objects.filter(prospect=prospect, email_address=rcpt_email).first()
-                        if verification:
-                            verification.verification_status = 'INVALID'
-                            verification.reason = f'Permanent SMTP failure: {code} {msg_bytes.decode("utf-8", errors="ignore")}'
-                            verification.save()
-
-                            lq = prospect.lead_qualification
-                            lq.pre_task_status = LeadQualification.PreTaskStatus.ISSUE_SENT_TO_PRE
-                            lq.issue_category = 'Email Verification'
-                            lq.issue_details = f"Email could not be delivered to {rcpt_email}. Verification updated to Invalid."
-                            lq.save()
-            except Exception as e:
-                print(f"Background SMTP send failed: {e}")
-            finally:
-                if server is not None:
-                    try:
-                        server.quit()
-                    except Exception:
-                        pass
-
         cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
         sender_ip = cf_ip or (x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', ''))
@@ -1151,9 +1109,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         outreach_email = OutreachEmail.objects.create(
             prospect=prospect,
             created_by=user,
-            sender_mail_account=mail_account,
-            from_email=mail_account.email_address,
-            from_name=mail_account.display_name,
+            sender_mail_account=None,
+            from_email=sender_email,
+            from_name=sender_display_name,
             subject=subject,
             body=full_body,
             signature=effective_signature,
@@ -1204,9 +1162,24 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             prospect.lead_qualification.email_status = 'Waiting for Response'
             prospect.lead_qualification.save()
 
-        # Start the background SMTP send
+        def send_via_gmail():
+            try:
+                from accounts.oauth_services import GmailOAuthService
+                res = GmailOAuthService.send_message(google_creds, msg.as_bytes())
+                if res and res.get('id'):
+                    fields = ['status']
+                    outreach_email.status = 'WAITING FOR RESPONSE'
+                    if res.get('threadId'):
+                        outreach_email.thread_id = res['threadId']
+                        fields.append('thread_id')
+                    outreach_email.save(update_fields=fields)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error("Background Gmail outreach send failed: %s", e)
+
+        # Start the background send (Gmail OAuth)
         import threading
-        t = threading.Thread(target=send_smtp)
+        t = threading.Thread(target=send_via_gmail)
         t.start()
 
         serializer = self.get_serializer(outreach_email)
@@ -1219,12 +1192,14 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Only LQ users can preview emails.")
         from accounts.template_utils import build_email_content, ComposeError
-        mail_account = MailAccount.objects.filter(id=request.user.profile.mail_account_id, is_active=True).first()
+        user = request.user
+        from accounts.models import GoogleMailCredentials
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
         prospect = Prospect.objects.filter(id=request.data.get('prospect')).first()
         to_emails = request.data.get('to_emails') or []
         try:
             composed = build_email_content(
-                request.user, mail_account, prospect, list(to_emails),
+                request.user, None, prospect, list(to_emails),
                 request.data.get('subject') or '', request.data.get('body') or '',
                 template_id=request.data.get('template_id') or None,
                 signature_id=request.data.get('signature_id') or None,
@@ -1233,15 +1208,10 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         except (ComposeError, ValueError) as exc:
             return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
         sig_html = composed['signature_html'] if composed['has_signature'] else ''
-        if not sig_html and mail_account and mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
-            import html as _h
-            sig_html = _h.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
-        if not sig_html and mail_account:
-            import html as _h
-            s_name = mail_account.display_name or mail_account.email_address
-            sig_html = f'<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;">--<br><strong style="color:#1e293b;">{_h.escape(s_name)}</strong><br>{_h.escape(mail_account.email_address)}</div>'
 
-        from_display = f"{mail_account.display_name} <{mail_account.email_address}>" if (mail_account and mail_account.display_name) else (mail_account.email_address if mail_account else '')
+        sender_email = google_creds.email if google_creds else user.email
+        sender_display_name = (user.get_full_name() or user.username) if google_creds else user.username
+        from_display = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
 
         full_html = f"""<!DOCTYPE html>
 <html>
@@ -1348,9 +1318,13 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
         try:
             call_command('sync_imap')
-            return Response({'message': 'IMAP Sync completed successfully.'}, status=status.HTTP_200_OK)
+            return Response({'message': 'Email sync completed successfully.'}, status=status.HTTP_200_OK)
         except Exception as e:
-            return Response({'error': f"Error running sync_imap: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': f"Error running email sync: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'], url_path='sync-gmail')
+    def sync_gmail(self, request):
+        return self.sync_imap(request)
 
 from django.views import View
 from django.http import HttpResponse, HttpResponseRedirect

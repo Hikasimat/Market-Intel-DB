@@ -267,5 +267,17 @@ MANAGER_REPORT_TIMEZONE = os.getenv('MANAGER_REPORT_TIMEZONE', TIME_ZONE)
 DATA_UPLOAD_MAX_MEMORY_SIZE = 35 * 1024 * 1024  # 35 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 30 * 1024 * 1024  # 30 MB
 
+# ── Google OAuth & Gmail Configuration ────────────────────────────────────────
+GOOGLE_OAUTH_CLIENT_ID = os.getenv('GOOGLE_OAUTH_CLIENT_ID', '').strip()
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv('GOOGLE_OAUTH_CLIENT_SECRET', '').strip()
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
+    'GOOGLE_OAUTH_REDIRECT_URI', 'http://localhost:5173/auth/google/callback'
+).strip()
+GMAIL_OAUTH_REDIRECT_URI = os.getenv(
+    'GMAIL_OAUTH_REDIRECT_URI', 'http://localhost:5173/auth/gmail/callback'
+).strip()
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').strip().rstrip('/')
+
+
 
 

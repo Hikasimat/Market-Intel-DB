@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Mail, Send, AlertTriangle, RefreshCw, ChevronLeft, Loader2, Paperclip, 
-  Building2, Reply, Edit3, X, Download, BarChart2, Eye, Activity, Zap, TrendingUp, Clock 
+  Building2, Reply, Edit3, X, Download, BarChart2, Eye, Activity, Zap, TrendingUp, Clock,
+  Star, FileText, Trash2, MailOpen, ShieldAlert, Undo2, Save, Search
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useDispatch, useSelector } from 'react-redux';
@@ -23,11 +24,19 @@ import {
   setEmailBody,
   resetMailboxCache,
 } from '../services/cache/inboxCacheService';
+import {
+  broadcastMailEvent,
+  subscribeMailEvents,
+  notifyMailSent,
+} from '../services/mailSyncService';
 
 const FOLDERS = [
   { id: 'INBOX', label: 'Inbox', icon: Mail },
-  { id: '"[Gmail]/Sent Mail"', label: 'Sent', icon: Send },
-  { id: '"[Gmail]/Spam"', label: 'Spam', icon: AlertTriangle },
+  { id: 'STARRED', label: 'Starred', icon: Star },
+  { id: 'SENT', label: 'Sent', icon: Send },
+  { id: 'DRAFT', label: 'Drafts', icon: FileText },
+  { id: 'SPAM', label: 'Spam', icon: AlertTriangle },
+  { id: 'TRASH', label: 'Trash', icon: Trash2 },
 ];
 
 const InboxPage = () => {
@@ -40,7 +49,8 @@ const InboxPage = () => {
   const [emailBody, setEmailBodyState] = useState({ html_body: '', text_body: '', attachments: [] });
 
   const [showCompose, setShowCompose] = useState(false);
-  const [composeData, setComposeData] = useState({ to: '', cc: '', bcc: '', subject: '', body: '' });
+  const [composeData, setComposeData] = useState({ to: '', cc: '', bcc: '', subject: '', body: '', draft_id: null, thread_id: null });
+  const [savingDraft, setSavingDraft] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
   const sendingEmailRef = useRef(false);
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
@@ -49,6 +59,9 @@ const InboxPage = () => {
   const [showCc, setShowCc] = useState(false);
   const [showBcc, setShowBcc] = useState(false);
   const [senderMailStatus, setSenderMailStatus] = useState(null);
+  const [gmailStatus, setGmailStatus] = useState({ is_connected: false, email: '' });
+  const [connectingGmail, setConnectingGmail] = useState(false);
+  const [disconnectingGmail, setDisconnectingGmail] = useState(false);
   const fileInputRef = useRef(null);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -59,15 +72,73 @@ const InboxPage = () => {
   const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
   const [isSimulatingOpen, setIsSimulatingOpen] = useState(false);
 
-  useEffect(() => {
-    api.get('/auth/mail-account/')
-      .then(res => {
-        if (res.data && res.data.length > 0) {
-          setSenderMailStatus(res.data[0]);
-        }
-      })
-      .catch(err => console.error('Failed to fetch mail account', err));
+  const fetchGmailStatus = useCallback(async () => {
+    try {
+      const res = await api.get('/auth/google/gmail/status/');
+      setGmailStatus(res.data);
+    } catch (err) {
+      console.error('Failed to fetch Gmail status', err);
+    }
   }, []);
+
+  const fetchMailAccount = useCallback(async () => {
+    try {
+      const res = await api.get('/auth/mail-account/');
+      if (res.data && res.data.length > 0) {
+        setSenderMailStatus(res.data[0]);
+      }
+    } catch (err) {
+      console.error('Failed to fetch mail account', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMailAccount();
+    fetchGmailStatus();
+
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get('gmail_connected')) {
+      toast.success('Gmail mailbox connected successfully!');
+      window.history.replaceState({}, '', window.location.pathname);
+      fetchGmailStatus();
+      fetchMailAccount();
+    } else if (searchParams.get('gmail_error')) {
+      toast.error(`Gmail connection error: ${decodeURIComponent(searchParams.get('gmail_error'))}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [fetchGmailStatus, fetchMailAccount]);
+
+  const handleConnectGmail = async () => {
+    setConnectingGmail(true);
+    try {
+      const res = await api.get('/auth/google/gmail/url/');
+      if (res.data?.url) {
+        window.location.href = res.data.url;
+      } else {
+        toast.error('Failed to retrieve Gmail authorization URL.');
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to start Gmail connection.');
+    } finally {
+      setConnectingGmail(false);
+    }
+  };
+
+  const handleDisconnectGmail = async () => {
+    if (!window.confirm('Are you sure you want to disconnect your Gmail mailbox?')) return;
+    setDisconnectingGmail(true);
+    try {
+      await api.post('/auth/google/gmail/disconnect/');
+      toast.success('Gmail disconnected successfully.');
+      setGmailStatus({ is_connected: false, email: '' });
+      fetchMailAccount();
+      loadFolder(activeFolder, true);
+    } catch (err) {
+      toast.error('Failed to disconnect Gmail.');
+    } finally {
+      setDisconnectingGmail(false);
+    }
+  };
 
   const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
@@ -102,7 +173,7 @@ const InboxPage = () => {
   };
 
   const handleCompose = () => {
-    setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '' });
+    setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '', draft_id: null, thread_id: null });
     setAttachments([]);
     setAttachmentError('');
     setShowCc(false);
@@ -119,7 +190,9 @@ const InboxPage = () => {
       cc: '',
       bcc: '',
       subject: selectedEmail.subject?.startsWith('Re:') ? selectedEmail.subject : `Re: ${selectedEmail.subject || ''}`,
-      body: `\n\n\n--- Original Message ---\nFrom: ${selectedEmail.from}\nDate: ${selectedEmail.date}\nSubject: ${selectedEmail.subject}\n`
+      body: `\n\n\n--- Original Message ---\nFrom: ${selectedEmail.from}\nDate: ${selectedEmail.date}\nSubject: ${selectedEmail.subject}\n`,
+      draft_id: null,
+      thread_id: selectedEmail.thread_id || selectedEmail.uid || selectedEmail.id,
     });
     setAttachments([]);
     setAttachmentError('');
@@ -127,6 +200,63 @@ const InboxPage = () => {
     setShowBcc(false);
     setTemplateSelection({ templateId: '', signatureId: '', baseBody: null });
     setShowCompose(true);
+  };
+
+  const handleOpenDraft = async (email) => {
+    let html = '';
+    let text = '';
+    try {
+      const res = await api.get(`/auth/mail-account/fetch-email-body/?folder=DRAFT&uid=${encodeURIComponent(email.uid || email.id)}`);
+      html = res.data?.html_body || '';
+      text = res.data?.text_body || '';
+    } catch (e) {
+      // ignore
+    }
+    const cleanBody = text || html.replace(/<[^>]*>/g, '').trim();
+    setComposeData({
+      to: email.to?.replace(/<.*>/, '').trim() || email.to || '',
+      cc: '',
+      bcc: '',
+      subject: email.subject || '',
+      body: cleanBody,
+      draft_id: email.uid || email.id,
+      thread_id: email.thread_id || null,
+    });
+    setAttachments([]);
+    setAttachmentError('');
+    setShowCc(false);
+    setShowBcc(false);
+    setTemplateSelection({ templateId: '', signatureId: '', baseBody: null });
+    setShowCompose(true);
+  };
+
+  const handleSaveDraft = async () => {
+    setSavingDraft(true);
+    const toastId = toast.loading('Saving draft to Gmail...');
+    try {
+      const res = await api.post('/auth/mail-account/save-draft/', {
+        to: composeData.to?.trim() || '',
+        cc: composeData.cc?.trim() || '',
+        bcc: composeData.bcc?.trim() || '',
+        subject: composeData.subject || '',
+        body: composeData.body || '',
+        draft_id: composeData.draft_id,
+        thread_id: composeData.thread_id,
+      });
+      toast.dismiss(toastId);
+      const newDraftId = res.data?.draft?.id || composeData.draft_id;
+      setComposeData(prev => ({ ...prev, draft_id: newDraftId }));
+      toast.success('Draft saved successfully');
+      broadcastMailEvent('DRAFT_SAVED', { folder: 'DRAFT' });
+      if (activeFolder === 'DRAFT') {
+        loadFolder('DRAFT', true);
+      }
+    } catch (err) {
+      toast.dismiss(toastId);
+      toast.error(err.response?.data?.error || 'Failed to save draft');
+    } finally {
+      setSavingDraft(false);
+    }
   };
 
   const sendEmail = async () => {
@@ -144,6 +274,8 @@ const InboxPage = () => {
       if (composeData.bcc?.trim()) formData.append('bcc', composeData.bcc.trim());
       formData.append('subject', composeData.subject || '');
       formData.append('body', composeData.body || '');
+      if (composeData.draft_id) formData.append('draft_id', composeData.draft_id);
+      if (composeData.thread_id) formData.append('thread_id', composeData.thread_id);
 
       if (templateSelection.templateId) {
         formData.append('template_id', templateSelection.templateId);
@@ -162,8 +294,13 @@ const InboxPage = () => {
       toast.success('Email sent successfully');
       setShowCompose(false);
       setAttachments([]);
-      setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '' });
+      setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '', draft_id: null, thread_id: null });
       setTemplateSelection({ templateId: '', signatureId: '', baseBody: null });
+
+      await notifyMailSent(userId, mailAccountId);
+      if (activeFolder === 'DRAFT' || activeFolder === 'SENT') {
+        loadFolder(activeFolder, true);
+      }
     } catch (err) {
       toast.dismiss(toastId);
       const errMsg = err?.response?.data?.error || 'Failed to send email';
@@ -174,65 +311,213 @@ const InboxPage = () => {
     }
   };
 
+  const handleToggleStar = async (e, email) => {
+    if (e) e.stopPropagation();
+    const newStarred = !email.is_starred;
+    const action = newStarred ? 'star' : 'unstar';
+    
+    // Optimistic update
+    const updated = emails.map(m => (m.uid === email.uid || m.id === email.id) ? { ...m, is_starred: newStarred } : m);
+    dispatch(setEmails(updated));
+    if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+      setSelectedEmail(prev => ({ ...prev, is_starred: newStarred }));
+    }
+
+    try {
+      await api.post('/auth/mail-account/modify-message/', {
+        msg_id: email.uid || email.id,
+        action,
+      });
+      toast.success(newStarred ? 'Starred' : 'Unstarred');
+    } catch (err) {
+      toast.error('Failed to update star');
+      loadFolder(activeFolder, true);
+    }
+  };
+
+  const handleToggleRead = async (e, email) => {
+    if (e) e.stopPropagation();
+    const newUnread = !email.is_unread;
+    const action = newUnread ? 'unread' : 'read';
+
+    // Optimistic update
+    const updated = emails.map(m => (m.uid === email.uid || m.id === email.id) ? { ...m, is_unread: newUnread } : m);
+    dispatch(setEmails(updated));
+    if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+      setSelectedEmail(prev => ({ ...prev, is_unread: newUnread }));
+    }
+
+    try {
+      await api.post('/auth/mail-account/modify-message/', {
+        msg_id: email.uid || email.id,
+        action,
+      });
+      toast.success(newUnread ? 'Marked as unread' : 'Marked as read');
+    } catch (err) {
+      toast.error('Failed to update read status');
+    }
+  };
+
+  const handleTrashMessage = async (email) => {
+    try {
+      await api.post('/auth/mail-account/trash-message/', {
+        msg_id: email.uid || email.id,
+      });
+      toast.success('Moved to Trash');
+      dispatch(setEmails(emails.filter(m => (m.uid || m.id) !== (email.uid || email.id))));
+      if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+        setSelectedEmail(null);
+        setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+      }
+    } catch (err) {
+      toast.error('Failed to move to Trash');
+    }
+  };
+
+  const handleUntrashMessage = async (email) => {
+    try {
+      await api.post('/auth/mail-account/untrash-message/', {
+        msg_id: email.uid || email.id,
+      });
+      toast.success('Restored from Trash to Inbox');
+      dispatch(setEmails(emails.filter(m => (m.uid || m.id) !== (email.uid || email.id))));
+      if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+        setSelectedEmail(null);
+        setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+      }
+    } catch (err) {
+      toast.error('Failed to restore message');
+    }
+  };
+
+  const handleDeleteForever = async (email) => {
+    if (!window.confirm('Are you sure you want to permanently delete this email? This cannot be undone.')) return;
+    try {
+      await api.post('/auth/mail-account/delete-message/', {
+        msg_id: email.uid || email.id,
+      });
+      toast.success('Permanently deleted');
+      dispatch(setEmails(emails.filter(m => (m.uid || m.id) !== (email.uid || email.id))));
+      if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+        setSelectedEmail(null);
+        setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+      }
+    } catch (err) {
+      toast.error('Failed to delete message');
+    }
+  };
+
+  const handleToggleSpam = async (email) => {
+    const isSpamFolder = activeFolder === 'SPAM' || activeFolder.includes('Spam') || email.is_spam;
+    const action = isSpamFolder ? 'unspam' : 'spam';
+    try {
+      await api.post('/auth/mail-account/modify-message/', {
+        msg_id: email.uid || email.id,
+        action,
+      });
+      toast.success(isSpamFolder ? 'Marked as Not Spam and moved to Inbox' : 'Reported as Spam');
+      dispatch(setEmails(emails.filter(m => (m.uid || m.id) !== (email.uid || email.id))));
+      if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
+        setSelectedEmail(null);
+        setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+      }
+    } catch (err) {
+      toast.error('Failed to update spam status');
+    }
+  };
+
   // Derived: user's mail account ID comes from user.profile via /auth/me/
-  // The backend resolves mail account from user.profile.mail_account_id
-  // We use user.id as the user-scope key for the cache
   const userId = user?.id;
-  // mailAccountId is used as part of the cache key; we don't have it directly
-  // on the Redux user object, but we use a stable placeholder since all
-  // IMAP calls are scoped by the authenticated session on the backend.
-  // If the user has multiple accounts in future, extend this.
   const mailAccountId = user?.mail_account_id || 'default';
 
   // ─── Folder fetch ─────────────────────────────────────────────────────────
 
-  /**
-   * Load messages for a folder.
-   * Normal path: IndexedDB cache → render immediately, no backend call.
-   * Cache-miss path: backend fetch → store in IndexedDB → render.
-   */
-  const loadFolder = useCallback(async (folder, bypassCache = false) => {
-    dispatch(setInboxLoading(true));
-    dispatch(setSyncError(null));
+  const loadSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const emailsRef = useRef([]);
+  const activeFolderRef = useRef(activeFolder);
+  emailsRef.current = emails;
+  activeFolderRef.current = activeFolder;
 
-    // Step 1: Try IndexedDB cache
-    if (!bypassCache && userId) {
+  const mailSignature = (list) =>
+    (list || []).map(m => `${m.uid || m.id}:${m.is_unread ? 1 : 0}${m.is_starred ? 1 : 0}`).join('|');
+
+  const loadFolder = useCallback(async (folder, bypassCache = false, search = '', silent = false) => {
+    // Never stack background polls on top of an in-flight request
+    if (silent && inFlightRef.current) return;
+
+    const seq = ++loadSeqRef.current;
+    inFlightRef.current = true;
+    const isStale = () => seq !== loadSeqRef.current || folder !== activeFolderRef.current;
+
+    if (!silent) {
+      dispatch(setSyncError(null));
+    }
+
+    // Step 1: Try IndexedDB cache (only when no active search)
+    let hasCached = false;
+    if (!bypassCache && !search && userId) {
       const cached = await getMailboxMessages(userId, mailAccountId, folder);
-      if (cached && cached.length > 0) {
+      if (cached && cached.length > 0 && !isStale()) {
         dispatch(setEmails(cached));
-        dispatch(setInboxLoading(false));
-        return; // Cache hit — no backend call
+        hasCached = true;
+        if (!silent) {
+          dispatch(setInboxLoading(false));
+        }
+        // Do NOT return! Always revalidate with server in the background (Live SWR)
       }
     }
 
-    // Step 2: Cache miss — fetch from backend
-    try {
-      const res = await api.get(
-        `/auth/mail-account/fetch-emails/?folder=${encodeURIComponent(folder)}&limit=20`
-      );
-      const { messages = [], uidvalidity = null } = res.data;
+    if (!hasCached && !silent) {
+      dispatch(setInboxLoading(true));
+    }
 
-      if (userId) {
-        // Compute highest UID from fetched messages
-        const highestUid = messages.reduce((max, m) => {
+    // Step 2: Background revalidation or explicit fetch from backend (Live SWR)
+    try {
+      const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
+      const res = await api.get(
+        `/auth/mail-account/fetch-emails/?folder=${encodeURIComponent(folder)}&limit=25${searchParam}`
+      );
+      if (isStale()) return; // a newer request / folder switch superseded this one
+
+      const { messages = [], emails: rawEmails = [], uidvalidity = null, partial = false, error = null } = res.data;
+      const finalMessages = messages.length > 0 ? messages : rawEmails;
+
+      // Incomplete or errored responses must never replace a good list
+      if (error || (partial && silent && emailsRef.current.length > 0)) return;
+
+      if (userId && !search && !partial) {
+        const highestUid = finalMessages.reduce((max, m) => {
           const uid = parseInt(m.uid, 10);
           return uid > max ? uid : max;
         }, 0);
 
-        await setMailboxMessages(userId, mailAccountId, folder, messages, uidvalidity);
+        await setMailboxMessages(userId, mailAccountId, folder, finalMessages, uidvalidity);
         if (uidvalidity !== null) {
           await setMailboxState(userId, mailAccountId, folder, uidvalidity, highestUid);
         }
       }
 
-      dispatch(setEmails(messages));
+      if (isStale()) return;
+      // Only touch the UI when something actually changed (prevents flicker)
+      if (mailSignature(finalMessages) !== mailSignature(emailsRef.current)) {
+        dispatch(setEmails(finalMessages));
+      }
     } catch (err) {
-      const message = err.response?.data?.error || 'Failed to fetch emails.';
-      toast.error(message);
-      dispatch(setSyncError(message));
-      dispatch(setEmails([]));
+      if (isStale()) return;
+      // Keep showing the existing list on transient failures
+      if (!hasCached && !silent && emailsRef.current.length === 0) {
+        const message = err.response?.data?.error || 'Failed to fetch emails.';
+        toast.error(message);
+        dispatch(setSyncError(message));
+      }
     } finally {
-      dispatch(setInboxLoading(false));
+      if (seq === loadSeqRef.current) {
+        inFlightRef.current = false;
+        if (!silent) {
+          dispatch(setInboxLoading(false));
+        }
+      }
     }
   }, [userId, mailAccountId, dispatch]);
 
@@ -241,8 +526,56 @@ const InboxPage = () => {
   useEffect(() => {
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
-    loadFolder(activeFolder);
+    dispatch(setEmails([]));
+    loadFolder(activeFolder, false, searchQuery);
   }, [activeFolder]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Live Polling: Auto-sync active folder every 8 seconds in the background ───
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible' && !searchQuery) {
+        loadFolder(activeFolder, true, '', true /* silent */);
+      }
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [activeFolder, searchQuery, loadFolder]);
+
+  // ─── Live Focus / Visibility: Sync immediately on window focus or tab visibility ───
+
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible' && !searchQuery) {
+        loadFolder(activeFolder, true, '', true /* silent */);
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [activeFolder, searchQuery, loadFolder]);
+
+  // ─── Cross-Component & Cross-Tab Live Events ──────────────────────────────
+
+  useEffect(() => {
+    const unsubscribe = subscribeMailEvents(async (event) => {
+      if (['MAIL_SENT', 'MAIL_RECEIVED', 'DRAFT_SAVED', 'MAIL_MUTATED'].includes(event?.type)) {
+        // Silently reload current active folder
+        loadFolder(activeFolder, true, searchQuery, true);
+        // If an email was sent and current folder is not SENT, reset the SENT cache so it reflects immediately when switched to
+        if (event.type === 'MAIL_SENT' && activeFolder !== 'SENT' && userId) {
+          try {
+            await resetMailboxCache(userId, mailAccountId, 'SENT');
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    });
+    return unsubscribe;
+  }, [activeFolder, searchQuery, loadFolder, userId, mailAccountId]);
 
   // ─── Folder switch ────────────────────────────────────────────────────────
 
@@ -258,7 +591,13 @@ const InboxPage = () => {
   const handleRefresh = () => {
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
-    loadFolder(activeFolder, true /* bypassCache */);
+    loadFolder(activeFolder, true /* bypassCache */, searchQuery);
+  };
+
+  const handleSearchSubmit = (e) => {
+    if (e) e.preventDefault();
+    setSelectedEmail(null);
+    loadFolder(activeFolder, true, searchQuery);
   };
 
   // ─── Open email (body cache-first) ────────────────────────────────────────
@@ -511,9 +850,47 @@ const InboxPage = () => {
             </div>
             Mail Inbox
           </h1>
-          <p className="text-slate-500 text-sm mt-1 font-medium">View emails from your configured mail account.</p>
+          <p className="text-slate-500 text-sm mt-1 font-medium">
+            {gmailStatus.is_connected
+              ? `Connected to Google Mail (${gmailStatus.email}). Tracking enabled.`
+              : senderMailStatus
+              ? `Connected to ${senderMailStatus.email_address}.`
+              : 'View emails and send tracked messages from your configured mailbox.'}
+          </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {gmailStatus.is_connected ? (
+            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-800 shadow-xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+              <span className="font-bold shrink-0">Gmail:</span>
+              <span className="truncate max-w-[140px] sm:max-w-xs">{gmailStatus.email}</span>
+              <button
+                type="button"
+                onClick={handleDisconnectGmail}
+                disabled={disconnectingGmail}
+                className="ml-1 text-[11px] font-bold text-slate-400 hover:text-rose-600 transition underline disabled:opacity-50"
+              >
+                {disconnectingGmail ? '...' : 'Disconnect'}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleConnectGmail}
+              disabled={connectingGmail}
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-700 font-bold text-sm rounded-xl transition flex items-center gap-2 border border-slate-200 shadow-xs hover:border-slate-300 disabled:opacity-50"
+              title="Connect your Google Mail account via OAuth"
+            >
+              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+              </svg>
+              <span>{connectingGmail ? 'Connecting...' : 'Connect Gmail'}</span>
+            </button>
+          )}
+
           <button onClick={handleCompose} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-xl transition flex items-center gap-2 shadow-sm">
             <Edit3 className="w-4 h-4" /> Compose
           </button>
@@ -549,41 +926,108 @@ const InboxPage = () => {
         {/* Content */}
         <div className="flex-1 flex min-w-0 bg-white overflow-hidden">
           {/* Email list */}
-          <div className={`flex flex-col border-r border-slate-100 overflow-y-auto transition-all ${selectedEmail ? 'w-72 shrink-0' : 'flex-1'}`}>
+          <div className={`flex flex-col border-r border-slate-100 overflow-y-auto transition-all ${selectedEmail ? 'w-80 shrink-0' : 'flex-1'}`}>
             <div className="p-3 border-b border-slate-100 sticky top-0 bg-white z-10 shrink-0">
-              <input 
-                type="text" 
-                placeholder="Search by company..." 
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 text-slate-800 placeholder-slate-400 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 font-medium transition-all"
-              />
+              <form onSubmit={handleSearchSubmit} className="relative flex items-center">
+                <Search className="w-4 h-4 absolute left-3 text-slate-400 pointer-events-none" />
+                <input 
+                  type="text" 
+                  placeholder="Search mail (press Enter)..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 placeholder-slate-400 rounded-xl pl-9 pr-8 py-2 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 font-medium transition-all"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      loadFolder(activeFolder, true, '');
+                    }}
+                    className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-600 rounded-md"
+                    title="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </form>
             </div>
             {loading ? (
               <div className="flex items-center justify-center h-full text-slate-400 gap-2 font-medium">
                 <Loader2 className="w-5 h-5 animate-spin" /> Loading emails...
               </div>
             ) : displayEmails.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-slate-400 font-medium">No emails found in this folder.</div>
+              !gmailStatus.is_connected && (!senderMailStatus || senderMailStatus.provider === 'GMAIL_OAUTH') ? (
+                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-4">
+                  <div className="w-14 h-14 rounded-2xl bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-600 shadow-xs">
+                    <Mail className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="font-bold text-slate-800 text-base">Connect Google Mail</h3>
+                    <p className="text-slate-500 text-xs leading-relaxed">
+                      Connect your Gmail account via Google OAuth to view your inbox, sync sent messages, and track outreach effortlessly.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleConnectGmail}
+                    disabled={connectingGmail}
+                    className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm rounded-xl transition flex items-center gap-2 shadow-sm disabled:opacity-50"
+                  >
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                      <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#ffffff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                    <span>{connectingGmail ? 'Connecting...' : 'Connect Gmail'}</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 font-medium p-6 text-center space-y-2">
+                  <Mail className="w-8 h-8 text-slate-300" />
+                  <span>No emails found in this folder.</span>
+                </div>
+              )
             ) : (
               <ul className="divide-y divide-slate-100">
                 {displayEmails.map((email) => (
                   <li
                     key={email.uid || email.id}
-                    onClick={() => openEmail(email)}
-                    className={`p-4 cursor-pointer transition ${selectedEmail?.uid === email.uid ? 'bg-sky-50 border-l-2 border-sky-500' : 'hover:bg-slate-50'}`}
+                    onClick={() => {
+                      if (activeFolder === 'DRAFT') {
+                        handleOpenDraft(email);
+                      } else {
+                        openEmail(email);
+                      }
+                    }}
+                    className={`p-3.5 cursor-pointer transition ${selectedEmail?.uid === email.uid ? 'bg-sky-50 border-l-2 border-sky-500' : 'hover:bg-slate-50'}`}
                   >
-                    <div className="flex items-baseline justify-between gap-2 mb-0.5">
-                      <span className={`text-xs truncate flex-1 ${email.is_unread ? 'font-bold text-slate-900' : 'font-medium text-slate-600'}`}>
-                        {email.prospect_company_name ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-[10px] uppercase font-bold tracking-wider mr-1.5">
-                            <Building2 className="w-3 h-3" /> {email.prospect_company_name}
-                          </span>
-                        ) : null}
-                        {activeFolder.includes('Sent') 
-                          ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}` 
-                          : email.from?.replace(/<.*>/, '').trim() || email.from}
-                      </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleStar(e, email)}
+                          className="p-0.5 text-slate-300 hover:text-amber-400 transition shrink-0"
+                          title={email.is_starred ? 'Starred' : 'Star message'}
+                        >
+                          <Star className={`w-3.5 h-3.5 ${email.is_starred ? 'fill-amber-400 text-amber-400' : ''}`} />
+                        </button>
+
+                        <span className={`text-xs truncate flex-1 ${email.is_unread ? 'font-bold text-slate-900' : 'font-medium text-slate-600'}`}>
+                          {email.prospect_company_name ? (
+                            <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-[10px] uppercase font-bold tracking-wider mr-1.5">
+                              <Building2 className="w-3 h-3" /> {email.prospect_company_name}
+                            </span>
+                          ) : null}
+                          {activeFolder === 'SENT' || activeFolder.includes('Sent') 
+                            ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}` 
+                            : activeFolder === 'DRAFT'
+                            ? `Draft: ${email.to?.replace(/<.*>/, '').trim() || '(No Recipient)'}`
+                            : email.from?.replace(/<.*>/, '').trim() || email.from}
+                        </span>
+                      </div>
+
                       <div className="flex items-center gap-1.5 shrink-0">
                         {email.tracking && (
                           <span 
@@ -601,9 +1045,17 @@ const InboxPage = () => {
                         <span className="text-[10px] text-slate-400 font-medium">{email.date?.split(' ').slice(1, 4).join(' ')}</span>
                       </div>
                     </div>
-                    <h4 className={`text-xs truncate ${email.is_unread ? 'font-bold text-slate-800' : 'font-semibold text-slate-600'}`}>
-                      {email.subject || '(No Subject)'}
-                    </h4>
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className={`text-xs truncate flex-1 ${email.is_unread ? 'font-bold text-slate-800' : 'font-semibold text-slate-600'}`}>
+                        {email.subject || '(No Subject)'}
+                      </h4>
+                      {email.is_unread && (
+                        <span className="w-2 h-2 rounded-full bg-sky-500 shrink-0" title="Unread" />
+                      )}
+                    </div>
+                    {email.snippet && (
+                      <p className="text-[11px] text-slate-400 truncate mt-0.5">{email.snippet}</p>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -650,21 +1102,117 @@ const InboxPage = () => {
                         <span>{selectedEmail.date}</span>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {(activeFolder.includes('Sent') || selectedEmail.tracking || emailBody.tracking) && (
+                    <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                      {/* Star / Unstar button */}
+                      <button
+                        type="button"
+                        onClick={(e) => handleToggleStar(e, selectedEmail)}
+                        className={`p-1.5 rounded-xl border transition cursor-pointer ${
+                          selectedEmail.is_starred
+                            ? 'bg-amber-50 border-amber-200 text-amber-500 hover:bg-amber-100'
+                            : 'bg-white border-slate-200 text-slate-400 hover:text-amber-500 hover:bg-slate-50'
+                        }`}
+                        title={selectedEmail.is_starred ? 'Starred' : 'Not starred'}
+                      >
+                        <Star className={`w-3.5 h-3.5 ${selectedEmail.is_starred ? 'fill-amber-400 text-amber-400' : ''}`} />
+                      </button>
+
+                      {/* Mark Read / Unread */}
+                      <button
+                        type="button"
+                        onClick={(e) => handleToggleRead(e, selectedEmail)}
+                        className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                        title={selectedEmail.is_unread ? 'Mark as Read' : 'Mark as Unread'}
+                      >
+                        {selectedEmail.is_unread ? <MailOpen className="w-3.5 h-3.5 text-sky-600" /> : <Mail className="w-3.5 h-3.5 text-slate-500" />}
+                      </button>
+
+                      {/* Draft actions */}
+                      {activeFolder === 'DRAFT' && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenDraft(selectedEmail)}
+                          className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition flex items-center gap-1 shadow-xs cursor-pointer"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Edit Draft</span>
+                        </button>
+                      )}
+
+                      {/* Spam toggle */}
+                      {activeFolder === 'SPAM' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSpam(selectedEmail)}
+                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                          title="Not Spam (Move to Inbox)"
+                        >
+                          <Undo2 className="w-3.5 h-3.5" />
+                          <span>Not Spam</span>
+                        </button>
+                      ) : activeFolder !== 'TRASH' && activeFolder !== 'DRAFT' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSpam(selectedEmail)}
+                          className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                          title="Report Spam"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                        </button>
+                      ) : null}
+
+                      {/* Trash / Untrash / Delete Forever */}
+                      {activeFolder === 'TRASH' ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleUntrashMessage(selectedEmail)}
+                            className="px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                            title="Restore to Inbox"
+                          >
+                            <Undo2 className="w-3.5 h-3.5" />
+                            <span>Restore</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteForever(selectedEmail)}
+                            className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                            title="Delete Forever"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleTrashMessage(selectedEmail)}
+                          className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                          title="Move to Trash"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {/* Email Tracking */}
+                      {(activeFolder.includes('Sent') || activeFolder === 'SENT' || selectedEmail.tracking || emailBody.tracking) && (
                         <button
                           type="button"
                           onClick={() => handleOpenTrackingModal()}
-                          className="px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs rounded-xl transition flex items-center gap-1.5 border border-indigo-400/40 shadow-sm cursor-pointer"
+                          className="px-2.5 py-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs rounded-xl transition flex items-center gap-1 border border-indigo-400/40 shadow-sm cursor-pointer"
                           title="Open email tracking & engagement analytics"
                         >
                           <BarChart2 className="w-3.5 h-3.5 text-indigo-200" />
-                          <span>Email Track</span>
+                          <span>Track</span>
                         </button>
                       )}
-                      <button onClick={handleReply} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 shrink-0">
-                        <Reply className="w-3.5 h-3.5" /> Reply
-                      </button>
+
+                      {/* Reply */}
+                      {activeFolder !== 'DRAFT' && (
+                        <button onClick={handleReply} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 shrink-0 cursor-pointer">
+                          <Reply className="w-3.5 h-3.5" /> Reply
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -919,16 +1467,26 @@ const InboxPage = () => {
                 <button 
                   type="button"
                   onClick={() => setShowCompose(false)} 
-                  disabled={sendingEmail}
-                  className="px-4 py-2 bg-white border border-slate-200 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-100 transition"
+                  disabled={sendingEmail || savingDraft}
+                  className="px-4 py-2 bg-white border border-slate-200 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-100 transition cursor-pointer"
                 >
                   Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveDraft}
+                  disabled={sendingEmail || savingDraft}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  title="Save Draft to Gmail"
+                >
+                  {savingDraft ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 text-slate-600" />}
+                  <span>{savingDraft ? 'Saving...' : 'Save Draft'}</span>
                 </button>
                 <button 
                   type="button"
                   onClick={sendEmail} 
-                  disabled={sendingEmail || !composeData.to?.trim()} 
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-extrabold text-xs rounded-xl shadow-xs transition flex items-center gap-2"
+                  disabled={sendingEmail || savingDraft || !composeData.to?.trim()} 
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-extrabold text-xs rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer"
                 >
                   {sendingEmail ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                   <span>{sendingEmail ? 'Sending...' : 'Send'}</span>

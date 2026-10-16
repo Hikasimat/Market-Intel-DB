@@ -6,7 +6,20 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
-from .views import UserMeView, UserViewSet, MailAccountViewSet, CookieTokenObtainPairView, CookieTokenRefreshView
+from .views import (
+    UserMeView,
+    UserViewSet,
+    MailAccountViewSet,
+    CookieTokenObtainPairView,
+    CookieTokenRefreshView,
+    GoogleOAuthURLView,
+    GoogleOAuthLoginView,
+    GoogleOAuthCallbackView,
+    GmailOAuthURLView,
+    GmailOAuthCallbackView,
+    GmailOAuthStatusView,
+    GmailOAuthDisconnectView,
+)
 from .template_views import EmailTemplateViewSet, EmailSignatureTemplateViewSet
 
 router = DefaultRouter()
@@ -62,4 +75,16 @@ urlpatterns = [
     path('refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('me/', UserMeView.as_view(), name='user_me'),
     path('logout/', LogoutView.as_view(), name='auth_logout'),
+
+    # Google OAuth 2.0 Identity Login
+    path('google/url/', GoogleOAuthURLView.as_view(), name='google_oauth_url'),
+    path('google/login/', GoogleOAuthLoginView.as_view(), name='google_oauth_login'),
+    path('google/callback/', GoogleOAuthCallbackView.as_view(), name='google_oauth_callback'),
+
+    # Separate Gmail Mailbox OAuth Authorization
+    path('google/gmail/url/', GmailOAuthURLView.as_view(), name='gmail_oauth_url'),
+    path('google/gmail/callback/', GmailOAuthCallbackView.as_view(), name='gmail_oauth_callback'),
+    path('google/gmail/status/', GmailOAuthStatusView.as_view(), name='gmail_oauth_status'),
+    path('google/gmail/disconnect/', GmailOAuthDisconnectView.as_view(), name='gmail_oauth_disconnect'),
 ]
+

@@ -33,31 +33,12 @@ export const saveMailAccount = createAsyncThunk('outreach/saveMailAccount', asyn
     }
 });
 
-export const testSmtp = createAsyncThunk('outreach/testSmtp', async (id, { rejectWithValue }) => {
-    try {
-        const response = await api.post(`/mail-account/${id}/test-smtp/`);
-        return response.data;
-    } catch (error) {
-        return rejectWithValue(error.response?.data || { error: 'Unknown Error' });
-    }
-});
-
-export const testImap = createAsyncThunk('outreach/testImap', async (id, { rejectWithValue }) => {
-    try {
-        const response = await api.post(`/mail-account/${id}/test-imap/`);
-        return response.data;
-    } catch (error) {
-        return rejectWithValue(error.response?.data || { error: 'Unknown Error' });
-    }
-});
-
 export const fetchCommunications = createAsyncThunk('outreach/fetchCommunications', async (prospectId, { rejectWithValue }) => {
     try {
         const response = await api.get(`/outreach/communications/?prospect=${prospectId}`);
-        // Handle paginated or non-paginated response
         return response.data.results || response.data;
     } catch (error) {
-        return rejectWithValue(error.response.data);
+        return rejectWithValue(error.response?.data || error.message);
     }
 });
 
@@ -83,15 +64,16 @@ export const recordCall = createAsyncThunk('outreach/recordCall', async (data, {
     }
 });
 
-
-export const syncImap = createAsyncThunk('outreach/syncImap', async (_, { rejectWithValue }) => {
+export const syncMail = createAsyncThunk('outreach/syncMail', async (_, { rejectWithValue }) => {
     try {
-        const response = await api.post('/outreach/emails/sync_imap/');
+        const response = await api.post('/outreach/emails/sync-gmail/');
         return response.data;
     } catch (error) {
-        return rejectWithValue(error.response.data);
+        return rejectWithValue(error.response?.data || { error: 'Sync failed' });
     }
 });
+export const syncGmail = syncMail;
+export const syncImap = syncMail;
 
 const outreachSlice = createSlice({
     name: 'outreach',

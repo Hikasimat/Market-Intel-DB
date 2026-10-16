@@ -6,7 +6,7 @@ import { designApi, composePreview, errorMessage } from '../../services/designAp
 /**
  * Optional template / signature selector for the existing intro-email composer.
  * It only fills the existing subject/body fields and reports the chosen ids upward;
- * sending still goes through the existing explicit "Send" button + SMTP flow.
+ * sending still goes through the existing explicit "Send" button flow.
  */
 const TemplatePicker = ({ prospect, toEmails, ccEmails, emailSubject, emailBody, setEmailSubject, setEmailBody, disabled, selection, setSelection }) => {
   const [templates, setTemplates] = useState([]);

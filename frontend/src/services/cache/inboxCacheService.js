@@ -1,7 +1,7 @@
 /**
  * inboxCacheService.js
  *
- * IndexedDB cache layer specific to IMAP mailbox data.
+ * IndexedDB cache layer specific to mailbox data.
  *
  * Stores:
  *  - mail-messages   : per-folder message metadata (keyed by userId:accountId:folder)
@@ -9,7 +9,7 @@
  *  - mail-state      : per-folder UIDVALIDITY + highest-known UID + sync timestamp
  *  - notified-emails : Set of UIDs that have already triggered a "new email" popup
  *
- * Cache identity for email bodies uses the stable IMAP UID, NOT the sequence number.
+ * Cache identity for email bodies uses the stable message UID.
  *
  * UIDVALIDITY handling:
  *   If the server reports a different UIDVALIDITY the cached messages for that
@@ -219,7 +219,7 @@ export async function setMailboxState(userId, mailAccountId, folder, uidvalidity
  * @param {string|number} userId
  * @param {string|number} mailAccountId
  * @param {string}        folder
- * @param {string}        uid     - stable IMAP UID
+ * @param {string}        uid     - stable message UID
  * @returns {Promise<{html_body:string, text_body:string}|null>}
  */
 export async function getEmailBody(userId, mailAccountId, folder, uid) {

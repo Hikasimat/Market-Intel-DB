@@ -20,12 +20,13 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
-import { fetchCommunications, sendOutreachEmail, recordCall, syncImap } from '../../features/outreach/outreachSlice';
+import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
 import { confirmReverification } from '../../features/lqPipeline/lqPipelineSlice';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
 import TemplatePicker from './TemplatePicker';
+import { notifyMailSent } from '../../services/mailSyncService';
 
 const TimeSelect = ({ value, onChange, className }) => {
   const parseTime = (val) => {
@@ -215,6 +216,27 @@ export default function LqWorkspaceModal({
         }).catch(err => console.error('Failed to fetch mail account', err));
     }
   }, [selectedLq?.id]);
+
+  // Live auto-sync for email replies while workspace modal is open
+  useEffect(() => {
+    if (!selectedLq?.id) return;
+    if (emailProgress !== 'Sent' && emailProgress !== 'Waiting for Response') return;
+
+    const interval = setInterval(async () => {
+      try {
+        await dispatch(syncMail()).unwrap();
+        await fetchOutreachLogs();
+        const res = await api.get(`/lq-pipeline/${selectedLq.id}/`);
+        if (res.data?.email_status && res.data.email_status !== emailProgress) {
+          setEmailProgress(res.data.email_status);
+        }
+      } catch (e) {
+        // Silent background check
+      }
+    }, 12000);
+
+    return () => clearInterval(interval);
+  }, [selectedLq?.id, emailProgress, dispatch]);
   
   const fetchOutreachLogs = async (contactId) => {
     try {
@@ -450,6 +472,7 @@ const handleAddCustomRecipient = (e) => {
       
       fetchOutreachLogs();
       toast.success("Email sent successfully!");
+      notifyMailSent();
     } catch (err) {
       console.error("Failed to log email", err);
       const errorMsg = err.error || err.detail || (typeof err === 'string' ? err : JSON.stringify(err));
@@ -1040,7 +1063,7 @@ const handleAddCustomRecipient = (e) => {
                               e.stopPropagation();
                               const toastId = toast.loading('Checking for replies...');
                               try {
-                                await dispatch(syncImap()).unwrap();
+                                await dispatch(syncMail()).unwrap();
                                 await fetchOutreachLogs();
                                 try {
                                   const res = await api.get(`/lq-pipeline/${selectedLq.id}/`);

@@ -1,18 +1,20 @@
 import React, { useState } from 'react';
-import { Mail, PenLine } from 'lucide-react';
+import { Mail, PenLine, Inbox } from 'lucide-react';
 import EmailTemplateList from '../components/settings/EmailTemplateList';
 import SignatureTemplateList from '../components/settings/SignatureTemplateList';
 import EmailTemplateEditor from '../components/settings/EmailTemplateEditor';
 import SignatureTemplateEditor from '../components/settings/SignatureTemplateEditor';
+import MailboxSettings from '../components/settings/MailboxSettings';
 
 const TABS = [
+  { key: 'mailbox', label: 'Mailbox & Gmail', icon: Inbox },
   { key: 'email', label: 'Email Templates', icon: Mail },
   { key: 'signature', label: 'Signatures', icon: PenLine },
 ];
 
 /** LQ-only settings (route protected by RoleRoute + backend IsLQOnly). */
 const SettingsPage = () => {
-  const [tab, setTab] = useState('email');
+  const [tab, setTab] = useState('mailbox');
   const [editing, setEditing] = useState(null); // { kind, id|null }
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -22,7 +24,7 @@ const SettingsPage = () => {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-black text-slate-800">Settings</h1>
-        <p className="text-sm text-slate-500">Design reusable email templates and signatures for your outreach.</p>
+        <p className="text-sm text-slate-500">Configure your mailbox, Google Mail integration, reusable email templates, and outreach signatures.</p>
       </div>
 
       {editing ? (
@@ -51,7 +53,9 @@ const SettingsPage = () => {
               </button>
             ))}
           </div>
-          {tab === 'email' ? (
+          {tab === 'mailbox' ? (
+            <MailboxSettings />
+          ) : tab === 'email' ? (
             <EmailTemplateList refreshKey={refreshKey} onCreate={() => setEditing({ kind: 'email', id: null })} onEdit={(id) => setEditing({ kind: 'email', id })} />
           ) : (
             <SignatureTemplateList

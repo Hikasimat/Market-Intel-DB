@@ -1,19 +1,33 @@
 import socket
 import logging
+import urllib.parse
+from datetime import timedelta
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, BasePermission
+from rest_framework.permissions import IsAuthenticated, BasePermission, AllowAny
+from rest_framework import status
+from django.shortcuts import redirect
 
 from rest_framework import viewsets
-from django.contrib.auth.models import User
-from .serializers import UserSerializer
+from django.contrib.auth.models import User, update_last_login
+from .serializers import (
+    UserSerializer,
+    EmailTokenObtainPairSerializer,
+    GoogleOAuthLoginSerializer,
+    GmailOAuthCallbackSerializer,
+)
 from .permissions import IsPRE, IsLQ as IsLQPerm
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import InvalidToken
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from django.conf import settings
 from django.utils import timezone
+
+from .oauth_services import GoogleOAuthService, GmailOAuthService
+from .models import GoogleMailCredentials
+import utils.encryption as encryption
 
 class LoginThrottle(AnonRateThrottle):
     rate = '5/minute'
@@ -39,6 +53,7 @@ def set_jwt_cookies(response, access_token, refresh_token):
 
 class CookieTokenObtainPairView(TokenObtainPairView):
     throttle_classes = [LoginThrottle]
+    serializer_class = EmailTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
@@ -81,6 +96,372 @@ class CookieTokenRefreshView(TokenRefreshView):
                 del response.data['refresh']
         return response
 
+
+class GoogleOAuthURLView(APIView):
+    """
+    Returns the Google OAuth 2.0 authorization URL for user login.
+    Signs and sets an HttpOnly oauth_state cookie to prevent CSRF.
+    """
+    throttle_classes = [LoginThrottle]
+
+    def get(self, request):
+        try:
+            url, signed_state = GoogleOAuthService.generate_login_url()
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        response = Response({"url": url, "state": signed_state}, status=status.HTTP_200_OK)
+        cookie_kwargs = {
+            'httponly': True,
+            'secure': getattr(settings, 'SESSION_COOKIE_SECURE', False),
+            'samesite': getattr(settings, 'SESSION_COOKIE_SAMESITE', 'Lax'),
+            'path': '/',
+            'max_age': GoogleOAuthService.STATE_MAX_AGE,
+        }
+        response.set_cookie('oauth_state', signed_state, **cookie_kwargs)
+        return response
+
+
+class GoogleOAuthLoginView(APIView):
+    """
+    Exchanges Google authorization code for tokens, verifies the ID token,
+    authenticates the matching existing active Django User, and issues SimpleJWT tokens.
+    Strictly enforces existing-user-only policy (never creates or provisions users).
+    """
+    throttle_classes = [LoginThrottle]
+
+    def post(self, request):
+        serializer = GoogleOAuthLoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        code = serializer.validated_data['code']
+        state = serializer.validated_data['state']
+
+        # Validate OAuth state to prevent CSRF and replay attacks
+        cookie_state = request.COOKIES.get('oauth_state')
+        if not GoogleOAuthService.verify_state(state, cookie_state):
+            response = Response(
+                {"detail": "Invalid or expired OAuth state. Please try logging in again."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            response.delete_cookie('oauth_state')
+            return response
+
+        try:
+            token_data = GoogleOAuthService.exchange_code_for_tokens(code)
+            id_token_jwt = token_data.get('id_token')
+            claims = GoogleOAuthService.verify_id_token(id_token_jwt)
+        except ValueError as e:
+            response = Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            response.delete_cookie('oauth_state')
+            return response
+
+        verified_email = claims['email']
+        user, match_status = GoogleOAuthService.find_eligible_user(verified_email)
+
+        if match_status == 'NOT_FOUND':
+            response = Response(
+                {"detail": "Your Google account is not registered. Please contact your administrator to provision an account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            response.delete_cookie('oauth_state')
+            return response
+
+        if match_status == 'INACTIVE':
+            response = Response(
+                {"detail": "This account is inactive. Please contact your administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            response.delete_cookie('oauth_state')
+            return response
+
+        if match_status == 'AMBIGUOUS':
+            response = Response(
+                {"detail": "Multiple accounts found matching this email. Please contact your administrator."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            response.delete_cookie('oauth_state')
+            return response
+
+        # Eligible existing user -> issue SimpleJWT tokens
+        if getattr(settings, 'SIMPLE_JWT', {}).get('UPDATE_LAST_LOGIN', True):
+            update_last_login(None, user)
+
+        try:
+            GmailOAuthService.store_tokens_from_login(user, token_data, verified_email)
+        except Exception:
+            pass
+
+        refresh = RefreshToken.for_user(user)
+        access = str(refresh.access_token)
+
+        response = Response({"access": access}, status=status.HTTP_200_OK)
+        set_jwt_cookies(response, access, str(refresh))
+        response.delete_cookie('oauth_state')
+        return response
+
+
+class GoogleOAuthCallbackView(APIView):
+    """
+    Handles direct backend redirects from Google (GET /api/auth/google/callback/).
+    Establishes the session via HttpOnly cookies and redirects to frontend.
+    Never exposes JWT tokens in query strings.
+    """
+    throttle_classes = [LoginThrottle]
+
+    def get(self, request):
+        error = request.query_params.get('error')
+        if error:
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote(error)}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        code = request.query_params.get('code')
+        state = request.query_params.get('state')
+
+        if not code or not state:
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote('Missing authorization code or state.')}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        cookie_state = request.COOKIES.get('oauth_state')
+        if not GoogleOAuthService.verify_state(state, cookie_state):
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote('Invalid or expired OAuth state.')}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        try:
+            token_data = GoogleOAuthService.exchange_code_for_tokens(code)
+            id_token_jwt = token_data.get('id_token')
+            claims = GoogleOAuthService.verify_id_token(id_token_jwt)
+        except ValueError as e:
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote(str(e))}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        verified_email = claims['email']
+        user, match_status = GoogleOAuthService.find_eligible_user(verified_email)
+
+        if match_status == 'NOT_FOUND':
+            msg = "Your Google account is not registered. Please contact your administrator to provision an account."
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote(msg)}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        if match_status == 'INACTIVE':
+            msg = "This account is inactive. Please contact your administrator."
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote(msg)}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        if match_status == 'AMBIGUOUS':
+            msg = "Multiple accounts found matching this email. Please contact your administrator."
+            frontend_err = f"{settings.FRONTEND_URL}/login?oauth_error={urllib.parse.quote(msg)}"
+            response = redirect(frontend_err)
+            response.delete_cookie('oauth_state')
+            return response
+
+        if getattr(settings, 'SIMPLE_JWT', {}).get('UPDATE_LAST_LOGIN', True):
+            update_last_login(None, user)
+
+        try:
+            GmailOAuthService.store_tokens_from_login(user, token_data, verified_email)
+        except Exception:
+            pass
+
+        refresh = RefreshToken.for_user(user)
+        access = str(refresh.access_token)
+
+        success_url = f"{settings.FRONTEND_URL}/login?oauth_success=1"
+        response = redirect(success_url)
+        set_jwt_cookies(response, access, str(refresh))
+        response.delete_cookie('oauth_state')
+        return response
+
+
+class GmailOAuthURLView(APIView):
+    """
+    Generates OAuth authorization URL specifically for Gmail mailbox permissions.
+    Protected: User must already be authenticated in the application.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            url, state = GmailOAuthService.generate_authorization_url(request.user.id)
+            response = Response({"url": url, "state": state}, status=status.HTTP_200_OK)
+            cookie_kwargs = {
+                'httponly': True,
+                'secure': getattr(settings, 'SESSION_COOKIE_SECURE', False),
+                'samesite': getattr(settings, 'SESSION_COOKIE_SAMESITE', 'Lax'),
+                'path': '/',
+                'max_age': GmailOAuthService.STATE_MAX_AGE,
+            }
+            response.set_cookie('gmail_oauth_state', state, **cookie_kwargs)
+            return response
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class GmailOAuthCallbackView(APIView):
+    """
+    Exchanges authorization code for Gmail access & refresh tokens.
+    Persists tokens encrypted at rest via GoogleMailCredentials.
+    Supports both POST (from frontend callback handler) and GET (direct redirect from Google).
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        serializer = GmailOAuthCallbackSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        code = serializer.validated_data['code']
+        state = serializer.validated_data['state']
+
+        if not GmailOAuthService.verify_state(state, request.user.id):
+            return Response({"detail": "Invalid or expired Gmail OAuth state."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            tokens = GmailOAuthService.exchange_code_for_tokens(code)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = tokens.get('access_token')
+        refresh_token = tokens.get('refresh_token', '')
+        expires_in = tokens.get('expires_in', 3600)
+        scope = tokens.get('scope', '')
+        id_token_jwt = tokens.get('id_token')
+
+        gmail_email = request.user.email
+        if id_token_jwt:
+            try:
+                claims = GoogleOAuthService.verify_id_token(id_token_jwt)
+                gmail_email = claims.get('email', gmail_email)
+            except Exception:
+                pass
+
+        if not access_token:
+            return Response({"detail": "Failed to receive access token from Google."}, status=status.HTTP_400_BAD_REQUEST)
+
+        creds, _ = GoogleMailCredentials.objects.get_or_create(user=request.user)
+        creds.email = gmail_email
+        creds.access_token_encrypted = encryption.encrypt_password(access_token)
+        if refresh_token:
+            creds.refresh_token_encrypted = encryption.encrypt_password(refresh_token)
+        creds.token_expiry = timezone.now() + timedelta(seconds=expires_in)
+        creds.scopes = scope
+        creds.is_active = True
+        creds.save()
+
+        response = Response({
+            "detail": "Gmail connected successfully.",
+            "email": gmail_email,
+            "scopes": scope.split() if scope else [],
+        }, status=status.HTTP_200_OK)
+        response.delete_cookie('gmail_oauth_state')
+        return response
+
+    def get(self, request):
+        error = request.query_params.get('error')
+        if error:
+            return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote(error)}")
+
+        code = request.query_params.get('code')
+        state = request.query_params.get('state')
+        if not code or not state:
+            return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote('Missing authorization code or state.')}")
+
+        user = request.user if (request.user and request.user.is_authenticated) else None
+        if not user:
+            # Decode user from signed state
+            from django.core.signing import TimestampSigner
+            signer = TimestampSigner(salt='gmail_oauth')
+            try:
+                state_data_raw = signer.unsign(state, max_age=GmailOAuthService.STATE_MAX_AGE)
+                state_data = json.loads(state_data_raw)
+                uid = state_data.get('user_id')
+                user = User.objects.get(id=uid)
+            except Exception:
+                return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote('Invalid or expired Gmail state.')}")
+        else:
+            if not GmailOAuthService.verify_state(state, user.id):
+                return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote('Invalid or expired Gmail state.')}")
+
+        try:
+            tokens = GmailOAuthService.exchange_code_for_tokens(code)
+            access_token = tokens.get('access_token')
+            refresh_token = tokens.get('refresh_token', '')
+            expires_in = tokens.get('expires_in', 3600)
+            scope = tokens.get('scope', '')
+            id_token_jwt = tokens.get('id_token')
+
+            gmail_email = user.email
+            if id_token_jwt:
+                try:
+                    claims = GoogleOAuthService.verify_id_token(id_token_jwt)
+                    gmail_email = claims.get('email', gmail_email)
+                except Exception:
+                    pass
+
+            creds, _ = GoogleMailCredentials.objects.get_or_create(user=user)
+            creds.email = gmail_email
+            creds.access_token_encrypted = encryption.encrypt_password(access_token)
+            if refresh_token:
+                creds.refresh_token_encrypted = encryption.encrypt_password(refresh_token)
+            creds.token_expiry = timezone.now() + timedelta(seconds=expires_in)
+            creds.scopes = scope
+            creds.is_active = True
+            creds.save()
+
+            response = redirect(f"{settings.FRONTEND_URL}/inbox?gmail_connected=1")
+            response.delete_cookie('gmail_oauth_state')
+            return response
+        except Exception as exc:
+            return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote(str(exc))}")
+
+
+class GmailOAuthStatusView(APIView):
+    """
+    Returns connection status and authorized email for Gmail without exposing tokens.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        if not creds:
+            return Response({"is_connected": False}, status=status.HTTP_200_OK)
+
+        return Response({
+            "is_connected": True,
+            "email": creds.email,
+            "scopes": creds.scopes.split() if creds.scopes else [],
+            "token_expiry": creds.token_expiry,
+            "updated_at": creds.updated_at,
+        }, status=status.HTTP_200_OK)
+
+
+class GmailOAuthDisconnectView(APIView):
+    """
+    Safely disconnects Gmail OAuth credentials for the current user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        GoogleMailCredentials.objects.filter(user=request.user).delete()
+        return Response({"detail": "Gmail authorization disconnected successfully."}, status=status.HTTP_200_OK)
+
+
 class IsSuperUser(BasePermission):
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_superuser)
@@ -103,10 +484,6 @@ class UserMeView(APIView):
     def get(self, request):
         user = request.user
         profile = getattr(user, 'profile', None)
-        mail_account_id = None
-        if profile and profile.mail_account_id:
-            mail_account_id = profile.mail_account_id
-
         # Include WhatsApp sessions owned by this user (for session selector).
         whatsapp_sessions = []
         try:
@@ -127,7 +504,6 @@ class UserMeView(APIView):
             'role': profile.role if profile else 'PRE',
             'timezone': profile.timezone if profile else 'UTC',
             'is_superuser': user.is_superuser,
-            'mail_account_id': mail_account_id,
             'whatsapp_sessions': whatsapp_sessions,
         })
 
@@ -247,15 +623,10 @@ class _SuperOrManager(BasePermission):
         )
 
 
-from .models import MailAccount
-from .serializers import MailAccountSerializer
 from rest_framework.decorators import action
 from rest_framework import status
-import smtplib
-import imaplib
 import email
 from email.header import decode_header
-import utils.encryption as encryption
 import re
 import time
 
@@ -263,221 +634,45 @@ class IsLQ(IsLQPerm):
     """Local alias so the rest of this module can reference IsLQ directly."""
     pass
 
-class MailAccountViewSet(viewsets.ModelViewSet):
+class GmailMailboxViewSet(viewsets.ViewSet):
+    """Gmail mailbox endpoints (read, send, drafts, labels) for the signed-in LQ user."""
+    permission_classes = [IsLQ]
 
 
     @action(detail=False, methods=['get'], url_path='fetch-emails')
     def fetch_emails(self, request):
         """
-        Fetch email metadata for the authenticated user's mail account using IMAP UIDs.
-
-        Returns a list of messages with stable UID identifiers instead of sequence numbers.
-        Also returns the mailbox UIDVALIDITY so the client can detect mailbox resets.
+        Fetch email metadata from the signed-in user's Gmail mailbox.
 
         Query params:
-            folder (str): IMAP folder name, default 'INBOX'
+            folder (str): INBOX, STARRED, SENT, DRAFT, SPAM or TRASH (default INBOX)
             limit (int): maximum messages to return (newest first), default 20
+            search (str): Gmail search query
         """
-        user = request.user
-        if not hasattr(user, 'profile'):
-            return Response({'error': 'No profile found.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        mail_account = MailAccount.objects.filter(
-            id=user.profile.mail_account_id, is_active=True
-        ).first()
-        if not mail_account:
+        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        if not google_creds:
             return Response(
-                {'error': 'No active mail account configured.'},
+                {'error': 'Gmail is not connected. Please sign in with Google or connect Gmail.', 'messages': []},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        search = request.query_params.get('search', '').strip()
         folder = request.query_params.get('folder', 'INBOX')
         limit = int(request.query_params.get('limit', 20))
 
-        mail = None
         try:
-            password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
-            if mail_account.imap_security == 'SSL':
-                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
-            else:
-                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                mail.starttls()
-
-            mail.login(mail_account.imap_username, password)
-            select_status, select_data = mail.select(folder)
-
-            if select_status != 'OK':
-                return Response(
-                    {'error': f'Failed to select folder {folder}'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            # Extract UIDVALIDITY from the SELECT response
-            uidvalidity = None
-            for item in select_data:
-                if item and isinstance(item, bytes) and b'UIDVALIDITY' in item:
-                    try:
-                        parts = item.decode().split()
-                        idx = parts.index('UIDVALIDITY')
-                        uidvalidity = int(parts[idx + 1])
-                    except (ValueError, IndexError):
-                        pass
-
-            # Use STATUS to get UIDVALIDITY if not found in SELECT response
-            if uidvalidity is None:
-                status_res, status_data = mail.status(folder, '(UIDVALIDITY)')
-                if status_res == 'OK' and status_data:
-                    try:
-                        status_str = status_data[0].decode()
-                        parts = status_str.replace(')', '').split()
-                        idx = parts.index('UIDVALIDITY')
-                        uidvalidity = int(parts[idx + 1])
-                    except (ValueError, IndexError, AttributeError):
-                        pass
-
-            # Search using UIDs instead of sequence numbers
-            uid_status, uid_data = mail.uid('SEARCH', None, 'ALL')
-            if uid_status != 'OK':
-                return Response(
-                    {'error': 'Failed to search emails'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            all_uids = uid_data[0].split()
-            # Fetch up to 1000 recent emails to allow for filtering, we will break when we hit `limit` owned emails
-            recent_uids = all_uids[-1000:]
-            recent_uids.reverse()  # newest first
-
-            emails_list = []
-            from prospects.models import OutreachEmail, ProspectContact, Prospect
-
-            for uid_bytes in recent_uids:
-                if len(emails_list) >= limit:
-                    break
-                    
-                uid_str = uid_bytes.decode()
-                # Fetch headers using UID command — PEEK avoids marking as read
-                res_status, hdr_data = mail.uid(
-                    'FETCH', uid_bytes, '(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])'
-                )
-                if res_status != 'OK':
-                    continue
-
-                subject = ''
-                from_hdr = ''
-                date_hdr = ''
-                message_id = ''
-                is_unread = True  # default; corrected from FLAGS below
-
-                for part in hdr_data:
-                    if isinstance(part, tuple):
-                        # part[0] contains FLAGS info, part[1] is the header bytes
-                        part_info = part[0].decode() if isinstance(part[0], bytes) else ''
-                        flags_str = part_info.upper()
-                        is_unread = '\\SEEN' not in flags_str
-
-                        hdr_msg = email.message_from_bytes(part[1])
-
-                        raw_subject = hdr_msg.get('Subject', '')
-                        decoded_subject = decode_header(raw_subject)
-                        subject_parts = []
-                        for s_bytes, enc in decoded_subject:
-                            if isinstance(s_bytes, bytes):
-                                subject_parts.append(s_bytes.decode(enc or 'utf-8', errors='ignore'))
-                            else:
-                                subject_parts.append(s_bytes or '')
-                        subject = ''.join(subject_parts)
-
-                        from_hdr = hdr_msg.get('From', '')
-                        to_hdr = hdr_msg.get('To', '')
-                        date_hdr = hdr_msg.get('Date', '')
-                        message_id = hdr_msg.get('Message-ID', '')
-                        in_reply_to = str(hdr_msg.get('In-Reply-To', ''))
-                        references = str(hdr_msg.get('References', ''))
-
-                # Attempt to match prospect company
-                prospect_company_name = None
-                email_pattern = re.compile(r'[\w\.-]+@[\w\.-]+\.\w+')
-                all_emails = email_pattern.findall(from_hdr) + email_pattern.findall(to_hdr)
-                if all_emails:
-                    from prospects.models import ProspectContact, Prospect
-                    contact = ProspectContact.objects.filter(official_email__in=all_emails).select_related('prospect').first()
-                    if contact and contact.prospect:
-                        prospect_company_name = contact.prospect.company_name
-                    else:
-                        prospect = Prospect.objects.filter(official_email_address__in=all_emails).first()
-                        if prospect:
-                            prospect_company_name = prospect.company_name
-
-                if not prospect_company_name and (in_reply_to or references):
-                    refs = (in_reply_to + ' ' + references).replace('<', ' ').replace('>', ' ').split()
-                    for ref in refs:
-                        ref = ref.strip()
-                        if not ref:
-                            continue
-                        oe = OutreachEmail.objects.filter(message_id__icontains=ref).select_related('prospect').first()
-                        if oe and oe.prospect:
-                            prospect_company_name = oe.prospect.company_name
-                            break
-
-                tracking_info = None
-                clean_mid = message_id.strip().strip('<>').strip()
-                if clean_mid:
-                    matched_oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
-                    if matched_oe:
-                        tracking_info = {
-                            'id': matched_oe.id,
-                            'tracking_token': str(matched_oe.tracking_token),
-                            'is_opened': matched_oe.is_opened,
-                            'open_count': matched_oe.open_count,
-                            'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
-                            'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
-                            'total_seconds_spent': matched_oe.total_seconds_spent,
-                            'open_history': matched_oe.open_history,
-                            'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
-                            'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
-                        }
-
-                emails_list.append({
-                    'uid': uid_str,
-                    'id': uid_str,  # backward-compatible field
-                    'message_id': message_id,
-                    'subject': subject,
-                    'from': from_hdr,
-                    'to': to_hdr,
-                    'date': date_hdr,
-                    'is_unread': is_unread,
-                    'folder': folder,
-                    'prospect_company_name': prospect_company_name,
-                    'tracking': tracking_info,
-                })
-
-            return Response({
-                'uidvalidity': uidvalidity,
-                'messages': emails_list,
-            }, status=status.HTTP_200_OK)
-
-        except (TimeoutError, socket.timeout, OSError) as e:
-            logging.getLogger(__name__).warning("IMAP fetch_emails timed out: %s", e)
-            return Response({'error': 'Mail server connection timed out', 'messages': []}, status=status.HTTP_200_OK)
+            res = GmailOAuthService.fetch_messages(google_creds, folder=folder, limit=limit, search=search)
+            return Response(res, status=status.HTTP_200_OK)
         except Exception as e:
-            if isinstance(e, ValueError) and "Decryption failed" in str(e):
-                return Response({'error': str(e)}, status=status.HTTP_200_OK)
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        finally:
-            if mail is not None:
-                try:
-                    mail.logout()
-                except Exception:
-                    pass
+            logging.getLogger(__name__).warning("Gmail fetch_messages error: %s", e)
+            return Response({'error': str(e), 'messages': []}, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=False, methods=['post'], url_path='send-email')
     def send_email_action(self, request):
         user = request.user
-        profile = getattr(user, 'profile', None)
-        mail_account = MailAccount.objects.filter(id=profile.mail_account_id if profile else None, is_active=True).first()
-        if not mail_account:
-            return Response({'error': 'No active mail account.'}, status=status.HTTP_400_BAD_REQUEST)
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Gmail is not connected. Please sign in with Google or connect Gmail.'}, status=status.HTTP_400_BAD_REQUEST)
 
         to_address = request.data.get('to')
         cc_address = request.data.get('cc')
@@ -521,10 +716,10 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         signature_id = request.data.get('signature_id') or None
         composed = None
         if template_id or signature_id:
-            from accounts.template_utils import build_email_content, ComposeError
+            from accounts.template_utils import build_email_content, ComposeError, sender_from_user
             try:
                 composed = build_email_content(
-                    user, mail_account, None, to_list + cc_list, subject, body,
+                    user, sender_from_user(user), None, to_list + cc_list, subject, body,
                     template_id=template_id, signature_id=signature_id,
                     body_edited=str(request.data.get('body_edited', 'true')).lower() != 'false',
                 )
@@ -533,11 +728,12 @@ class MailAccountViewSet(viewsets.ModelViewSet):
             except (ComposeError, ValueError) as exc:
                 return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        effective_signature = mail_account.default_signature if (mail_account.default_signature and mail_account.default_signature.strip() != "''") else ''
+        sender_email = google_creds.email
+        sender_display_name = user.get_full_name() or user.username
+        effective_signature = f"--\n{sender_display_name}\n{sender_email}"
+
         if composed and composed['has_signature']:
             effective_signature = composed['signature_text']
-        elif not effective_signature and mail_account:
-            effective_signature = f"--\n{mail_account.display_name or mail_account.email_address}\n{mail_account.email_address}"
 
         full_body = body
         if effective_signature:
@@ -547,10 +743,10 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         from email.utils import make_msgid
         import html
 
-        email_domain = mail_account.email_address.split('@')[-1] if '@' in mail_account.email_address else 'local'
+        email_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = f"{mail_account.display_name} <{mail_account.email_address}>" if mail_account.display_name else mail_account.email_address
+        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
         msg['To'] = ', '.join(to_list)
         if cc_list:
             msg['Cc'] = ', '.join(cc_list)
@@ -570,12 +766,8 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         html_signature = ""
         if composed and composed['has_signature']:
             html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
-        elif mail_account.default_signature and mail_account.default_signature.strip() and mail_account.default_signature.strip() != "''":
-            sig_safe = html.escape(mail_account.default_signature.strip()).replace('\n', '<br>')
-            html_signature = f"\n<div>\n{sig_safe}\n</div>\n"
-        elif mail_account:
-            s_name = mail_account.display_name or mail_account.email_address
-            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(s_name)}</strong><br>{html.escape(mail_account.email_address)}</div>\n"
+        else:
+            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(sender_display_name)}</strong><br>{html.escape(sender_email)}</div>\n"
 
         if composed and composed['has_template'] and composed['html_body']:
             main_html = composed['html_body']
@@ -615,44 +807,23 @@ class MailAccountViewSet(viewsets.ModelViewSet):
             msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f.name)
             f.seek(0)
 
-        def send_smtp_and_imap():
-            import time
-            import imaplib
-            import smtplib
-            import utils.encryption as encryption
-            try:
-                password = encryption.decrypt_password(mail_account.smtp_app_password_encrypted)
-                if mail_account.smtp_security == 'SSL':
-                    server = smtplib.SMTP_SSL(mail_account.smtp_host, mail_account.smtp_port, timeout=30)
-                else:
-                    server = smtplib.SMTP(mail_account.smtp_host, mail_account.smtp_port, timeout=30)
-                    server.starttls()
-                server.login(mail_account.smtp_username, password)
-                server.send_message(msg)
-                server.quit()
+        thread_id = request.data.get('thread_id')
+        draft_id = request.data.get('draft_id')
 
-                # For Gmail accounts, Gmail SMTP automatically places sent messages into "[Gmail]/Sent Mail".
-                # Appending via IMAP creates an identical duplicate copy of the sent email in the mailbox.
-                # Only non-Gmail IMAP servers require manual appending to the Sent folder.
-                is_gmail = 'gmail' in (mail_account.imap_host or '').lower() or 'gmail' in (mail_account.smtp_host or '').lower()
-                if not is_gmail:
+        def send_via_gmail():
+            try:
+                GmailOAuthService.send_message(google_creds, msg.as_bytes(), thread_id=thread_id)
+                if draft_id:
                     try:
-                        if mail_account.imap_security == 'SSL':
-                            imap = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                        else:
-                            imap = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                            imap.starttls()
-                        imap.login(mail_account.imap_username, password)
-                        sent_folder = 'Sent'
-                        imap.append(sent_folder, '\\Seen', imaplib.Time2Internaldate(time.time()), msg.as_bytes())
-                        imap.logout()
-                    except Exception as e:
-                        print(f"Background IMAP append failed: {e}")
+                        GmailOAuthService.delete_draft(google_creds, draft_id)
+                    except Exception:
+                        pass
             except Exception as e:
-                print(f"Background SMTP send failed: {e}")
+                import logging
+                logging.getLogger(__name__).error("Background Gmail send failed: %s", e)
 
         import threading
-        t = threading.Thread(target=send_smtp_and_imap)
+        t = threading.Thread(target=send_via_gmail)
         t.start()
 
         # Create OutreachEmail tracking record for inbox email
@@ -671,9 +842,8 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         outreach_email = OutreachEmail.objects.create(
             prospect=matched_prospect,
             created_by=user,
-            sender_mail_account=mail_account,
-            from_email=mail_account.email_address,
-            from_name=mail_account.display_name,
+            from_email=sender_email,
+            from_name=sender_display_name,
             subject=subject,
             body=body,
             signature=effective_signature,
@@ -712,453 +882,217 @@ class MailAccountViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='fetch-email-body')
     def fetch_email_body(self, request):
         """
-        Fetch the full body of a single email by UID.
+        Fetch the full body of a single Gmail message.
 
         Query params:
-            folder (str): IMAP folder name, default 'INBOX'
-            uid (str): IMAP UID of the email (stable; preferred)
+            uid (str): Gmail message id (preferred)
             email_id (str): legacy alias for uid
         """
-        user = request.user
-        if not hasattr(user, 'profile'):
-            return Response({'error': 'No profile found.'}, status=status.HTTP_400_BAD_REQUEST)
+        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Gmail is not connected.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        mail_account = MailAccount.objects.filter(
-            id=user.profile.mail_account_id, is_active=True
-        ).first()
-        if not mail_account:
-            return Response(
-                {'error': 'No active mail account configured.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        folder = request.query_params.get('folder', 'INBOX')
-        # Accept 'uid' (preferred) or legacy 'email_id'
         uid = request.query_params.get('uid') or request.query_params.get('email_id')
         if not uid:
             return Response({'error': 'uid is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        mail_conn = None
         try:
-            password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
-            if mail_account.imap_security == 'SSL':
-                mail_conn = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
-            else:
-                mail_conn = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                mail_conn.starttls()
-
-            mail_conn.login(mail_account.imap_username, password)
-            mail_conn.select(folder)
-
-            # Fetch full RFC822 message by UID
-            res_status, msg_data = mail_conn.uid('FETCH', uid.encode(), '(RFC822)')
-
-            if res_status != 'OK':
-                return Response(
-                    {'error': 'Failed to fetch email body.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            html_body = ''
-            text_body = ''
-            cid_map = {}
-            parts_list = []
-            import base64
-            import re
-            import mimetypes
-            import urllib.parse
-            import html as html_module
-
-            def get_filename(part):
-                fname = part.get_filename()
-                if not fname:
-                    fname = part.get_param('name', header='content-type')
-                if not fname:
-                    fname = part.get_param('filename', header='content-disposition')
-                if fname:
-                    try:
-                        decoded_headers = email.header.decode_header(fname)
-                        parts = []
-                        for t in decoded_headers:
-                            if isinstance(t[0], bytes):
-                                parts.append(t[0].decode(t[1] or 'utf-8', errors='ignore'))
-                            else:
-                                parts.append(str(t[0]))
-                        fname = ''.join(parts)
-                    except Exception:
-                        pass
-                return fname
-
-            for part in msg_data:
-                if isinstance(part, tuple):
-                    msg = email.message_from_bytes(part[1])
-                    for mp in msg.walk():
-                        if mp.is_multipart():
-                            continue
-
-                        content_type = mp.get_content_type()
-                        payload = mp.get_payload(decode=True)
-                        if payload is None:
-                            continue
-
-                        disposition = str(mp.get('Content-Disposition') or '')
-                        cid = mp.get('Content-ID')
-                        filename = get_filename(mp)
-
-                        # Capture main HTML or text body
-                        if content_type == 'text/html' and not html_body and 'attachment' not in disposition.lower():
-                            charset = mp.get_content_charset() or 'utf-8'
-                            html_body = payload.decode(charset, errors='ignore')
-                        elif content_type == 'text/plain' and not text_body and 'attachment' not in disposition.lower():
-                            charset = mp.get_content_charset() or 'utf-8'
-                            text_body = payload.decode(charset, errors='ignore')
-                        else:
-                            parts_list.append({
-                                'mp': mp,
-                                'content_type': content_type,
-                                'disposition': disposition,
-                                'cid': cid,
-                                'filename': filename,
-                                'payload': payload
-                            })
-
-            # Build CID map for inline parts
-            for item in parts_list:
-                cid = item['cid']
-                ct = item['content_type']
-                payload = item['payload']
-                fname = item['filename']
-                if cid:
-                    clean_cid = cid.strip('<>').strip()
-                    b64_data = base64.b64encode(payload).decode('utf-8')
-                    data_uri = f"data:{ct};base64,{b64_data}"
-                    for key in [
-                        clean_cid,
-                        cid.strip(),
-                        f"<{clean_cid}>",
-                        urllib.parse.quote(clean_cid),
-                        urllib.parse.unquote(clean_cid),
-                        html_module.escape(clean_cid),
-                        html_module.unescape(clean_cid)
-                    ]:
-                        if key:
-                            cid_map[key] = data_uri
-                    if fname:
-                        cid_map[fname] = data_uri
-
-            # Replace any CID references in html_body with base64 data URIs
-            orig_html = html_body
-            if html_body and cid_map:
-                for cid_key, data_uri in cid_map.items():
-                    # Replace src="cid:..." or src='cid:...'
-                    html_body = re.sub(
-                        rf'(?i)src\s*=\s*(["\'])cid:{re.escape(cid_key)}\1',
-                        lambda m, u=data_uri: f'src="{u}"',
-                        html_body
-                    )
-                    # Replace bare cid: references (e.g. background, CSS url, src without quotes)
-                    html_body = re.sub(
-                        rf'(?i)cid:{re.escape(cid_key)}',
-                        lambda m, u=data_uri: u,
-                        html_body
-                    )
-
-            # Determine downloadable attachments
-            attachments = []
-            for item in parts_list:
-                cid = item['cid']
-                clean_cid = cid.strip('<>').strip() if cid else ''
-                disp = item['disposition']
-                fname = item['filename']
-                ct = item['content_type']
-                payload = item['payload']
-
-                # Check if this part was used as an inline CID image in the HTML body
-                is_inline_cid_used = bool(
-                    clean_cid and orig_html and (
-                        clean_cid in orig_html or 
-                        (cid and cid.strip() in orig_html)
-                    )
-                )
-
-                is_att = False
-                if 'attachment' in disp.lower():
-                    is_att = True
-                elif is_inline_cid_used and 'attachment' not in disp.lower():
-                    # Part is an inline image rendered directly in HTML body
-                    is_att = False
-                elif fname:
-                    is_att = True
-                elif not ct.startswith('text/') and not is_inline_cid_used:
-                    is_att = True
-
-                if is_att:
-                    if not fname:
-                        ext = mimetypes.guess_extension(ct) or ''
-                        fname = f"attachment_{len(attachments)+1}{ext}"
-                    attachments.append({
-                        'filename': fname,
-                        'content_type': ct,
-                        'data': base64.b64encode(payload).decode('utf-8'),
-                        'size': len(payload)
-                    })
-
-            if html_body:
-                from accounts.template_utils import ensure_responsive_images
-                html_body = ensure_responsive_images(html_body)
-                # Strip email tracking pixels before returning to client to prevent sender self-tracking
-                html_body = re.sub(r'<img[^>]*?email-tracking[^>]*?>', '', html_body, flags=re.IGNORECASE)
-
-            tracking_info = None
-            clean_mid = ''
-            if msg_data:
-                for item in msg_data:
-                    if isinstance(item, tuple) and len(item) > 1:
-                        try:
-                            p_hdr = email.message_from_bytes(item[1])
-                            clean_mid = (p_hdr.get('Message-ID') or '').strip().strip('<>').strip()
-                            if clean_mid:
-                                break
-                        except Exception:
-                            pass
-
-            token_match = re.search(r'email-tracking/([a-f0-9\-]{36})', orig_html or '')
-            matched_oe = None
-            from prospects.models import OutreachEmail
-            if token_match:
-                matched_oe = OutreachEmail.objects.filter(tracking_token=token_match.group(1)).first()
-            if not matched_oe and clean_mid:
-                matched_oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
-
-            if matched_oe:
-                tracking_info = {
-                    'id': matched_oe.id,
-                    'tracking_token': str(matched_oe.tracking_token),
-                    'is_opened': matched_oe.is_opened,
-                    'open_count': matched_oe.open_count,
-                    'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
-                    'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
-                    'total_seconds_spent': matched_oe.total_seconds_spent,
-                    'open_history': matched_oe.open_history,
-                    'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
-                    'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
-                }
-
-            return Response({
-                'html_body': html_body,
-                'text_body': text_body,
-                'attachments': attachments,
-                'tracking': tracking_info,
-            }, status=status.HTTP_200_OK)
-
-        except (TimeoutError, socket.timeout, OSError) as e:
-            logging.getLogger(__name__).warning("IMAP fetch_email_body timed out: %s", e)
-            return Response({'error': 'Mail server connection timed out'}, status=status.HTTP_200_OK)
+            body_data = GmailOAuthService.fetch_message_body(google_creds, uid)
+            return Response(body_data, status=status.HTTP_200_OK)
         except Exception as e:
-            if isinstance(e, ValueError) and "Decryption failed" in str(e):
-                return Response({'error': str(e)}, status=status.HTTP_200_OK)
+            logging.getLogger(__name__).warning("Gmail fetch_message_body error: %s", e)
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        finally:
-            if mail_conn is not None:
-                try:
-                    mail_conn.logout()
-                except Exception:
-                    pass
+
+    @action(detail=False, methods=['post'], url_path='modify-message')
+    def modify_message(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
+        act = request.data.get('action')  # 'star', 'unstar', 'read', 'unread', 'spam', 'unspam'
+        if not msg_id or not act:
+            return Response({'error': 'msg_id and action are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        add_labels = []
+        remove_labels = []
+        if act == 'star':
+            add_labels = ['STARRED']
+        elif act == 'unstar':
+            remove_labels = ['STARRED']
+        elif act == 'read':
+            remove_labels = ['UNREAD']
+        elif act == 'unread':
+            add_labels = ['UNREAD']
+        elif act == 'spam':
+            add_labels = ['SPAM']
+            remove_labels = ['INBOX']
+        elif act == 'unspam':
+            remove_labels = ['SPAM']
+            add_labels = ['INBOX']
+        else:
+            return Response({'error': f'Unsupported action: {act}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            res = GmailOAuthService.modify_message(google_creds, msg_id, add_label_ids=add_labels, remove_label_ids=remove_labels)
+            return Response({'success': True, 'data': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='trash-message')
+    def trash_message(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
+        if not msg_id:
+            return Response({'error': 'msg_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            res = GmailOAuthService.trash_message(google_creds, msg_id)
+            return Response({'success': True, 'data': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='untrash-message')
+    def untrash_message(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
+        if not msg_id:
+            return Response({'error': 'msg_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            res = GmailOAuthService.untrash_message(google_creds, msg_id)
+            return Response({'success': True, 'data': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='delete-message')
+    def delete_message(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
+        if not msg_id:
+            return Response({'error': 'msg_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            res = GmailOAuthService.delete_message(google_creds, msg_id)
+            return Response({'success': True, 'data': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='save-draft')
+    def save_draft(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        to_address = request.data.get('to', '')
+        cc_address = request.data.get('cc', '')
+        bcc_address = request.data.get('bcc', '')
+        subject = request.data.get('subject', '')
+        body = request.data.get('body', '')
+        draft_id = request.data.get('draft_id')
+        thread_id = request.data.get('thread_id')
+
+        from email.message import EmailMessage
+        from email.utils import make_msgid
+        import html
+
+        sender_email = google_creds.email
+        sender_display_name = user.get_full_name() or user.username
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
+        if to_address:
+            msg['To'] = to_address
+        if cc_address:
+            msg['Cc'] = cc_address
+        if bcc_address:
+            msg['Bcc'] = bcc_address
+        msg['Message-ID'] = make_msgid(domain='gmail.com')
+        msg.set_content(body)
+
+        html_body = html.escape(body).replace('\n', '<br>')
+        msg.add_alternative(f'<div style="font-family: sans-serif;">{html_body}</div>', subtype='html')
+
+        try:
+            res = GmailOAuthService.save_draft(google_creds, msg.as_bytes(), draft_id=draft_id, thread_id=thread_id)
+            return Response({'success': True, 'draft': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='delete-draft')
+    def delete_draft(self, request):
+        user = request.user
+        from .models import GoogleMailCredentials
+        from .oauth_services import GmailOAuthService
+        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        draft_id = request.data.get('draft_id')
+        if not draft_id:
+            return Response({'error': 'draft_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            res = GmailOAuthService.delete_draft(google_creds, draft_id)
+            return Response({'success': True, 'data': res}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['get'], url_path='check-new-mail')
     def check_new_mail(self, request):
         """
-        Lightweight mailbox delta check.
-
-        Instead of fetching all headers, this uses IMAP STATUS to compare the
-        current mailbox state against the client's known state.  When new UIDs
-        are present, only the missing message metadata is fetched.
-
-        Query params:
-            folder (str): IMAP folder name, default 'INBOX'
-            uidvalidity (int): client's known UIDVALIDITY (0 if unknown)
-            highest_uid (int): client's highest known UID (0 if unknown)
+        Lightweight unread check for the signed-in user's Gmail mailbox.
 
         Returns:
             {
               "uidvalidity": int,
-              "uidvalidity_changed": bool,   # True if client must rebuild cache
+              "uidvalidity_changed": bool,
               "unseen_count": int,
               "highest_uid": int,
-              "new_messages": [...]           # only when new UIDs were found
+              "new_messages": [...]           # only when unread messages exist
             }
         """
-        user = request.user
-        if not hasattr(user, 'profile'):
-            return Response({'error': 'No profile found.'}, status=status.HTTP_400_BAD_REQUEST)
+        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        if not google_creds:
+            return Response({'error': 'Gmail is not connected.'}, status=status.HTTP_200_OK)
 
-        mail_account = MailAccount.objects.filter(
-            id=user.profile.mail_account_id, is_active=True
-        ).first()
-        if not mail_account:
-            return Response(
-                {'error': 'No active mail account configured.'},
-                status=status.HTTP_200_OK,
-            )
-
-        folder = request.query_params.get('folder', 'INBOX')
+        empty = {
+            'uidvalidity': 1,
+            'uidvalidity_changed': False,
+            'unseen_count': 0,
+            'highest_uid': 0,
+            'new_messages': [],
+        }
         try:
-            client_uidvalidity = int(request.query_params.get('uidvalidity', 0))
-        except (TypeError, ValueError):
-            client_uidvalidity = 0
-        try:
-            client_highest_uid = int(request.query_params.get('highest_uid', 0))
-        except (TypeError, ValueError):
-            client_highest_uid = 0
-
-        mail = None
-        try:
-            password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
-            if mail_account.imap_security == 'SSL':
-                mail = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
-            else:
-                mail = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                mail.starttls()
-
-            mail.login(mail_account.imap_username, password)
-
-            # Use STATUS to get mailbox state without fully selecting it
-            status_res, status_data = mail.status(folder, '(UIDVALIDITY UIDNEXT UNSEEN)')
-            if status_res != 'OK' or not status_data:
-                return Response(
-                    {'error': f'Failed to get status for folder {folder}'},
-                    status=status.HTTP_200_OK,
-                )
-
-            status_str = status_data[0].decode() if isinstance(status_data[0], bytes) else str(status_data[0])
-            # Parse: '... (UIDVALIDITY 123 UIDNEXT 456 UNSEEN 7)'
-            status_str = status_str.replace(')', '').replace('(', '')
-            parts = status_str.split()
-
-            def extract(key, default=0):
-                try:
-                    idx = parts.index(key)
-                    return int(parts[idx + 1])
-                except (ValueError, IndexError):
-                    return default
-
-            server_uidvalidity = extract('UIDVALIDITY')
-            server_uidnext = extract('UIDNEXT')
-            unseen_count = extract('UNSEEN')
-
-            # UIDNEXT is the next UID to be assigned, so current highest = UIDNEXT - 1
-            server_highest_uid = max(0, server_uidnext - 1)
-
-            uidvalidity_changed = (
-                client_uidvalidity != 0 and server_uidvalidity != client_uidvalidity
-            )
-
-            response_data = {
-                'uidvalidity': server_uidvalidity,
-                'uidvalidity_changed': uidvalidity_changed,
-                'unseen_count': unseen_count,
-                'highest_uid': server_highest_uid,
-                'new_messages': [],
-            }
-
-            if uidvalidity_changed:
-                # Client must rebuild the cache; don't mix old UIDs with new ones
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            # Check if there are new UIDs the client doesn't have yet
-            new_uids_exist = server_highest_uid > client_highest_uid
-
-            if not new_uids_exist:
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            # Select the folder to run UID SEARCH
-            select_res, _ = mail.select(folder)
-            if select_res != 'OK':
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            # Search for UIDs the client doesn't know about
-            search_criteria = f'{client_highest_uid + 1}:*'
-            uid_res, uid_data = mail.uid('SEARCH', None, f'UID {search_criteria}')
-            if uid_res != 'OK' or not uid_data or not uid_data[0]:
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            new_uid_list = uid_data[0].split()
-            new_messages = []
-
-            for uid_bytes in new_uid_list:
-                uid_str = uid_bytes.decode()
-                try:
-                    uid_int = int(uid_str)
-                except ValueError:
-                    continue
-
-                if uid_int <= client_highest_uid:
-                    continue
-
-                fetch_res, hdr_data = mail.uid(
-                    'FETCH', uid_bytes,
-                    '(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])'
-                )
-                if fetch_res != 'OK':
-                    continue
-
-                subject = ''
-                from_hdr = ''
-                date_hdr = ''
-                message_id = ''
-                is_unread = True
-
-                for part in hdr_data:
-                    if isinstance(part, tuple):
-                        part_info = part[0].decode() if isinstance(part[0], bytes) else ''
-                        is_unread = '\\SEEN' not in part_info.upper()
-
-                        hdr_msg = email.message_from_bytes(part[1])
-
-                        raw_subject = hdr_msg.get('Subject', '')
-                        decoded_subject = decode_header(raw_subject)
-                        subject_parts = []
-                        for s_bytes, enc in decoded_subject:
-                            if isinstance(s_bytes, bytes):
-                                subject_parts.append(s_bytes.decode(enc or 'utf-8', errors='ignore'))
-                            else:
-                                subject_parts.append(s_bytes or '')
-                        subject = ''.join(subject_parts)
-
-                        from_hdr = hdr_msg.get('From', '')
-                        date_hdr = hdr_msg.get('Date', '')
-                        message_id = hdr_msg.get('Message-ID', '')
-
-                new_messages.append({
-                    'uid': uid_str,
-                    'id': uid_str,
-                    'message_id': message_id,
-                    'subject': subject,
-                    'from': from_hdr,
-                    'date': date_hdr,
-                    'is_unread': is_unread,
-                    'folder': folder,
-                })
-
-            response_data['new_messages'] = new_messages
-            return Response(response_data, status=status.HTTP_200_OK)
-
-        except (TimeoutError, socket.timeout, OSError) as e:
-            import logging
-            logging.getLogger(__name__).warning("IMAP check_new_mail timed out: %s", e)
-            return Response({'error': 'Mail server connection timed out', 'new_messages': []}, status=status.HTTP_200_OK)
+            unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=5)
+            messages = unread_res.get('messages', [])
+            unseen = sum(1 for m in messages if m.get('is_unread'))
+            return Response({
+                'uidvalidity': 1,
+                'uidvalidity_changed': False,
+                'unseen_count': unseen,
+                'highest_uid': 0,
+                'new_messages': messages if unseen > 0 else [],
+            }, status=status.HTTP_200_OK)
         except Exception as e:
-            if isinstance(e, ValueError) and "Decryption failed" in str(e):
-                return Response({'error': str(e)}, status=status.HTTP_200_OK)
-            import logging
             logging.getLogger(__name__).warning("Error in check_new_mail: %s", e)
-            return Response({'error': str(e)}, status=status.HTTP_200_OK)
-        finally:
-            if mail is not None:
-                try:
-                    mail.logout()
-                except Exception:
-                    pass
+            return Response(empty, status=status.HTTP_200_OK)
 
     # Legacy endpoint kept for backward compatibility with old fetch_emails URL
     @action(detail=False, methods=['get'], url_path='fetch_emails')
@@ -1172,74 +1106,21 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         """Legacy underscore URL — delegates to fetch_email_body."""
         return self.fetch_email_body(request)
 
-    serializer_class = MailAccountSerializer
-    permission_classes = [IsLQ]
+    def list(self, request):
+        """Returns the connected Gmail mailbox (if any) for the signed-in user."""
+        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        data = []
+        if google_creds:
+            data.append({
+                'id': 'gmail',
+                'name': 'Google Mail',
+                'display_name': request.user.get_full_name() or request.user.username,
+                'email_address': google_creds.email,
+                'provider': 'GMAIL_OAUTH',
+                'is_active': True,
+                'default_signature': '',
+            })
+        return Response(data)
 
-    def get_queryset(self):
-        return MailAccount.objects.all()
-
-    def perform_create(self, serializer):
-        mail_account = serializer.save()
-        profile = self.request.user.profile
-        profile.mail_account = mail_account
-        profile.save()
-
-    @action(detail=True, methods=['post'], url_path='set-default')
-    def set_default(self, request, pk=None):
-        mail_account = self.get_object()
-        profile = request.user.profile
-        profile.mail_account = mail_account
-        profile.save()
-        return Response({'status': 'default set'})
-
-    @action(detail=True, methods=['post'], url_path='test-smtp')
-    def test_smtp(self, request, pk=None):
-        mail_account = self.get_object()
-        server = None
-        try:
-            password = encryption.decrypt_password(mail_account.smtp_app_password_encrypted)
-            if mail_account.smtp_security == 'SSL':
-                server = smtplib.SMTP_SSL(mail_account.smtp_host, mail_account.smtp_port, timeout=30)
-            else:
-                server = smtplib.SMTP(mail_account.smtp_host, mail_account.smtp_port, timeout=30)
-                server.starttls()
-            server.login(mail_account.smtp_username, password)
-            mail_account.smtp_status = 'VERIFIED'
-            mail_account.save()
-            return Response({'message': 'SMTP connection successful.'})
-        except Exception as e:
-            mail_account.smtp_status = 'FAILED'
-            mail_account.save()
-            return Response({'error': 'Unable to connect to SMTP server. Please verify the configuration.'}, status=status.HTTP_400_BAD_REQUEST)
-        finally:
-            if server is not None:
-                try:
-                    server.quit()
-                except Exception:
-                    pass
-
-    @action(detail=True, methods=['post'], url_path='test-imap')
-    def test_imap(self, request, pk=None):
-        mail_account = self.get_object()
-        server = None
-        try:
-            password = encryption.decrypt_password(mail_account.imap_app_password_encrypted)
-            if mail_account.imap_security == 'SSL':
-                server = imaplib.IMAP4_SSL(mail_account.imap_host, mail_account.imap_port, timeout=15)
-            else:
-                server = imaplib.IMAP4(mail_account.imap_host, mail_account.imap_port, timeout=15)
-                server.starttls()
-            server.login(mail_account.imap_username, password)
-            mail_account.imap_status = 'CONNECTED'
-            mail_account.save()
-            return Response({'message': 'IMAP connection successful.'})
-        except Exception as e:
-            mail_account.imap_status = 'FAILED'
-            mail_account.save()
-            return Response({'error': 'Unable to connect to IMAP server. Please verify the configuration.'}, status=status.HTTP_400_BAD_REQUEST)
-        finally:
-            if server is not None:
-                try:
-                    server.logout()
-                except Exception:
-                    pass
+# Backward-compatible alias for the Gmail Mailbox ViewSet
+MailAccountViewSet = GmailMailboxViewSet

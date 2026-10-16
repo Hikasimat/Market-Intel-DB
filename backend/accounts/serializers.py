@@ -104,3 +104,89 @@ class MailAccountSerializer(serializers.ModelSerializer):
             validated_data['imap_app_password_encrypted'] = encryption.encrypt_password(imap_pw)
             
         return super().update(instance, validated_data)
+
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.settings import api_settings
+from django.contrib.auth.models import update_last_login
+from rest_framework import exceptions
+
+
+class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Authenticates existing users via their registered email address and password.
+    Supports accounts whose username is identical to their email as well as
+    accounts with distinct usernames.
+    Normalizes the email address and prevents ambiguous matches.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['email'] = serializers.CharField(required=False, write_only=True)
+        # Keep username optional so existing clients or tests can submit username or email
+        if self.username_field in self.fields:
+            self.fields[self.username_field].required = False
+
+    def validate(self, attrs):
+        raw_identifier = (attrs.get('email') or attrs.get(self.username_field) or '').strip()
+        password = attrs.get('password')
+
+        if not raw_identifier or not password:
+            raise exceptions.AuthenticationFailed(
+                self.error_messages['no_active_account'],
+                'no_active_account',
+            )
+
+        normalized_email = raw_identifier.lower()
+
+        # Step 1: Look for exact case-insensitive match on registered email
+        matching_users = User.objects.filter(email__iexact=normalized_email)
+        
+        # Step 2: If no match by email, fallback to username (case-insensitive)
+        if not matching_users.exists():
+            matching_users = User.objects.filter(username__iexact=raw_identifier)
+        if not matching_users.exists():
+            matching_users = User.objects.filter(username__iexact=normalized_email)
+
+        # Ambiguous matching check: if multiple distinct users match, reject with generic error
+        if matching_users.count() > 1:
+            raise exceptions.AuthenticationFailed(
+                self.error_messages['no_active_account'],
+                'no_active_account',
+            )
+
+        user = matching_users.first()
+        if not user:
+            raise exceptions.AuthenticationFailed(
+                self.error_messages['no_active_account'],
+                'no_active_account',
+            )
+
+        # Strictly require correct password and active user status
+        if not user.is_active or not user.check_password(password):
+            raise exceptions.AuthenticationFailed(
+                self.error_messages['no_active_account'],
+                'no_active_account',
+            )
+
+        self.user = user
+
+        if api_settings.UPDATE_LAST_LOGIN:
+            update_last_login(None, self.user)
+
+        refresh = self.get_token(self.user)
+        data = {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        }
+        return data
+
+
+class GoogleOAuthLoginSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True)
+    state = serializers.CharField(required=True)
+
+
+class GmailOAuthCallbackSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True)
+    state = serializers.CharField(required=True)
+

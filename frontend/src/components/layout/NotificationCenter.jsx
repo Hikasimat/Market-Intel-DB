@@ -227,7 +227,7 @@ export default function NotificationCenter() {
         );
       }
     } catch (err) {
-      // Transient IMAP/network error — retain cache, do nothing destructive.
+      // Transient mail/network error — retain cache, do nothing destructive.
       // No popup so we don't spam the user on repeated failures.
       if (err.response?.status === 400) {
         // No mail account configured; skip silently

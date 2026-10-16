@@ -156,14 +156,25 @@ def render_placeholders(content, context, escape=True):
     return _PLACEHOLDER_RE.sub(repl, content or '')
 
 
-def placeholder_context(mail_account, prospect, contact):
+def placeholder_context(mail_account, prospect, contact, user=None):
+    sender_name = getattr(mail_account, 'display_name', '') if mail_account else ''
+    sender_email = getattr(mail_account, 'email_address', '') if mail_account else ''
+    if not sender_email and user:
+        try:
+            from accounts.models import GoogleMailCredentials
+            gcred = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+            sender_email = gcred.email if gcred else (user.email or '')
+            sender_name = user.get_full_name() or user.username or ''
+        except Exception:
+            sender_email = user.email or ''
+            sender_name = user.get_full_name() or user.username or ''
     return {
         'contact_name': getattr(contact, 'contact_name', '') if contact else '',
         'designation': getattr(contact, 'designation', '') if contact else '',
         'company_name': getattr(prospect, 'company_name', '') if prospect else '',
         'website': getattr(prospect, 'official_website_url', '') if prospect else '',
-        'sender_name': getattr(mail_account, 'display_name', '') if mail_account else '',
-        'sender_email': getattr(mail_account, 'email_address', '') if mail_account else '',
+        'sender_name': sender_name,
+        'sender_email': sender_email,
     }
 
 
@@ -260,7 +271,7 @@ def build_email_content(user, mail_account, prospect, to_emails, subject, body,
         contact = ProspectContact.objects.filter(
             prospect=prospect, official_email__in=[e for e in to_emails if e]
         ).first()
-    ctx = placeholder_context(mail_account, prospect, contact)
+    ctx = placeholder_context(mail_account, prospect, contact, user=user)
 
     template = signature = None
     import uuid as _uuid

@@ -32,6 +32,12 @@ frontend/.env.production.local
 frontend/.env.development.local
 service-account*.json
 credentials*.json
+client_secret*.json
+google_client_secret*.json
+google-credentials*.json
+token*.json
+*.bak
+*.backup
 
 # Cloudflare Tunnel & SSL Certificates
 .cloudflared/

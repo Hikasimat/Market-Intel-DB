@@ -104,3 +104,29 @@ class EmailSignatureTemplate(_OwnedDesignBase):
         constraints = [
             models.UniqueConstraint(fields=['owner'], condition=models.Q(is_default=True), name='uniq_default_email_signature_per_owner'),
         ]
+
+
+class GoogleMailCredentials(models.Model):
+    """
+    Stores encrypted OAuth tokens for a user's authorized Gmail mailbox.
+    Separated from User/UserProfile and login identity tokens.
+    Access and refresh tokens are encrypted at rest with Fernet using
+    MAIL_CREDENTIALS_ENCRYPTION_KEY.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='google_mail_credentials')
+    email = models.EmailField()
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField(blank=True, default='')
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    scopes = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Google Mail Credential'
+        verbose_name_plural = 'Google Mail Credentials'
+
+    def __str__(self):
+        return f"GoogleMail({self.email}) for {self.user.username}"
+

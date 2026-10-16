@@ -24,6 +24,7 @@ import ManagerDashboardPage from '../pages/ManagerDashboardPage';
 import ManagerAuditPage from '../pages/ManagerAuditPage';
 import WhatsappPage from '../pages/WhatsappPage';
 import SettingsPage from '../pages/SettingsPage';
+import GmailCallbackPage from '../pages/GmailCallbackPage';
 
 import Layout from '../components/layout/Layout';
 
@@ -75,6 +76,8 @@ const AppRouter = () => {
     <Router>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/google/callback" element={<LoginPage />} />
+        <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
         
         {/* ── Manager routes ────────────────────────────────── */}
         <Route path="/manager-dashboard" element={
