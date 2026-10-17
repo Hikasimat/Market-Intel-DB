@@ -292,6 +292,7 @@ const DesignEditor = ({
         projectData={initial.project_data}
         initialHtml={!id ? starterHtml : (initial.html || '')}
         emptyCanvas={!id && (emptyCanvas || kind === 'signature')}
+        kind={kind}
         onDirty={() => setCanvasDirty(true)}
       />
 

@@ -60,7 +60,7 @@ const STARTER_BLOCKS = [
     id: 'block_button_cta',
     type: 'button',
     label: 'Schedule a 10-Minute Call',
-    url: 'https://example.com/schedule',
+    url: '#',
     backgroundColor: '#2563eb',
     textColor: '#ffffff',
     fontSize: 15,
@@ -106,7 +106,7 @@ const STARTER_BLOCKS = [
 ];
 
 const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
-  { projectData, initialHtml, onDirty, height = '720px', emptyCanvas = false },
+  { projectData, initialHtml, onDirty, height = '720px', emptyCanvas = false, kind },
   ref
 ) {
   // Initialize blocks from projectData or initialHtml
@@ -878,7 +878,7 @@ const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
         id: `block_btn_${Date.now()}`,
         type: 'button',
         label: 'Click Here',
-        url: 'https://example.com',
+        url: '#',
         backgroundColor: '#2563eb',
         textColor: '#ffffff',
         align: 'center',
@@ -1379,7 +1379,7 @@ const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
   // Imperative handle for parent
   useImperativeHandle(ref, () => ({
     getData() {
-      const html = generateEmailHtml({ blocks, globalStyles });
+      const html = generateEmailHtml({ blocks, globalStyles, kind });
       return {
         projectData: { version: 2, blocks, globalStyles },
         html: ensureResponsiveImages(html),
@@ -2921,7 +2921,7 @@ const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
                     <button
                       type="button"
                       onClick={async () => {
-                        const html = generateEmailHtml({ blocks, globalStyles });
+                        const html = generateEmailHtml({ blocks, globalStyles, kind });
                         try {
                           await navigator.clipboard.writeText(html);
                           setCopiedSource(true);
@@ -2938,7 +2938,7 @@ const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
                     </button>
                   </div>
                   <pre className="flex-1 overflow-auto p-4 text-xs font-mono bg-slate-900 text-slate-100 whitespace-pre-wrap select-all">
-                    {generateEmailHtml({ blocks, globalStyles })}
+                    {generateEmailHtml({ blocks, globalStyles, kind })}
                   </pre>
                 </div>
               )
@@ -2948,7 +2948,7 @@ const SimpleEmailEditor = forwardRef(function SimpleEmailEditor(
                 <iframe
                   title="Live Email Preview"
                   sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
-                  srcDoc={fillSample(generateEmailHtml({ blocks, globalStyles }))}
+                  srcDoc={fillSample(generateEmailHtml({ blocks, globalStyles, kind }))}
                   style={{
                     width: previewModal.mobile ? '375px' : '100%',
                     maxWidth: previewModal.mobile ? '375px' : '640px',

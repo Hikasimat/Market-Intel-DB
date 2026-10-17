@@ -377,7 +377,7 @@ const renderColumnsBlock = (block) => {
  * Generate complete email document HTML
  */
 export const generateEmailHtml = (templateState) => {
-  const { blocks = [], globalStyles = {} } = templateState || {};
+  const { blocks = [], globalStyles = {}, kind } = templateState || {};
   const canvasBg = globalStyles.backgroundColor || '#f1f5f9';
   const containerBg = globalStyles.canvasColor || '#ffffff';
   const maxWidth = globalStyles.maxWidth || '600px';
@@ -388,6 +388,16 @@ export const generateEmailHtml = (templateState) => {
     }
     return renderElementHtml(block, false);
   }).join('\n');
+
+  if (kind === 'signature' || templateState?.isSignature) {
+    return `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: ${maxWidth}; font-family: Arial, Helvetica, sans-serif;">
+      <tr>
+        <td style="padding: 0;">
+          ${bodyContent}
+        </td>
+      </tr>
+    </table>`.trim();
+  }
 
   return `<!DOCTYPE html>
 <html lang="en">

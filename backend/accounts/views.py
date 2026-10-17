@@ -842,20 +842,20 @@ class GmailMailboxViewSet(viewsets.ViewSet):
 
         # HTML alternative
         html_body = html.escape(body).replace('\n', '<br>')
-        html_signature = ""
-        if composed and composed['has_signature']:
-            html_signature = f"\n<div>\n{composed['signature_html']}\n</div>\n"
-        else:
-            html_signature = f"\n<div style=\"margin-top:20px;padding-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;line-height:1.5;\">--<br><strong style=\"color:#1e293b;\">{html.escape(sender_display_name)}</strong><br>{html.escape(sender_email)}</div>\n"
+        from accounts.template_utils import clean_and_embed_signature_html
 
         if composed and composed['has_template'] and composed['html_body']:
             main_html = composed['html_body']
         else:
             main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
 
-        raw_html_content = f"""<html><body>
-{main_html}<br>{html_signature}
-</body></html>"""
+        if composed and composed['has_signature']:
+            html_signature = composed['signature_html']
+        else:
+            html_signature = f'<div style="color:#64748b;font-size:13px;line-height:1.5;">--<br><strong style="color:#1e293b;">{html.escape(sender_display_name)}</strong><br>{html.escape(sender_email)}</div>'
+
+        integrated_body = clean_and_embed_signature_html(main_html, html_signature)
+        raw_html_content = f"<html><body>\n{integrated_body}\n</body></html>"
 
         # Strip any stale application-owned tracking images or verified communication badges
         cleaned_html = strip_application_tracking_markup(raw_html_content)

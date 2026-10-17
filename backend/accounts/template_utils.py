@@ -144,16 +144,30 @@ def html_to_text(html_str):
 
 
 def render_placeholders(content, context, escape=True):
-    """Replace whitelisted {{placeholders}}; unknown/missing -> ''. Values are HTML-escaped by default."""
+    """Replace whitelisted {{placeholders}}; unknown/missing -> graceful fallback. Values are HTML-escaped by default."""
+    if not content:
+        return ''
+
     def repl(m):
         raw_key = m.group(1).strip()
         norm_key = raw_key.lower().replace(' ', '_')
         canonical_key = NORMALIZE_MAP.get(norm_key, norm_key)
         if canonical_key not in ALLOWED_PLACEHOLDERS:
             return m.group(0)
-        val = str(context.get(canonical_key) or '')
+        val = context.get(canonical_key)
+        if val is None or str(val).strip() == '':
+            if canonical_key == 'contact_name':
+                return 'there'
+            elif canonical_key == 'company_name':
+                return 'your company'
+            val = ''
+        val = str(val)
         return _html.escape(val) if escape else val
-    return _PLACEHOLDER_RE.sub(repl, content or '')
+
+    rendered = _PLACEHOLDER_RE.sub(repl, content)
+    # Clean up any leftover awkward spacing before punctuation (e.g. 'Hello ,' -> 'Hello,')
+    rendered = re.sub(r'[ \t]+([,.:;?!])', r'\1', rendered)
+    return rendered
 
 
 def placeholder_context(mail_account, prospect, contact, user=None):
@@ -204,6 +218,7 @@ def update_template_html_with_body(template_html, base_text, edited_text, ctx):
     """
     Applies edited body text into template_html so that the template design,
     tables, styling, headers, footers, and embedded images are fully preserved.
+    Maintains table structure integrity and prevents orphaned closing tags.
     """
     rendered_html = render_placeholders(template_html, ctx, escape=True)
     if not edited_text or edited_text.strip() == (base_text or '').strip():
@@ -212,11 +227,14 @@ def update_template_html_with_body(template_html, base_text, edited_text, ctx):
     base_lines = [l.strip() for l in (base_text or '').splitlines() if l.strip()]
     edited_lines = [l.strip() for l in edited_text.splitlines() if l.strip()]
 
+    leaf_td_pattern = re.compile(r'(<td\b[^>]*>)((?:(?!</?td\b|</?table\b)[\s\S])*?)(</td>)', re.IGNORECASE)
+
     if not base_lines:
         content_html = "".join(f'<p style="margin: 0 0 12px 0; color: #334155; font-size: 14px; line-height: 1.6;">{_html.escape(l)}</p>' for l in edited_lines)
-        m = re.search(r'(<td[^>]*>)(.*?)(</td>)', rendered_html, flags=re.DOTALL | re.IGNORECASE)
-        if m:
-            return rendered_html[:m.start(2)] + content_html + rendered_html[m.end(2):]
+        matches = list(leaf_td_pattern.finditer(rendered_html))
+        if matches:
+            best_match = max(matches, key=lambda m: len(m.group(2).strip()))
+            return rendered_html[:best_match.start(2)] + content_html + rendered_html[best_match.end(2):]
         return rendered_html + content_html
 
     sm = difflib.SequenceMatcher(None, base_lines, edited_lines)
@@ -261,9 +279,10 @@ def update_template_html_with_body(template_html, base_text, edited_text, ctx):
 
     if not replaced_any:
         content_html = "".join(f'<p style="margin: 0 0 12px 0; color: #334155; font-size: 14px; line-height: 1.6;">{_html.escape(l)}</p>' for l in edited_lines)
-        m = re.search(r'(<td[^>]*>)(.*?)(</td>)', result_html, flags=re.DOTALL | re.IGNORECASE)
-        if m:
-            result_html = result_html[:m.start(2)] + content_html + result_html[m.end(2):]
+        matches = list(leaf_td_pattern.finditer(result_html))
+        if matches:
+            best_match = max(matches, key=lambda m: len(m.group(2).strip()))
+            result_html = result_html[:best_match.start(2)] + content_html + result_html[best_match.end(2):]
         else:
             subbed, count = re.subn(r'<(p|h[1-6]|div)[^>]*>.*?</\1>', content_html, result_html, count=1, flags=re.DOTALL | re.IGNORECASE)
             if count > 0:
@@ -272,6 +291,37 @@ def update_template_html_with_body(template_html, base_text, edited_text, ctx):
                 result_html = f'<div style="font-family: Arial, sans-serif;">{content_html}</div>'
 
     return result_html
+
+
+def clean_and_embed_signature_html(main_html, signature_html):
+    """
+    Combines template HTML and signature HTML into a single unified email structure.
+    If the signature is wrapped in an outer email-container or center, unwraps it
+    so it doesn't create multiple disjointed 600px cards.
+    If main_html is a container table, embeds the signature inside before closing.
+    """
+    if not signature_html or not signature_html.strip():
+        return main_html
+
+    sig = signature_html.strip()
+    sig = re.sub(r'^\s*<center[^>]*>', '', sig, flags=re.IGNORECASE)
+    sig = re.sub(r'</center>\s*$', '', sig, flags=re.IGNORECASE).strip()
+
+    m_outer = re.match(r'^\s*<table\b[^>]*class="[^"]*email-container[^"]*"[^>]*>[\s\S]*?<tbody>[\s\S]*?<tr>[\s\S]*?<td[^>]*>([\s\S]*?)</td>[\s\S]*?</tr>[\s\S]*?</tbody>[\s\S]*?</table>\s*$', sig, re.IGNORECASE)
+    if m_outer:
+        sig = m_outer.group(1).strip()
+
+    sig_block = f'<div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0;">{sig}</div>'
+
+    leaf_td_pattern = re.compile(r'(<td\b[^>]*>)((?:(?!</?td\b|</?table\b)[\s\S])*?)(</td>)', re.IGNORECASE)
+    matches = list(leaf_td_pattern.finditer(main_html))
+    if matches:
+        last_match = matches[-1]
+        return main_html[:last_match.end(2)] + "\n" + sig_block + "\n" + main_html[last_match.start(3):]
+
+    if '</body>' in main_html:
+        return main_html.replace('</body>', f'{sig_block}</body>', 1)
+    return f"{main_html}<br>{sig_block}"
 
 
 def build_email_content(user, mail_account, prospect, to_emails, subject, body,
