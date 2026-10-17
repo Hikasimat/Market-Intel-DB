@@ -1068,9 +1068,10 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='tracking-config')
     def tracking_config(self, request):
-        """Whether the server allows open tracking at all (EMAIL_OPEN_TRACKING_ENABLED)."""
-        from .tracking_utils import global_open_tracking_enabled
-        return Response({'open_tracking_available': global_open_tracking_enabled()})
+        """Whether the server allows open tracking (EMAIL_OPEN_TRACKING_ENABLED and valid public config)."""
+        from .tracking_utils import global_open_tracking_enabled, is_tracking_configured_and_valid
+        available = global_open_tracking_enabled() and is_tracking_configured_and_valid()
+        return Response({'open_tracking_available': available})
 
     @action(detail=True, methods=['get'], url_path='tracking-stats')
     def tracking_stats(self, request, pk=None):
@@ -1127,13 +1128,26 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         body = request.data.get('body') or ''
         recipients_data = request.data.get('recipients', [])
 
-        # Create EmailMessage
-        from email.utils import formatdate
+        # Create EmailMessage with RFC 5322 address and header formatting
+        from email.utils import formatdate, make_msgid
+        from .email_composition import (
+            format_sender_address,
+            validate_and_sanitize_recipient,
+            set_singleton_header,
+            extract_domain_from_email,
+        )
         msg = EmailMessage()
-        msg['Subject'] = subject
-        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
-        msg['Reply-To'] = sender_email
-        msg['Date'] = formatdate(localtime=True)
+
+        try:
+            from_header_val = format_sender_address(sender_display_name, sender_email)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        set_singleton_header(msg, 'From', from_header_val)
+        reply_to_requested = request.data.get('reply_to')
+        if reply_to_requested and reply_to_requested.strip() and reply_to_requested.strip().lower() != sender_email.lower():
+            set_singleton_header(msg, 'Reply-To', reply_to_requested.strip())
+        set_singleton_header(msg, 'Date', formatdate(localtime=True))
 
         to_emails = []
         cc_emails = []
@@ -1149,31 +1163,49 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Prospect not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
         for rcpt in recipients_data:
-            email = rcpt.get('email_address')
-            contact_id = rcpt.get('prospect_contact')
-
-            # Verification check removed per user request
+            email_addr = rcpt.get('email_address')
+            try:
+                validated_email = validate_and_sanitize_recipient(email_addr)
+            except ValueError as exc:
+                return Response({'error': f'Invalid recipient: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
 
             rtype = rcpt.get('recipient_type', 'TO').upper()
-            if rtype == 'TO': to_emails.append(email)
-            elif rtype == 'CC': cc_emails.append(email)
-            elif rtype == 'BCC': bcc_emails.append(email)
+            if rtype == 'TO': to_emails.append(validated_email)
+            elif rtype == 'CC': cc_emails.append(validated_email)
+            elif rtype == 'BCC': bcc_emails.append(validated_email)
 
-        if to_emails: msg['To'] = ', '.join(to_emails)
-        if cc_emails: msg['Cc'] = ', '.join(cc_emails)
-        if bcc_emails: msg['Bcc'] = ', '.join(bcc_emails)
+        if to_emails: set_singleton_header(msg, 'To', ', '.join(to_emails))
+        if cc_emails: set_singleton_header(msg, 'Cc', ', '.join(cc_emails))
+        if bcc_emails: set_singleton_header(msg, 'Bcc', ', '.join(bcc_emails))
 
-        sender_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
+        sender_domain = extract_domain_from_email(sender_email)
         msg_id = make_msgid(domain=sender_domain)
-        msg['Message-ID'] = msg_id
+        set_singleton_header(msg, 'Message-ID', msg_id)
+        set_singleton_header(msg, 'Subject', subject or '')
 
         # Email open tracking (opt-in per email AND permitted by the global setting;
         # decided server-side, a missing preference means NOT tracked).
         import uuid
         from django.conf import settings
         import html
-        from .tracking_utils import resolve_open_tracking, build_tracking_pixel_html
-        open_tracking_enabled = resolve_open_tracking(request.data.get('open_tracking_enabled'))
+        from .tracking_utils import (
+            parse_bool,
+            global_open_tracking_enabled,
+            validate_tracking_configuration,
+            build_tracking_pixel_html,
+            strip_application_tracking_markup,
+        )
+        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'))
+        if requested_tracking and global_open_tracking_enabled():
+            valid_cfg, cfg_err = validate_tracking_configuration()
+            if not valid_cfg:
+                return Response({
+                    'error': f'Cannot send tracked email: {cfg_err} Either configure a valid public HTTPS EMAIL_TRACKING_BASE_URL or disable open tracking for this message.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            open_tracking_enabled = True
+        else:
+            open_tracking_enabled = False
+
         tracking_token = uuid.uuid4()
 
         # Optional saved template / signature (owner-validated at send time).
@@ -1191,8 +1223,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             except (ComposeError, ValueError) as exc:
                 return Response({'error': str(exc) or 'Invalid template or signature.'}, status=status.HTTP_400_BAD_REQUEST)
             subject = composed['subject']
-            del msg['Subject']
-            msg['Subject'] = subject
+            set_singleton_header(msg, 'Subject', subject or '')
             body = composed['text_body']
 
         effective_signature = ''
@@ -1220,15 +1251,27 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         else:
             main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
 
-        tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}" if open_tracking_enabled else ''
-        html_content = f"""<html><body>
-{main_html}<br>{html_signature}{tracking_pixel}
+        raw_html_content = f"""<html><body>
+{main_html}<br>{html_signature}
 </body></html>"""
+
+        # Strip any stale application-owned tracking images or verified communication badges
+        cleaned_html = strip_application_tracking_markup(raw_html_content)
+
+        # Inject single tracking pixel only if open tracking is authorized and enabled
+        if open_tracking_enabled:
+            tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}\n"
+            if '</body>' in cleaned_html:
+                html_content = cleaned_html.replace('</body>', f'{tracking_pixel}</body>', 1)
+            else:
+                html_content = f'{cleaned_html}{tracking_pixel}'
+        else:
+            html_content = cleaned_html
 
         # Convert embedded Base64 images to inline MIME CID attachments for cross-client
         # rendering (major clients like Gmail and Outlook block or print raw data:image URIs)
         from accounts.template_utils import convert_base64_images_to_cid
-        email_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
+        email_domain = extract_domain_from_email(sender_email)
         html_content, inline_images = convert_base64_images_to_cid(html_content, domain=email_domain)
         msg.add_alternative(html_content, subtype='html')
 
@@ -1677,13 +1720,36 @@ class EmailTrackingView(View):
 
 class EmailLinkClickTrackingView(View):
     def get(self, request, tracking_token, *args, **kwargs):
-        dest_url = request.GET.get('url', '/')
+        dest_url = (request.GET.get('url') or '/').strip()
+
+        # 1. Require an existing email record with active open tracking
+        email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
+        if not email or not email.open_tracking_enabled:
+            from django.http import HttpResponseBadRequest
+            return HttpResponseBadRequest("Invalid or untracked email link.")
+
+        # 2. Reject control characters and header injection attempts in destination URL
+        if any(c in dest_url for c in ('\r', '\n', '\x00')):
+            from django.http import HttpResponseBadRequest
+            return HttpResponseBadRequest("Malformed redirect target.")
+
+        # 3. Reject protocol-relative URLs that evade scheme checks (e.g. //evil.com)
+        if dest_url.startswith('//'):
+            from django.http import HttpResponseBadRequest
+            return HttpResponseBadRequest("Protocol-relative URLs are not permitted.")
+
+        # 4. Enforce safe schemes (http, https, or relative path)
+        import urllib.parse
+        parsed = urllib.parse.urlsplit(dest_url)
+        if parsed.scheme and parsed.scheme.lower() not in ('http', 'https'):
+            from django.http import HttpResponseBadRequest
+            return HttpResponseBadRequest("Destination URL scheme must be HTTP or HTTPS.")
+
         try:
-            email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
-            if email and email.open_tracking_enabled:
-                record_email_click_event(email, request, dest_url)
+            record_email_click_event(email, request, dest_url)
         except Exception:
             pass
+
         return HttpResponseRedirect(dest_url)
 
 

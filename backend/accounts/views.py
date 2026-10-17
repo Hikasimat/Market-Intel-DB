@@ -707,9 +707,18 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         subject = request.data.get('subject', '')
         body = request.data.get('body', '')
 
+        from prospects.email_composition import (
+            format_sender_address,
+            validate_and_sanitize_recipient,
+            set_singleton_header,
+            extract_domain_from_email,
+        )
+
         def _parse_addrs(val):
             if not val:
                 return []
+            if any(c in str(val) for c in ('\r', '\n', '\x00')):
+                raise ValueError("Recipient address contains invalid control characters or newlines.")
             if isinstance(val, list):
                 raw_items = val
             elif isinstance(val, str) and val.strip().startswith('['):
@@ -725,15 +734,28 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             import email.utils
             extracted = []
             for item in raw_items:
-                for _, addr in email.utils.getaddresses([str(item)]):
+                item_str = str(item).strip()
+                if not item_str:
+                    continue
+                if any(c in item_str for c in ('\r', '\n', '\x00')):
+                    raise ValueError("Recipient address contains invalid control characters or newlines.")
+                parsed_list = email.utils.getaddresses([item_str])
+                if not parsed_list or not any(addr for _, addr in parsed_list):
+                    raise ValueError(f"Malformed recipient address: {item_str!r}")
+                for _, addr in parsed_list:
                     addr_clean = addr.strip()
-                    if addr_clean and addr_clean.lower() not in [e.lower() for e in extracted]:
-                        extracted.append(addr_clean)
+                    if addr_clean:
+                        validated = validate_and_sanitize_recipient(addr_clean)
+                        if validated.lower() not in [e.lower() for e in extracted]:
+                            extracted.append(validated)
             return extracted
 
-        to_list = _parse_addrs(to_address)
-        cc_list = [c for c in _parse_addrs(cc_address) if c.lower() not in [t.lower() for t in to_list]]
-        bcc_list = [b for b in _parse_addrs(bcc_address) if b.lower() not in [t.lower() for t in to_list] and b.lower() not in [c.lower() for c in cc_list]]
+        try:
+            to_list = _parse_addrs(to_address)
+            cc_list = [c for c in _parse_addrs(cc_address) if c.lower() not in [t.lower() for t in to_list]]
+            bcc_list = [b for b in _parse_addrs(bcc_address) if b.lower() not in [t.lower() for t in to_list] and b.lower() not in [c.lower() for c in cc_list]]
+        except ValueError as exc:
+            return Response({'error': f'Invalid recipient: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not to_list:
             return Response({'error': 'To address is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -767,28 +789,55 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             full_body += f"\n\n{effective_signature}"
 
         from email.message import EmailMessage
-        from email.utils import make_msgid
+        from email.utils import make_msgid, formatdate
         import html
 
-        email_domain = sender_email.split('@')[-1] if '@' in sender_email else 'gmail.com'
+        email_domain = extract_domain_from_email(sender_email)
         msg = EmailMessage()
-        msg['Subject'] = subject
-        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
-        msg['To'] = ', '.join(to_list)
+
+        try:
+            from_header_val = format_sender_address(sender_display_name, sender_email)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        set_singleton_header(msg, 'From', from_header_val)
+        reply_to_requested = request.data.get('reply_to')
+        if reply_to_requested and reply_to_requested.strip() and reply_to_requested.strip().lower() != sender_email.lower():
+            set_singleton_header(msg, 'Reply-To', reply_to_requested.strip())
+        set_singleton_header(msg, 'Date', formatdate(localtime=True))
+        set_singleton_header(msg, 'Subject', subject or '')
+        set_singleton_header(msg, 'To', ', '.join(to_list))
         if cc_list:
-            msg['Cc'] = ', '.join(cc_list)
+            set_singleton_header(msg, 'Cc', ', '.join(cc_list))
         if bcc_list:
-            msg['Bcc'] = ', '.join(bcc_list)
+            set_singleton_header(msg, 'Bcc', ', '.join(bcc_list))
+
         # Open tracking: opt-in per email AND permitted by EMAIL_OPEN_TRACKING_ENABLED.
         # A missing request value means NOT tracked (decided server-side).
         import uuid
         from django.conf import settings
         from django.utils import timezone
-        from prospects.tracking_utils import resolve_open_tracking, build_tracking_pixel_html
-        open_tracking_enabled = resolve_open_tracking(request.data.get('open_tracking_enabled'))
+        from prospects.tracking_utils import (
+            parse_bool,
+            global_open_tracking_enabled,
+            validate_tracking_configuration,
+            build_tracking_pixel_html,
+            strip_application_tracking_markup,
+        )
+        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'))
+        if requested_tracking and global_open_tracking_enabled():
+            valid_cfg, cfg_err = validate_tracking_configuration()
+            if not valid_cfg:
+                return Response({
+                    'error': f'Cannot send tracked email: {cfg_err} Either configure a valid public HTTPS EMAIL_TRACKING_BASE_URL or disable open tracking for this message.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            open_tracking_enabled = True
+        else:
+            open_tracking_enabled = False
+
         tracking_token = uuid.uuid4()
 
-        msg['Message-ID'] = make_msgid(domain=email_domain)
+        set_singleton_header(msg, 'Message-ID', make_msgid(domain=email_domain))
         msg.set_content(full_body)
 
         # HTML alternative
@@ -804,10 +853,22 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         else:
             main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
 
-        tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}" if open_tracking_enabled else ''
-        html_content = f"""<html><body>
-{main_html}<br>{html_signature}{tracking_pixel}
+        raw_html_content = f"""<html><body>
+{main_html}<br>{html_signature}
 </body></html>"""
+
+        # Strip any stale application-owned tracking images or verified communication badges
+        cleaned_html = strip_application_tracking_markup(raw_html_content)
+
+        # Inject single tracking pixel only if open tracking is authorized and enabled
+        if open_tracking_enabled:
+            tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}\n"
+            if '</body>' in cleaned_html:
+                html_content = cleaned_html.replace('</body>', f'{tracking_pixel}</body>', 1)
+            else:
+                html_content = f'{cleaned_html}{tracking_pixel}'
+        else:
+            html_content = cleaned_html
 
         from accounts.template_utils import convert_base64_images_to_cid
         html_content, inline_images = convert_base64_images_to_cid(html_content, domain=email_domain)
@@ -1033,21 +1094,35 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         thread_id = request.data.get('thread_id')
 
         from email.message import EmailMessage
-        from email.utils import make_msgid
+        from email.utils import make_msgid, formatdate
+        from prospects.email_composition import (
+            format_sender_address,
+            set_singleton_header,
+            extract_domain_from_email,
+        )
         import html
 
         sender_email = google_creds.email
         sender_display_name = user.get_full_name() or user.username
         msg = EmailMessage()
-        msg['Subject'] = subject
-        msg['From'] = f"{sender_display_name} <{sender_email}>" if sender_display_name else sender_email
+
+        try:
+            from_header_val = format_sender_address(sender_display_name, sender_email)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        set_singleton_header(msg, 'From', from_header_val)
+        set_singleton_header(msg, 'Date', formatdate(localtime=True))
+        set_singleton_header(msg, 'Subject', subject or '')
         if to_address:
-            msg['To'] = to_address
+            set_singleton_header(msg, 'To', to_address)
         if cc_address:
-            msg['Cc'] = cc_address
+            set_singleton_header(msg, 'Cc', cc_address)
         if bcc_address:
-            msg['Bcc'] = bcc_address
-        msg['Message-ID'] = make_msgid(domain='gmail.com')
+            set_singleton_header(msg, 'Bcc', bcc_address)
+
+        email_domain = extract_domain_from_email(sender_email)
+        set_singleton_header(msg, 'Message-ID', make_msgid(domain=email_domain))
         msg.set_content(body)
 
         html_body = html.escape(body).replace('\n', '<br>')

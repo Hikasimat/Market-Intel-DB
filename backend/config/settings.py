@@ -216,6 +216,11 @@ EMAIL_OPEN_TRACKING_ENABLED = (
     os.getenv('EMAIL_OPEN_TRACKING_ENABLED', 'true').lower() == 'true'
 )
 
+# In development or testing, allow local or tunnel URLs
+EMAIL_TRACKING_ALLOW_LOCAL = os.getenv(
+    'EMAIL_TRACKING_ALLOW_LOCAL', str(DEBUG)
+).lower() in ('true', '1', 't')
+
 # Controls how recipient mailbox existence is probed during email verification.
 #   mx_only    (default) — syntax + MX only; safe for EC2 / any env where
 #                          outbound port 25 is blocked.
