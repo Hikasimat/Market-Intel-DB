@@ -21,6 +21,13 @@ from .views import (
     GmailOAuthDisconnectView,
 )
 from .template_views import EmailTemplateViewSet, EmailSignatureTemplateViewSet
+from .calendar_views import (
+    CalendarOAuthURLView,
+    CalendarOAuthCallbackView,
+    CalendarOAuthStatusView,
+    CalendarOAuthDisconnectView,
+    CalendarEventsView,
+)
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
@@ -86,5 +93,12 @@ urlpatterns = [
     path('google/gmail/callback/', GmailOAuthCallbackView.as_view(), name='gmail_oauth_callback'),
     path('google/gmail/status/', GmailOAuthStatusView.as_view(), name='gmail_oauth_status'),
     path('google/gmail/disconnect/', GmailOAuthDisconnectView.as_view(), name='gmail_oauth_disconnect'),
+
+    # Separate, optional Google Calendar authorization (calendar.events only)
+    path('google/calendar/url/', CalendarOAuthURLView.as_view(), name='calendar_oauth_url'),
+    path('google/calendar/callback/', CalendarOAuthCallbackView.as_view(), name='calendar_oauth_callback'),
+    path('google/calendar/status/', CalendarOAuthStatusView.as_view(), name='calendar_oauth_status'),
+    path('google/calendar/disconnect/', CalendarOAuthDisconnectView.as_view(), name='calendar_oauth_disconnect'),
+    path('google/calendar/events/', CalendarEventsView.as_view(), name='calendar_events'),
 ]
 

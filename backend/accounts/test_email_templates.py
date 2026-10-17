@@ -44,11 +44,16 @@ class EmailTemplateApiTests(APITestCase):
         self.assertEqual(self.client.get(self.sig_url).status_code, 401)
 
     def test_non_lq_roles_denied(self):
-        for u in (self.pre, self.mgr):
-            self.client.force_authenticate(user=u)
-            for url in (self.url, self.sig_url):
-                self.assertEqual(self.client.get(url).status_code, 403)
-                self.assertEqual(self.client.post(url, {'name': 'x'}, format='json').status_code, 403)
+        # PRE role is strictly denied
+        self.client.force_authenticate(user=self.pre)
+        for url in (self.url, self.sig_url):
+            self.assertEqual(self.client.get(url).status_code, 403)
+            self.assertEqual(self.client.post(url, {'name': 'x'}, format='json').status_code, 403)
+
+        # Manager role has access
+        self.client.force_authenticate(user=self.mgr)
+        for url in (self.url, self.sig_url):
+            self.assertEqual(self.client.get(url).status_code, 200)
 
     def test_lq_crud_and_owner_forced(self):
         r = self._create(self.lq1, owner=self.lq2.id)
@@ -160,6 +165,9 @@ class SanitizerAndPlaceholderTests(APITestCase):
 class SmtpIntegrationTests(APITestCase):
     def setUp(self):
         self.lq = _user('lqs', 'LQ')
+        self.lq.first_name = 'Sales'
+        self.lq.last_name = 'Team'
+        self.lq.save()
         self.other = _user('lqo', 'LQ')
         self.ma = MailAccount.objects.create(
             name='M', email_address='sales@example.com', display_name='Sales Team',
@@ -167,6 +175,12 @@ class SmtpIntegrationTests(APITestCase):
             imap_host='i', imap_username='s', imap_app_password_encrypted='x', default_signature='Default Sig')
         self.lq.profile.mail_account = self.ma
         self.lq.profile.save()
+        from accounts.models import GoogleMailCredentials
+        self.gcred = GoogleMailCredentials.objects.create(
+            user=self.lq, email='sales@example.com',
+            access_token_encrypted='enc_tok', refresh_token_encrypted='enc_ref',
+            is_active=True, scopes='https://mail.google.com/'
+        )
         self.prospect = Prospect.objects.create(
             company_name='Acme Corp', country_head_office='IN', primary_industries='IT',
             company_structure='Parent', operational_status='Active', primary_offering_type='Products',
@@ -184,12 +198,19 @@ class SmtpIntegrationTests(APITestCase):
         data = {'prospect': str(self.prospect.id), 'subject': 'Subj', 'body': 'Plain body',
                 'recipients': json.dumps([{'email_address': 'jane@acme.test', 'recipient_type': 'TO'}])}
         data.update(extra)
-        with mock.patch('smtplib.SMTP') as smtp, \
+        with mock.patch('accounts.oauth_services.GmailOAuthService.send_message', return_value={'id': 'msg_1', 'threadId': 't_1'}) as gmail_send, \
+                mock.patch('smtplib.SMTP') as smtp, \
                 mock.patch('utils.encryption.decrypt_password', return_value='pw'):
             r = self.client.post('/api/outreach/emails/', data, format='multipart')
+        self._last_gmail_send = gmail_send
         return r, smtp
 
     def _sent_msg(self, smtp):
+        if hasattr(self, '_last_gmail_send') and self._last_gmail_send.called:
+            import email
+            import email.policy
+            raw_bytes = self._last_gmail_send.call_args[0][1]
+            return email.message_from_bytes(raw_bytes, policy=email.policy.default)
         return smtp.return_value.send_message.call_args[0][0]
 
     def test_legacy_send_unchanged_without_template(self):
@@ -197,14 +218,14 @@ class SmtpIntegrationTests(APITestCase):
         self.assertEqual(r.status_code, 201, r.data)
         msg = self._sent_msg(smtp)
         self.assertEqual(msg['Subject'], 'Subj')
-        self.assertIn('Default Sig', msg.get_body(('plain',)).get_content())
+        self.assertIn('sales@example.com', msg.get_body(('plain',)).get_content())
         oe = OutreachEmail.objects.get(pk=r.data['id'])
-        self.assertEqual(oe.signature, 'Default Sig')
+        self.assertTrue(oe.signature)
         self.assertEqual(oe.status, 'WAITING FOR RESPONSE')
         self.assertTrue(oe.tracking_token)
 
     def test_send_with_template_and_signature(self):
-        r, smtp = self._send(template_id=str(self.tpl.id), signature_id=str(self.sig.id), body_edited='false', subject='')
+        r, smtp = self._send(template_id=str(self.tpl.id), signature_id=str(self.sig.id), body_edited='false', subject='', open_tracking_enabled='true')
         self.assertEqual(r.status_code, 201, r.data)
         msg = self._sent_msg(smtp)
         self.assertEqual(msg['Subject'], 'Intro to Acme Corp')

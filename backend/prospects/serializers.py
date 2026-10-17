@@ -469,10 +469,11 @@ class MeetingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'prospect', 'company_name', 'key_person_name', 'scheduled_datetime',
             'meeting_link', 'agenda', 'is_completed',
+            'meeting_provider', 'conference_status',
             'notified_1h', 'notified_30m', 'notified_15m',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'meeting_provider', 'conference_status']
 
     def get_key_person_name(self, obj):
         if hasattr(obj, 'prospect_contact') and obj.prospect_contact:
@@ -502,6 +503,8 @@ class OutreachEmailSerializer(serializers.ModelSerializer):
 
     def get_estimated_read_time_formatted(self, obj):
         seconds = obj.total_seconds_spent or 0
+        if not obj.open_tracking_enabled:
+            return "0s"
         if not obj.is_opened and seconds == 0:
             return "0s"
         if seconds < 60:
@@ -511,6 +514,8 @@ class OutreachEmailSerializer(serializers.ModelSerializer):
         return f"{mins}m {secs}s" if secs else f"{mins}m"
 
     def get_reading_engagement(self, obj):
+        if not obj.open_tracking_enabled:
+            return "Open tracking disabled"
         if not obj.is_opened:
             return "Not Viewed"
         secs = obj.total_seconds_spent or 0
@@ -528,14 +533,14 @@ class OutreachEmailSerializer(serializers.ModelSerializer):
             'id', 'prospect', 'created_by', 'sender_mail_account', 'from_email', 'from_name',
             'subject', 'body', 'signature', 'status', 'sent_at', 'message_id', 'thread_id',
             'in_reply_to', 'references', 'created_at', 'updated_at', 'recipients', 'attachments',
-            'is_opened', 'opened_at', 'tracking_token', 'open_count', 'first_opened_at',
+            'is_opened', 'opened_at', 'tracking_token', 'open_tracking_enabled', 'open_count', 'first_opened_at',
             'last_opened_at', 'total_seconds_spent', 'open_history',
             'estimated_read_time_formatted', 'reading_engagement'
         ]
         read_only_fields = [
             'id', 'created_by', 'sender_mail_account', 'status', 'sent_at', 'message_id',
             'thread_id', 'in_reply_to', 'references', 'created_at', 'updated_at', 'is_opened',
-            'opened_at', 'tracking_token', 'open_count', 'first_opened_at', 'last_opened_at',
+            'opened_at', 'tracking_token', 'open_tracking_enabled', 'open_count', 'first_opened_at', 'last_opened_at',
             'total_seconds_spent', 'open_history'
         ]
 

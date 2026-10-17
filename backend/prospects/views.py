@@ -1,7 +1,7 @@
 import uuid
 from django.utils import timezone
 from rest_framework.decorators import action, api_view
-from accounts.permissions import IsPRE, IsLQ, IsPREOrLQ, IsManagerOrSuperuser
+from accounts.permissions import IsPRE, IsLQ, IsPREOrLQ, IsManagerOrSuperuser, IsLQOrManager
 from rest_framework import viewsets, filters, status, permissions
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
@@ -707,15 +707,13 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         user = getattr(self.request, 'user', None)
-        is_manager = (
+        is_pre = (
             user and not user.is_superuser and
             hasattr(user, 'profile') and
-            getattr(user.profile, 'role', None) == 'MANAGER'
+            getattr(user.profile, 'role', None) == 'PRE'
         )
-        if is_manager:
-            if self.action in ['list', 'retrieve', 'pending']:
-                return [IsManagerOrSuperuser()]
-            raise PermissionDenied('Managers cannot modify meetings.')
+        if is_pre:
+            raise PermissionDenied('PRE users cannot access meetings.')
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -747,6 +745,146 @@ class MeetingViewSet(viewsets.ModelViewSet):
             return queryset.none()
         # PRE or other roles: show all meetings
         return queryset
+
+    # ── Google Meet integration ──────────────────────────────────────────────
+    # Manual calendar feature has been completely removed: all meetings require Google Meet.
+    def create(self, request, *args, **kwargs):
+        provider = str(request.data.get('meeting_provider') or 'GOOGLE_MEET').strip().upper()
+        if provider == 'MANUAL':
+            return self._meet_error(
+                'Manual calendar feature has been removed. All meetings must be scheduled through Google Calendar / Google Meet.',
+                'manual_calendar_removed',
+                status.HTTP_400_BAD_REQUEST
+            )
+        return self._create_google_meet(request)
+
+    @staticmethod
+    def _meet_error(message, code, http_status):
+        return Response({'error': message, 'code': code}, status=http_status)
+
+    def _create_google_meet(self, request):
+        import uuid
+        from django.core.validators import validate_email
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import IntegrityError, transaction
+        from accounts import calendar_services as cal
+
+        user = request.user
+        role = getattr(getattr(user, 'profile', None), 'role', None)
+        if not (user.is_superuser or role in ('LQ', 'MANAGER')):
+            raise PermissionDenied('Only Lead Qualifiers and Managers can create Google Meet meetings.')
+
+        client_request_id = str(request.data.get('client_request_id') or '').strip()
+        if not (8 <= len(client_request_id) <= 64):
+            return self._meet_error('A valid client_request_id is required for Google Meet.', 'invalid_request', status.HTTP_400_BAD_REQUEST)
+
+        # Idempotency: a retried/duplicate submit returns the original meeting.
+        existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+        if existing:
+            if existing.google_calendar_owner_id != user.id:
+                raise PermissionDenied('This request id belongs to another user.')
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prospect = serializer.validated_data['prospect']
+
+        # Same prospect-assignment rule LQs are already bound by.
+        if not apply_lq_distribution_filter(Prospect.objects.filter(pk=prospect.pk), user).exists():
+            raise PermissionDenied('You do not have access to this prospect.')
+
+        contact, attendees = None, []
+        contact_id = request.data.get('prospect_contact')
+        if contact_id:
+            contact = ProspectContact.objects.filter(pk=contact_id, prospect=prospect).first()
+            if not contact:
+                return self._meet_error('Selected key person does not belong to this prospect.', 'invalid_contact', status.HTTP_400_BAD_REQUEST)
+            candidate = (contact.official_email or '').strip()
+            if candidate:
+                try:
+                    validate_email(candidate)
+                    attendees.append(candidate)
+                except DjangoValidationError:
+                    pass  # invalid contact email: schedule without attendee
+
+        # Only the requesting user's own Calendar credentials are ever used.
+        creds = cal.get_calendar_credentials(user)
+        if not creds:
+            return self._meet_error('Google Calendar is not connected. Connect it to generate a Google Meet link.',
+                                    'calendar_not_connected', status.HTTP_409_CONFLICT)
+
+        tz_name = getattr(getattr(user, 'profile', None), 'timezone', None) or 'UTC'
+        try:
+            result = cal.create_meet_event(
+                creds,
+                summary=prospect.company_name,
+                description=serializer.validated_data.get('agenda') or '',
+                start_dt=serializer.validated_data['scheduled_datetime'],
+                tz_name=tz_name,
+                attendees=attendees,
+                client_request_id=client_request_id,
+            )
+        except cal.CalendarAuthError as exc:
+            return self._meet_error(str(exc), 'calendar_reauth_required', status.HTTP_409_CONFLICT)
+        except cal.CalendarConferenceError as exc:
+            return self._meet_error(str(exc), 'conference_failed', status.HTTP_502_BAD_GATEWAY)
+        except cal.CalendarError as exc:
+            return self._meet_error(str(exc) or 'Google Calendar request failed.', 'calendar_api_error', status.HTTP_502_BAD_GATEWAY)
+
+        try:
+            with transaction.atomic():
+                meeting = serializer.save(
+                    meeting_link=result['meet_url'] or '',
+                    meeting_provider='GOOGLE_MEET',
+                    google_event_id=result['event_id'],
+                    google_calendar_owner=user,
+                    conference_status=result['status'],
+                    client_request_id=client_request_id,
+                    prospect_contact=contact,
+                )
+        except IntegrityError:
+            existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+            if existing and existing.google_calendar_owner_id == user.id:
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+            cal.delete_event(creds, result['event_id'])
+            raise
+        except Exception:
+            cal.delete_event(creds, result['event_id'])  # no orphaned external event
+            raise
+
+        http_status = status.HTTP_201_CREATED if result['status'] == 'READY' else status.HTTP_202_ACCEPTED
+        return Response(self.get_serializer(meeting).data, status=http_status)
+
+    @action(detail=True, methods=['post'], url_path='refresh-meet-link')
+    def refresh_meet_link(self, request, pk=None):
+        """Fetch the Meet URL for an event whose conference was still pending."""
+        from accounts import calendar_services as cal
+
+        meeting = self.get_object()
+        if meeting.meeting_provider != 'GOOGLE_MEET' or not meeting.google_event_id:
+            return self._meet_error('This meeting is not a Google Meet meeting.', 'not_google_meet', status.HTTP_400_BAD_REQUEST)
+        if meeting.google_calendar_owner_id != request.user.id:
+            raise PermissionDenied('Only the user who created this meeting can refresh its Meet link.')
+        if meeting.conference_status == 'READY' and meeting.meeting_link:
+            return Response(self.get_serializer(meeting).data)
+
+        creds = cal.get_calendar_credentials(request.user)
+        if not creds:
+            return self._meet_error('Google Calendar is not connected.', 'calendar_not_connected', status.HTTP_409_CONFLICT)
+        try:
+            result = cal.get_event_conference(creds, meeting.google_event_id)
+        except cal.CalendarAuthError as exc:
+            return self._meet_error(str(exc), 'calendar_reauth_required', status.HTTP_409_CONFLICT)
+        except cal.CalendarError as exc:
+            return self._meet_error(str(exc) or 'Google Calendar request failed.', 'calendar_api_error', status.HTTP_502_BAD_GATEWAY)
+
+        meeting.conference_status = result['status']
+        if result['status'] == 'READY':
+            meeting.meeting_link = result['meet_url']
+        meeting.save(update_fields=['conference_status', 'meeting_link', 'updated_at'])
+        http_status = status.HTTP_200_OK if result['status'] == 'READY' else (
+            status.HTTP_202_ACCEPTED if result['status'] == 'PENDING' else status.HTTP_502_BAD_GATEWAY)
+        return Response(self.get_serializer(meeting).data, status=http_status)
 
     @action(detail=False, methods=['get'], url_path='pending')
     def pending(self, request):
@@ -908,9 +1046,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     serializer_class = OutreachEmailSerializer
 
     def get_permissions(self):
-        if self.action in ['tracking_stats', 'simulate_open', 'by_token']:
+        if self.action in ['tracking_stats', 'simulate_open', 'by_token', 'tracking_config']:
             return [permissions.IsAuthenticated()]
-        return [IsPREOrLQ()]
+        return [IsLQOrManager()]
 
     def get_queryset(self):
         user = self.request.user
@@ -928,6 +1066,12 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             
         return queryset
 
+    @action(detail=False, methods=['get'], url_path='tracking-config')
+    def tracking_config(self, request):
+        """Whether the server allows open tracking at all (EMAIL_OPEN_TRACKING_ENABLED)."""
+        from .tracking_utils import global_open_tracking_enabled
+        return Response({'open_tracking_available': global_open_tracking_enabled()})
+
     @action(detail=True, methods=['get'], url_path='tracking-stats')
     def tracking_stats(self, request, pk=None):
         email = self.get_object()
@@ -937,6 +1081,11 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='simulate-open')
     def simulate_open(self, request, pk=None):
         email = self.get_object()
+        if not email.open_tracking_enabled:
+            return Response(
+                {'error': 'Open tracking was not enabled for this email.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record_email_open_event(email, request, simulated=True)
         serializer = self.get_serializer(email)
         return Response({'success': True, 'data': serializer.data})
@@ -959,12 +1108,13 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
 
     def create(self, request, *args, **kwargs):
-        if hasattr(self.request.user, 'profile') and self.request.user.profile.role != 'LQ':
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ users can send emails.")
         user = request.user
-        from accounts.models import GoogleMailCredentials
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        role = getattr(getattr(user, 'profile', None), 'role', None)
+        if not (user.is_superuser or role in ('LQ', 'MANAGER')):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only LQ and Manager users can send emails.")
+        from accounts.oauth_services import get_mail_credentials
+        google_creds = get_mail_credentials(user)
 
         if not google_creds:
             return Response({'error': 'Google Mail connection not found. Please connect your Google account to send emails.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1017,12 +1167,14 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         msg_id = make_msgid(domain=sender_domain)
         msg['Message-ID'] = msg_id
 
-        # Email open tracking
+        # Email open tracking (opt-in per email AND permitted by the global setting;
+        # decided server-side, a missing preference means NOT tracked).
         import uuid
         from django.conf import settings
         import html
+        from .tracking_utils import resolve_open_tracking, build_tracking_pixel_html
+        open_tracking_enabled = resolve_open_tracking(request.data.get('open_tracking_enabled'))
         tracking_token = uuid.uuid4()
-        tracking_url = f"{settings.EMAIL_TRACKING_BASE_URL}/api/email-tracking/{tracking_token}/"
 
         # Optional saved template / signature (owner-validated at send time).
         template_id = request.data.get('template_id') or None
@@ -1068,9 +1220,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         else:
             main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
 
+        tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}" if open_tracking_enabled else ''
         html_content = f"""<html><body>
-{main_html}<br>{html_signature}
-<img src="{tracking_url}" width="1" height="1" alt="" style="display:none;width:1px;height:1px;border:0;">
+{main_html}<br>{html_signature}{tracking_pixel}
 </body></html>"""
 
         # Convert embedded Base64 images to inline MIME CID attachments for cross-client
@@ -1120,6 +1272,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             message_id=msg_id,
             thread_id=msg_id,
             tracking_token=tracking_token,
+            open_tracking_enabled=open_tracking_enabled,
             references=f"sender_ip:{sender_ip}"
         )
 
@@ -1188,13 +1341,14 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='compose-preview')
     def compose_preview(self, request):
         """Render exactly what would be sent for a saved template/signature. Never sends."""
-        if not hasattr(request.user, 'profile') or request.user.profile.role != 'LQ':
+        user_role = getattr(getattr(request.user, 'profile', None), 'role', None)
+        if not (request.user.is_superuser or user_role in ('LQ', 'MANAGER')):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ users can preview emails.")
+            raise PermissionDenied("Only LQ and Manager users can preview emails.")
         from accounts.template_utils import build_email_content, ComposeError
         user = request.user
-        from accounts.models import GoogleMailCredentials
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        from accounts.oauth_services import get_mail_credentials
+        google_creds = get_mail_credentials(user)
         prospect = Prospect.objects.filter(id=request.data.get('prospect')).first()
         to_emails = request.data.get('to_emails') or []
         try:
@@ -1469,9 +1623,8 @@ def record_email_click_event(email, request, dest_url):
 
 class EmailTrackingView(View):
     def get(self, request, tracking_token, *args, **kwargs):
-        # 1x1 transparent GIF base64 decoded
+        # Standard transparent GIF for signature beacon
         PIXEL_GIF_DATA = b'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
-
         response = HttpResponse(PIXEL_GIF_DATA, content_type='image/gif')
         response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
         response['Pragma'] = 'no-cache'
@@ -1479,6 +1632,9 @@ class EmailTrackingView(View):
 
         try:
             email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
+            if email and not email.open_tracking_enabled:
+                # Tracking was never enabled for this message: never record an open.
+                return response
             if email:
                 # ── SENDER SELF-OPEN FILTERING ──────────────────────────
                 # 1. Ignore if request has referer or origin from our app
@@ -1524,7 +1680,7 @@ class EmailLinkClickTrackingView(View):
         dest_url = request.GET.get('url', '/')
         try:
             email = OutreachEmail.objects.filter(tracking_token=tracking_token).first()
-            if email:
+            if email and email.open_tracking_enabled:
                 record_email_click_event(email, request, dest_url)
         except Exception:
             pass

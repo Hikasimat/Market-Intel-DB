@@ -25,6 +25,7 @@ import ManagerAuditPage from '../pages/ManagerAuditPage';
 import WhatsappPage from '../pages/WhatsappPage';
 import SettingsPage from '../pages/SettingsPage';
 import GmailCallbackPage from '../pages/GmailCallbackPage';
+import CalendarCallbackPage from '../pages/CalendarCallbackPage';
 
 import Layout from '../components/layout/Layout';
 
@@ -78,6 +79,7 @@ const AppRouter = () => {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/auth/google/callback" element={<LoginPage />} />
         <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
+        <Route path="/auth/calendar/callback" element={<CalendarCallbackPage />} />
         
         {/* ── Manager routes ────────────────────────────────── */}
         <Route path="/manager-dashboard" element={
@@ -132,9 +134,9 @@ const AppRouter = () => {
           <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
           <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
 
-          <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['LQ']}><OutreachActivityDetailPage /></RoleRoute>} />
-          <Route path="inbox" element={<RoleRoute allowedRoles={['LQ']}><InboxPage /></RoleRoute>} />
-          <Route path="calendar" element={<RoleRoute allowedRoles={['LQ']}><LqCalendarPage /></RoleRoute>} />
+          <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
+          <Route path="inbox" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><InboxPage /></RoleRoute>} />
+          <Route path="calendar" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
           <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
           <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
         </Route>

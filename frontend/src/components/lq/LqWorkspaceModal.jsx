@@ -26,6 +26,8 @@ import { toast } from 'react-toastify';
 import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
 import TemplatePicker from './TemplatePicker';
+import OpenTrackingToggle from '../email/OpenTrackingToggle';
+import MeetingProviderPicker, { CreatedMeetingCard } from './MeetingProviderPicker';
 import { notifyMailSent } from '../../services/mailSyncService';
 
 const TimeSelect = ({ value, onChange, className }) => {
@@ -98,6 +100,7 @@ export default function LqWorkspaceModal({
   const [emailSubject, setEmailSubject] = useState(`Company Introduction & Solutions Overview — ${prospect.company_name || ''}`);
   const [emailBody, setEmailBody] = useState(`Dear ${prospect.company_name || 'Team'},\n\nWe are pleased to introduce our solution portfolio tailored for ${prospect.primary_industries || 'your industry'}. We would love to schedule a brief introductory discussion to explore potential alignment.\n\nBest regards,\nLead Qualification Team`);
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -177,6 +180,12 @@ export default function LqWorkspaceModal({
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingTime, setMeetingTime] = useState('');
   const [meetingLink, setMeetingLink] = useState('');
+  const [meetingProvider, setMeetingProvider] = useState('GOOGLE_MEET');
+  const [calendarStatus, setCalendarStatus] = useState(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [createdMeeting, setCreatedMeeting] = useState(null);
+  const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
+  const [isRefreshingMeet, setIsRefreshingMeet] = useState(false);
 
   // Inbound State
   const [inboundMode, setInboundMode] = useState(false);
@@ -350,6 +359,55 @@ export default function LqWorkspaceModal({
     }
   };
 
+  const fetchCalendarStatus = async () => {
+    setCalendarLoading(true);
+    try {
+      const res = await api.get('/auth/google/calendar/status/');
+      setCalendarStatus(res.data);
+    } catch (e) {
+      console.warn('Failed to fetch calendar status', e);
+      setCalendarStatus({ is_connected: false, is_configured: false });
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCalendarStatus();
+  }, []);
+
+  const handleConnectCalendar = async () => {
+    try {
+      const res = await api.get('/auth/google/calendar/url/');
+      const authUrl = res.data?.url || res.data?.authorization_url;
+      if (authUrl) {
+        localStorage.setItem('calendar_oauth_return_url', window.location.pathname + window.location.search);
+        window.location.href = authUrl;
+      } else {
+        toast.error('Google Calendar authorization URL was not returned.');
+      }
+    } catch (e) {
+      toast.error('Could not initiate Google Calendar connection.');
+    }
+  };
+
+  const handleRefreshMeetLink = async () => {
+    if (!createdMeeting?.id) return;
+    setIsRefreshingMeet(true);
+    try {
+      const res = await api.post(`/meetings/${createdMeeting.id}/refresh-meet-link/`);
+      setCreatedMeeting(res.data);
+      if (res.data?.meeting_link) {
+        setMeetingLink(res.data.meeting_link);
+      }
+      toast.success('Meeting link refreshed.');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to refresh Meet link.');
+    } finally {
+      setIsRefreshingMeet(false);
+    }
+  };
+
   const handleSimulateOpen = async () => {
     if (!sentEmailData?.id) return;
     setIsSimulatingOpen(true);
@@ -453,6 +511,7 @@ const handleAddCustomRecipient = (e) => {
         if (templateSelection.signatureId) formData.append('signature_id', templateSelection.signatureId);
         formData.append('body_edited', String(!templateSelection.templateId || emailBody !== templateSelection.baseBody));
       }
+      formData.append('open_tracking_enabled', String(openTrackingEnabled));
       
       const recList = [
         ...toEmails.map(r => ({ email_address: r, recipient_type: 'TO' })),
@@ -744,32 +803,58 @@ const handleAddCustomRecipient = (e) => {
 
     // Prospect Selected → set qualification_status to 'Lead Qualified' + close
     if (callStatus === 'Connected' && communicationOutcome === 'Lead Qualified') {
+      setIsCreatingMeeting(true);
       try {
+        let savedMeeting = null;
+        // Save Meeting if date & time exist
+        if (meetingDate && meetingTime) {
+          const scheduled_datetime = localDateTimeToUTC(meetingDate, meetingTime, user?.timezone);
+          const clientReqId = window.crypto?.randomUUID ? window.crypto.randomUUID() : (`req-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+          const payload = {
+            prospect: prospect.id,
+            prospect_contact: selectedContactId || null,
+            scheduled_datetime,
+            agenda: leadQualifiedDescription,
+            meeting_provider: 'GOOGLE_MEET',
+            client_request_id: clientReqId,
+          };
+          const meetRes = await api.post(`/meetings/`, payload);
+          savedMeeting = meetRes?.data;
+          setCreatedMeeting(savedMeeting);
+          if (savedMeeting?.meeting_link) {
+            setMeetingLink(savedMeeting.meeting_link);
+          }
+        }
+
         await api.patch(`/lq-pipeline/${selectedLq.id}/`, { 
             qualification_status: 'Lead Qualified',
             attended_meeting: attendedMeeting 
         });
 
-        // Save Meeting if date & time exist
-        if (meetingDate && meetingTime) {
-          const scheduled_datetime = localDateTimeToUTC(meetingDate, meetingTime, user?.timezone);
-          await api.post(`/meetings/`, {
-            prospect: prospect.id,
-            prospect_contact: selectedContactId || null,
-            scheduled_datetime,
-            meeting_link: meetingLink,
-            agenda: leadQualifiedDescription
-          });
-        }
+        toast.success(
+          savedMeeting?.meeting_provider === 'GOOGLE_MEET'
+            ? (savedMeeting.conference_status === 'CONFIRMED'
+                ? 'Meeting scheduled with Google Meet! Link ready.'
+                : 'Meeting scheduled. Google Meet link is being generated.')
+            : 'Activity saved successfully. Lead Qualified!'
+        );
       } catch (err) {
         console.error('Failed to update qualification status or schedule meeting', err);
+        const errMsg = err.response?.data?.error || err.response?.data?.detail || 'Failed to update qualification status or schedule meeting';
+        toast.error(errMsg);
+        if (
+          err.response?.status === 409 ||
+          err.response?.data?.code === 'calendar_reauth_required' ||
+          err.response?.data?.code === 'calendar_not_connected' ||
+          String(errMsg).toLowerCase().includes('reconnect')
+        ) {
+          setCalendarStatus({ is_connected: false, is_configured: true, email: '' });
+        }
+        setIsCreatingMeeting(false);
+        return;
+      } finally {
+        setIsCreatingMeeting(false);
       }
-      setLeadQualifiedDescription('');
-      setMeetingDate('');
-      setMeetingTime('');
-      setMeetingLink('');
-      setAttendedMeeting(false);
-      toast.success("Activity saved successfully. Lead Qualified!");
       return;
     }
     
@@ -1025,13 +1110,19 @@ const handleAddCustomRecipient = (e) => {
                                 type="button"
                                 onClick={() => handleOpenTrackingModal()}
                                 className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold uppercase border flex items-center gap-1 cursor-pointer transition hover:scale-105 ${
-                                  sentEmailData?.is_opened
-                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
-                                    : 'bg-slate-700 text-slate-300 border-slate-600'
+                                  sentEmailData?.open_tracking_enabled === false
+                                    ? 'bg-slate-800 text-slate-400 border-slate-700'
+                                    : sentEmailData?.is_opened
+                                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                                      : 'bg-slate-700 text-slate-300 border-slate-600'
                                 }`}
-                                title="Click to view detailed email tracking analytics"
+                                title={sentEmailData?.open_tracking_enabled === false ? 'Open tracking was disabled for deliverability' : 'Click to view detailed email tracking analytics'}
                               >
-                                {sentEmailData?.is_opened ? `👁 Viewed${(sentEmailData?.open_count || 1) > 1 ? ` (${sentEmailData.open_count}x)` : ''}` : 'Not Viewed'}
+                                {sentEmailData?.open_tracking_enabled === false
+                                  ? '🛡️ Untracked'
+                                  : sentEmailData?.is_opened
+                                    ? `👁 Viewed${(sentEmailData?.open_count || 1) > 1 ? ` (${sentEmailData.open_count}x)` : ''}`
+                                    : 'Not Viewed'}
                               </button>
                             )}
                           </div>
@@ -1189,6 +1280,13 @@ const handleAddCustomRecipient = (e) => {
                             )}
                             <p className="text-[9px] text-slate-400 font-medium">Max 10MB per file, 25MB total. Executables not allowed.</p>
                           </div>
+                        </div>
+                        <div className="py-2">
+                          <OpenTrackingToggle 
+                            checked={openTrackingEnabled} 
+                            onChange={setOpenTrackingEnabled} 
+                            disabled={isSendingEmail || isEmailSent} 
+                          />
                         </div>
                         <div className="flex items-center justify-between border-t border-slate-200 pt-3">
                           <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
@@ -1516,8 +1614,22 @@ const handleAddCustomRecipient = (e) => {
                                   </div>
                                 </div>
                                 <div>
-                                  <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Link</label>
-                                  <input type="text" value={meetingLink} onChange={(e) => setMeetingLink(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                                  <MeetingProviderPicker
+                                    calendarStatus={calendarStatus}
+                                    calendarLoading={calendarLoading}
+                                    onConnectCalendar={handleConnectCalendar}
+                                    isCreating={isCreatingMeeting}
+                                  />
+                                  {createdMeeting && (
+                                    <div className="mt-3">
+                                      <CreatedMeetingCard
+                                        meeting={createdMeeting}
+                                        onDismiss={() => setCreatedMeeting(null)}
+                                        onRefresh={handleRefreshMeetLink}
+                                        isRefreshing={isRefreshingMeet}
+                                      />
+                                    </div>
+                                  )}
                                 </div>
                                 <div>
                                   <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Agenda *</label>
@@ -1635,14 +1747,20 @@ const handleAddCustomRecipient = (e) => {
                   <div>
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-extrabold tracking-tight text-white">Email Tracking & Engagement Analytics</h3>
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
-                        activeEmailTracking?.is_opened
-                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
-                          : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
-                      }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${activeEmailTracking?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                        {activeEmailTracking?.is_opened ? `Viewed (${activeEmailTracking?.open_count || 1}x)` : 'Awaiting Open'}
-                      </span>
+                      {activeEmailTracking?.open_tracking_enabled === false ? (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border bg-slate-500/20 text-slate-300 border-slate-400/40 flex items-center gap-1">
+                          Tracking Disabled
+                        </span>
+                      ) : (
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
+                          activeEmailTracking?.is_opened
+                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                            : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${activeEmailTracking?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                          {activeEmailTracking?.is_opened ? `Viewed (${activeEmailTracking?.open_count || 1}x)` : 'Awaiting Open'}
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-slate-300 mt-0.5 truncate max-w-md">
                       {prospect.company_name} &bull; <span className="text-indigo-200 font-semibold">{activeEmailTracking?.subject || 'Introductory Email'}</span>
@@ -1660,6 +1778,11 @@ const handleAddCustomRecipient = (e) => {
 
               {/* Modal Body - Scrollable */}
               <div className="p-6 space-y-6 overflow-y-auto flex-1 text-slate-700 text-xs">
+                {activeEmailTracking?.open_tracking_enabled === false && (
+                  <div className="p-3 bg-slate-100 border border-slate-300 rounded-xl text-slate-700 text-xs font-semibold flex items-center gap-2">
+                    <span>🛡️ Open tracking was disabled for this email. Deliverability was prioritized and no tracking pixel was injected.</span>
+                  </div>
+                )}
                 {/* 4 KPI Metrics */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {/* Total Opens */}

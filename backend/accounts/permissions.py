@@ -26,6 +26,19 @@ class IsLQ(permissions.BasePermission):
         )
 
 
+class IsLQOrManager(permissions.BasePermission):
+    """Allows access to LQ, Manager, and Superuser (PRE role strictly excluded)."""
+    def has_permission(self, request, view):
+        if request.user and request.user.is_superuser:
+            return True
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            hasattr(request.user, 'profile') and
+            request.user.profile.role in ['LQ', 'MANAGER']
+        )
+
+
 class IsPREOrLQ(permissions.BasePermission):
     def has_permission(self, request, view):
         if request.user and request.user.is_superuser:

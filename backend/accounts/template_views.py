@@ -7,8 +7,8 @@ from .models import EmailTemplate, EmailSignatureTemplate
 from .template_serializers import EmailTemplateSerializer, EmailSignatureTemplateSerializer
 
 
-class IsLQOnly(permissions.BasePermission):
-    """Lead Qualifier role or superuser."""
+class IsLQOrManager(permissions.BasePermission):
+    """Lead Qualifier role, Manager role, or superuser (PRE role strictly excluded)."""
 
     def has_permission(self, request, view):
         user = request.user
@@ -17,11 +17,11 @@ class IsLQOnly(permissions.BasePermission):
         if user.is_superuser:
             return True
         profile = getattr(user, 'profile', None)
-        return bool(profile and profile.role == 'LQ')
+        return bool(profile and profile.role in ('LQ', 'MANAGER'))
 
 
 class _OwnedDesignViewSet(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated, IsLQOnly]
+    permission_classes = [permissions.IsAuthenticated, IsLQOrManager]
     model = None
 
     def get_queryset(self):

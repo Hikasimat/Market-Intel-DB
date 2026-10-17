@@ -182,6 +182,24 @@ class ComposeError(Exception):
     pass
 
 
+def sender_from_user(user):
+    """Helper to resolve sender email and display name for template context."""
+    if not user:
+        return None
+    try:
+        from accounts.models import GoogleMailCredentials
+        gcred = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        email = gcred.email if gcred else (user.email or '')
+        name = user.get_full_name() or user.username or ''
+    except Exception:
+        email = user.email or ''
+        name = user.get_full_name() or user.username or ''
+    return {
+        'display_name': name,
+        'email_address': email,
+    }
+
+
 def update_template_html_with_body(template_html, base_text, edited_text, ctx):
     """
     Applies edited body text into template_html so that the template design,

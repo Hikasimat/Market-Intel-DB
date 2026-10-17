@@ -12,7 +12,8 @@ import {
   reportIssueToPre,
   setPage
 } from '../features/lqPipeline/lqPipelineSlice';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { toast } from 'react-toastify';
 import LqWorkspaceModal from '../components/lq/LqWorkspaceModal';
 import Pagination from '../components/layout/Pagination';
 import api from '../services/api';
@@ -20,9 +21,19 @@ import api from '../services/api';
 const LqPipelinePage = ({ filter = 'all' }) => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { items, loading, page, count } = useSelector((state) => state.lqPipeline);
   const { user } = useSelector((state) => state.auth);
   const isManager = user?.role === 'MANAGER';
+
+  useEffect(() => {
+    if (searchParams.get('calendar_connected') === '1') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('calendar_connected');
+      setSearchParams(nextParams, { replace: true });
+      toast.success('Google Calendar connected successfully! You can now schedule Google Meet meetings.');
+    }
+  }, [searchParams, setSearchParams]);
   
   const [searchTerm, setSearchTerm] = useState(() => {
     const userId = user?.id || 'default';

@@ -278,6 +278,12 @@ GMAIL_OAUTH_REDIRECT_URI = os.getenv(
 ).strip()
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').strip().rstrip('/')
 
+# Separate, optional Google Calendar authorization (scope: calendar.events only).
+CALENDAR_OAUTH_REDIRECT_URI = os.getenv(
+    'CALENDAR_OAUTH_REDIRECT_URI', os.getenv('GMAIL_OAUTH_REDIRECT_URI', 'http://localhost:5173/auth/gmail/callback')
+).strip()
+MEETING_DEFAULT_DURATION_MINUTES = int(os.getenv('MEETING_DEFAULT_DURATION_MINUTES', '30'))
+
 
 
 

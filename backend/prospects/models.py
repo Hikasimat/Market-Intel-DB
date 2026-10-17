@@ -222,6 +222,19 @@ class Meeting(models.Model):
     agenda = models.TextField(blank=True, null=True)
     is_completed = models.BooleanField(default=False)
 
+    # Google Calendar / Meet sync (all optional; manual-link meetings leave these blank)
+    MEETING_PROVIDER_CHOICES = (('MANUAL', 'Manual link'), ('GOOGLE_MEET', 'Google Meet'))
+    meeting_provider = models.CharField(max_length=20, choices=MEETING_PROVIDER_CHOICES, default='MANUAL')
+    google_event_id = models.CharField(max_length=255, blank=True, null=True)
+    google_calendar_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    conference_status = models.CharField(max_length=20, blank=True, default='')
+    client_request_id = models.CharField(
+        max_length=64, blank=True, null=True, unique=True,
+        help_text='Idempotency key supplied by the client for Google Meet creation.'
+    )
+
     notified_1h = models.BooleanField(default=False)
     notified_30m = models.BooleanField(default=False)
     notified_15m = models.BooleanField(default=False)
@@ -250,6 +263,9 @@ class OutreachEmail(models.Model):
     in_reply_to = models.CharField(max_length=255, blank=True, null=True)
     references = models.TextField(blank=True, null=True)
     # Email open tracking
+    # Effective state: True only if the user opted in AND the global setting allowed it
+    # at send time. Legacy rows (sent before this field existed) are backfilled to True.
+    open_tracking_enabled = models.BooleanField(default=False)
     tracking_token = models.UUIDField(default=uuid.uuid4, db_index=True, editable=False)
     is_opened = models.BooleanField(default=False)
     opened_at = models.DateTimeField(null=True, blank=True)

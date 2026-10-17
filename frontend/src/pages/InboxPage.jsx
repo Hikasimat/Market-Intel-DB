@@ -8,6 +8,7 @@ import { toast } from 'react-toastify';
 import { useDispatch, useSelector } from 'react-redux';
 import api from '../services/api';
 import TemplatePicker from '../components/lq/TemplatePicker';
+import OpenTrackingToggle from '../components/email/OpenTrackingToggle';
 import {
   setEmails,
   setInboxLoading,
@@ -54,6 +55,7 @@ const InboxPage = () => {
   const [sendingEmail, setSendingEmail] = useState(false);
   const sendingEmailRef = useRef(false);
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [showCc, setShowCc] = useState(false);
@@ -285,6 +287,8 @@ const InboxPage = () => {
       }
       formData.append('body_edited', String(!templateSelection.templateId || composeData.body !== templateSelection.baseBody));
 
+      formData.append('open_tracking_enabled', String(openTrackingEnabled));
+
       attachments.forEach(file => {
         formData.append('attachments', file);
       });
@@ -294,6 +298,7 @@ const InboxPage = () => {
       toast.success('Email sent successfully');
       setShowCompose(false);
       setAttachments([]);
+      setOpenTrackingEnabled(false);
       setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '', draft_id: null, thread_id: null });
       setTemplateSelection({ templateId: '', signatureId: '', baseBody: null });
 
@@ -1030,17 +1035,26 @@ const InboxPage = () => {
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         {email.tracking && (
-                          <span 
-                            className={`px-1.5 py-0.2 rounded text-[9px] font-extrabold uppercase border flex items-center gap-1 ${
-                              email.tracking.is_opened 
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-300' 
-                                : 'bg-amber-50 text-amber-700 border-amber-300'
-                            }`}
-                            title={email.tracking.is_opened ? `Opened ${email.tracking.open_count || 1}x` : 'Awaiting open'}
-                          >
-                            <span className={`w-1 h-1 rounded-full ${email.tracking.is_opened ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                            {email.tracking.is_opened ? `${email.tracking.open_count || 1}x` : 'Sent'}
-                          </span>
+                          email.tracking.open_tracking_enabled === false ? (
+                            <span 
+                              className="px-1.5 py-0.2 rounded text-[9px] font-bold text-slate-500 bg-slate-100 border border-slate-200"
+                              title="Open tracking disabled for deliverability"
+                            >
+                              Untracked
+                            </span>
+                          ) : (
+                            <span 
+                              className={`px-1.5 py-0.2 rounded text-[9px] font-extrabold uppercase border flex items-center gap-1 ${
+                                email.tracking.is_opened 
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-300' 
+                                  : 'bg-amber-50 text-amber-700 border-amber-300'
+                              }`}
+                              title={email.tracking.is_opened ? `Opened ${email.tracking.open_count || 1}x` : 'Awaiting open'}
+                            >
+                              <span className={`w-1 h-1 rounded-full ${email.tracking.is_opened ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                              {email.tracking.is_opened ? `${email.tracking.open_count || 1}x` : 'Sent'}
+                            </span>
+                          )
                         )}
                         <span className="text-[10px] text-slate-400 font-medium">{email.date?.split(' ').slice(1, 4).join(' ')}</span>
                       </div>
@@ -1078,16 +1092,22 @@ const InboxPage = () => {
                       <div className="flex items-center gap-2 flex-wrap">
                         <h2 className="text-base font-bold text-slate-900 leading-tight">{selectedEmail.subject || '(No Subject)'}</h2>
                         {(selectedEmail.tracking || emailBody.tracking) && (
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 shrink-0 ${
-                            (emailBody.tracking || selectedEmail.tracking)?.is_opened
-                              ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
-                              : 'bg-amber-50 text-amber-700 border-amber-300'
-                          }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${(emailBody.tracking || selectedEmail.tracking)?.is_opened ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-                            {(emailBody.tracking || selectedEmail.tracking)?.is_opened 
-                              ? `Viewed (${(emailBody.tracking || selectedEmail.tracking)?.open_count || 1}x)` 
-                              : 'Not Viewed'}
-                          </span>
+                          (selectedEmail.tracking || emailBody.tracking)?.open_tracking_enabled === false ? (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold text-slate-600 bg-slate-100 border border-slate-300 shrink-0">
+                              Tracking Disabled
+                            </span>
+                          ) : (
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 shrink-0 ${
+                              (emailBody.tracking || selectedEmail.tracking)?.is_opened
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                                : 'bg-amber-50 text-amber-700 border-amber-300'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${(emailBody.tracking || selectedEmail.tracking)?.is_opened ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                              {(emailBody.tracking || selectedEmail.tracking)?.is_opened 
+                                ? `Viewed (${(emailBody.tracking || selectedEmail.tracking)?.open_count || 1}x)` 
+                                : 'Not Viewed'}
+                            </span>
+                          )
                         )}
                       </div>
                       <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 flex-wrap">
@@ -1443,6 +1463,15 @@ const InboxPage = () => {
                   )}
                 </div>
               </div>
+
+              {/* Email Open Tracking Toggle */}
+              <div className="pt-1">
+                <OpenTrackingToggle 
+                  checked={openTrackingEnabled} 
+                  onChange={setOpenTrackingEnabled} 
+                  disabled={sendingEmail} 
+                />
+              </div>
             </div>
 
             {/* Modal Footer */}
@@ -1510,16 +1539,22 @@ const InboxPage = () => {
                 <div>
                   <div className="flex items-center gap-2">
                     <h3 className="text-base font-extrabold tracking-tight text-white">Email Tracking & Engagement Analytics</h3>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
-                      (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
-                        : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                      {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened 
-                        ? `Viewed (${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_count || 1}x)` 
-                        : 'Awaiting Open'}
-                    </span>
+                    {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_tracking_enabled === false ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border bg-slate-500/20 text-slate-300 border-slate-400/40 flex items-center gap-1">
+                        Tracking Disabled
+                      </span>
+                    ) : (
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
+                        (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                        {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened 
+                          ? `Viewed (${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_count || 1}x)` 
+                          : 'Awaiting Open'}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-300 mt-0.5 truncate max-w-md">
                     {selectedEmail?.to || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.to_email || 'Recipient'} &bull; <span className="text-indigo-200 font-semibold">{selectedEmail?.subject || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.subject || '(No Subject)'}</span>
@@ -1537,6 +1572,11 @@ const InboxPage = () => {
 
             {/* Modal Body - Scrollable */}
             <div className="p-6 space-y-6 overflow-y-auto flex-1 text-slate-700 text-xs">
+              {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_tracking_enabled === false && (
+                <div className="p-3 bg-slate-100 border border-slate-300 rounded-xl text-slate-700 text-xs font-semibold flex items-center gap-2">
+                  <span>🛡️ Open tracking was disabled for this email. Deliverability was prioritized and no tracking pixel was injected.</span>
+                </div>
+              )}
               {/* 4 KPI Metrics */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {/* Total Opens */}

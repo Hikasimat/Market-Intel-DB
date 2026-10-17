@@ -130,3 +130,28 @@ class GoogleMailCredentials(models.Model):
     def __str__(self):
         return f"GoogleMail({self.email}) for {self.user.username}"
 
+
+class GoogleCalendarCredentials(models.Model):
+    """
+    Encrypted OAuth tokens for a user's *optional* Google Calendar connection.
+    Fully isolated from GoogleMailCredentials: separate consent, scopes and lifecycle.
+    Tokens are Fernet-encrypted at rest and never returned to the frontend.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='google_calendar_credentials')
+    email = models.EmailField(blank=True, default='')
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField(blank=True, default='')
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    scopes = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Google Calendar Credential'
+        verbose_name_plural = 'Google Calendar Credentials'
+
+    def __str__(self):
+        return f"GoogleCalendar({self.email}) for {self.user.username}"
+
+

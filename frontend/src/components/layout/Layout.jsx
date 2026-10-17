@@ -123,6 +123,8 @@ const Layout = () => {
       { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/prospects', label: 'Prospects', icon: Users },
       { path: '/lq-pipeline', label: 'LQ Pipeline', icon: Activity },
+      { path: '/calendar', label: 'Calendar', icon: Calendar },
+      { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
       { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },

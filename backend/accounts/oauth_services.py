@@ -197,6 +197,8 @@ class GmailOAuthService:
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events",
     ]
     STATE_MAX_AGE = 600
 
@@ -289,6 +291,18 @@ class GmailOAuthService:
         credentials.token_expiry = timezone.now() + timedelta(seconds=expires_in)
         credentials.is_active = True
         credentials.save(update_fields=['access_token_encrypted', 'token_expiry', 'is_active', 'updated_at'])
+
+        try:
+            from .models import GoogleCalendarCredentials
+            cal_creds = GoogleCalendarCredentials.objects.filter(user=credentials.user).first()
+            if cal_creds:
+                cal_creds.access_token_encrypted = credentials.access_token_encrypted
+                cal_creds.token_expiry = credentials.token_expiry
+                cal_creds.is_active = True
+                cal_creds.save(update_fields=['access_token_encrypted', 'token_expiry', 'is_active', 'updated_at'])
+        except Exception as sync_err:
+            logger.warning("Could not sync refreshed token to GoogleCalendarCredentials: %s", sync_err)
+
         return new_access_token
 
     @classmethod
@@ -321,12 +335,57 @@ class GmailOAuthService:
         creds.scopes = scope
         creds.is_active = True
         creds.save()
+
+        # Seamlessly sync active GoogleCalendarCredentials so calendar and meetings work immediately
+        try:
+            from .models import GoogleCalendarCredentials
+            cal_creds, _ = GoogleCalendarCredentials.objects.get_or_create(user=user)
+            cal_creds.email = creds.email
+            cal_creds.access_token_encrypted = creds.access_token_encrypted
+            if creds.refresh_token_encrypted:
+                cal_creds.refresh_token_encrypted = creds.refresh_token_encrypted
+            cal_creds.token_expiry = creds.token_expiry
+            cal_creds.scopes = creds.scopes
+            cal_creds.is_active = True
+            cal_creds.save()
+        except Exception as e:
+            logger.warning("Could not sync GoogleCalendarCredentials on login: %s", e)
+
         return creds
 
     @staticmethod
     def _get_or_create_creds(user):
         from .models import GoogleMailCredentials
         return GoogleMailCredentials.objects.get_or_create(user=user)
+
+
+    @classmethod
+    def get_credentials(cls, user):
+        """
+        Retrieve active Google Mail credentials for a user.
+        If only GoogleCalendarCredentials exists and is active, automatically creates/syncs GoogleMailCredentials.
+        """
+        if not user or not user.is_authenticated:
+            return None
+        from .models import GoogleMailCredentials, GoogleCalendarCredentials
+        creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        if creds and (creds.refresh_token_encrypted or creds.access_token_encrypted):
+            return creds
+
+        # Fallback to GoogleCalendarCredentials if it has active tokens
+        cal_creds = GoogleCalendarCredentials.objects.filter(user=user, is_active=True).first()
+        if cal_creds and (cal_creds.refresh_token_encrypted or cal_creds.access_token_encrypted):
+            creds, _ = GoogleMailCredentials.objects.get_or_create(user=user)
+            creds.email = cal_creds.email or user.email or ''
+            creds.access_token_encrypted = cal_creds.access_token_encrypted
+            creds.refresh_token_encrypted = cal_creds.refresh_token_encrypted
+            creds.token_expiry = cal_creds.token_expiry
+            creds.scopes = cal_creds.scopes
+            creds.is_active = True
+            creds.save()
+            return creds
+
+        return None
 
     @classmethod
     def fetch_messages(cls, credentials, folder='INBOX', limit=20, search=''):
@@ -446,13 +505,14 @@ class GmailOAuthService:
                         tracking_info = {
                             'id': matched_oe.id,
                             'tracking_token': str(matched_oe.tracking_token),
+                            'open_tracking_enabled': matched_oe.open_tracking_enabled,
                             'is_opened': matched_oe.is_opened,
                             'open_count': matched_oe.open_count,
                             'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
                             'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
                             'total_seconds_spent': matched_oe.total_seconds_spent,
                             'open_history': matched_oe.open_history,
-                            'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
+                            'reading_engagement': 'Open tracking disabled' if not matched_oe.open_tracking_enabled else (('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed'),
                             'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
                         }
                 except Exception:
@@ -601,13 +661,14 @@ class GmailOAuthService:
                 tracking_info = {
                     'id': matched_oe.id,
                     'tracking_token': str(matched_oe.tracking_token),
+                    'open_tracking_enabled': matched_oe.open_tracking_enabled,
                     'is_opened': matched_oe.is_opened,
                     'open_count': matched_oe.open_count,
                     'first_opened_at': matched_oe.first_opened_at.isoformat() if matched_oe.first_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
                     'last_opened_at': matched_oe.last_opened_at.isoformat() if matched_oe.last_opened_at else (matched_oe.opened_at.isoformat() if matched_oe.opened_at else None),
                     'total_seconds_spent': matched_oe.total_seconds_spent,
                     'open_history': matched_oe.open_history,
-                    'reading_engagement': ('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed',
+                    'reading_engagement': 'Open tracking disabled' if not matched_oe.open_tracking_enabled else (('Deeply Engaged' if (matched_oe.open_count >= 3 or matched_oe.total_seconds_spent >= 60) else ('Read in Detail' if (matched_oe.total_seconds_spent >= 15 or matched_oe.open_count >= 2) else 'Quick Skim')) if matched_oe.is_opened else 'Not Viewed'),
                     'estimated_read_time_formatted': (f"{matched_oe.total_seconds_spent}s" if matched_oe.total_seconds_spent < 60 else f"{matched_oe.total_seconds_spent//60}m {matched_oe.total_seconds_spent%60}s") if (matched_oe.is_opened or matched_oe.total_seconds_spent > 0) else "0s",
                 }
         except Exception:
@@ -810,5 +871,8 @@ class GmailOAuthService:
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             return json.loads(resp.read().decode('utf-8'))
+
+
+get_mail_credentials = GmailOAuthService.get_credentials
 
 

@@ -16,7 +16,7 @@ from .serializers import (
     GoogleOAuthLoginSerializer,
     GmailOAuthCallbackSerializer,
 )
-from .permissions import IsPRE, IsLQ as IsLQPerm
+from .permissions import IsPRE, IsLQ as IsLQPerm, IsLQOrManager
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -25,7 +25,7 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from django.conf import settings
 from django.utils import timezone
 
-from .oauth_services import GoogleOAuthService, GmailOAuthService
+from .oauth_services import GoogleOAuthService, GmailOAuthService, get_mail_credentials
 from .models import GoogleMailCredentials
 import utils.encryption as encryption
 
@@ -289,9 +289,9 @@ class GoogleOAuthCallbackView(APIView):
 class GmailOAuthURLView(APIView):
     """
     Generates OAuth authorization URL specifically for Gmail mailbox permissions.
-    Protected: User must already be authenticated in the application.
+    Protected: User must already be authenticated in the application and have LQ or Manager role.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsLQOrManager]
 
     def get(self, request):
         try:
@@ -364,6 +364,21 @@ class GmailOAuthCallbackView(APIView):
         creds.is_active = True
         creds.save()
 
+        # Seamlessly sync active GoogleCalendarCredentials
+        try:
+            from .models import GoogleCalendarCredentials
+            cal_creds, _ = GoogleCalendarCredentials.objects.get_or_create(user=request.user)
+            cal_creds.email = gmail_email
+            cal_creds.access_token_encrypted = encryption.encrypt_password(access_token)
+            if refresh_token:
+                cal_creds.refresh_token_encrypted = encryption.encrypt_password(refresh_token)
+            cal_creds.token_expiry = timezone.now() + timedelta(seconds=expires_in)
+            cal_creds.scopes = scope
+            cal_creds.is_active = True
+            cal_creds.save()
+        except Exception as e:
+            logger.warning("Could not sync GoogleCalendarCredentials on Gmail callback: %s", e)
+
         response = Response({
             "detail": "Gmail connected successfully.",
             "email": gmail_email,
@@ -435,10 +450,10 @@ class GmailOAuthStatusView(APIView):
     """
     Returns connection status and authorized email for Gmail without exposing tokens.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsLQOrManager]
 
     def get(self, request):
-        creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        creds = get_mail_credentials(request.user)
         if not creds:
             return Response({"is_connected": False}, status=status.HTTP_200_OK)
 
@@ -453,13 +468,25 @@ class GmailOAuthStatusView(APIView):
 
 class GmailOAuthDisconnectView(APIView):
     """
-    Safely disconnects Gmail OAuth credentials for the current user.
+    Safely disconnects Google OAuth credentials (both mail and calendar) for the current user.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsLQOrManager]
 
     def post(self, request):
-        GoogleMailCredentials.objects.filter(user=request.user).delete()
-        return Response({"detail": "Gmail authorization disconnected successfully."}, status=status.HTTP_200_OK)
+        creds = GoogleMailCredentials.objects.filter(user=request.user).first()
+        if creds:
+            GmailOAuthService.revoke_tokens(creds)
+            creds.delete()
+        try:
+            from .models import GoogleCalendarCredentials
+            from .calendar_services import GoogleCalendarOAuthService
+            cal_creds = GoogleCalendarCredentials.objects.filter(user=request.user).first()
+            if cal_creds:
+                GoogleCalendarOAuthService.revoke(cal_creds)
+                cal_creds.delete()
+        except Exception:
+            pass
+        return Response({"detail": "Google authorization disconnected successfully."}, status=status.HTTP_200_OK)
 
 
 class IsSuperUser(BasePermission):
@@ -635,8 +662,8 @@ class IsLQ(IsLQPerm):
     pass
 
 class GmailMailboxViewSet(viewsets.ViewSet):
-    """Gmail mailbox endpoints (read, send, drafts, labels) for the signed-in LQ user."""
-    permission_classes = [IsLQ]
+    """Gmail mailbox endpoints (read, send, drafts, labels) for LQ and Manager users."""
+    permission_classes = [IsLQOrManager]
 
 
     @action(detail=False, methods=['get'], url_path='fetch-emails')
@@ -649,7 +676,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             limit (int): maximum messages to return (newest first), default 20
             search (str): Gmail search query
         """
-        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        google_creds = get_mail_credentials(request.user)
         if not google_creds:
             return Response(
                 {'error': 'Gmail is not connected. Please sign in with Google or connect Gmail.', 'messages': []},
@@ -670,7 +697,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='send-email')
     def send_email_action(self, request):
         user = request.user
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Gmail is not connected. Please sign in with Google or connect Gmail.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -752,11 +779,14 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             msg['Cc'] = ', '.join(cc_list)
         if bcc_list:
             msg['Bcc'] = ', '.join(bcc_list)
+        # Open tracking: opt-in per email AND permitted by EMAIL_OPEN_TRACKING_ENABLED.
+        # A missing request value means NOT tracked (decided server-side).
         import uuid
         from django.conf import settings
         from django.utils import timezone
+        from prospects.tracking_utils import resolve_open_tracking, build_tracking_pixel_html
+        open_tracking_enabled = resolve_open_tracking(request.data.get('open_tracking_enabled'))
         tracking_token = uuid.uuid4()
-        tracking_url = f"{settings.EMAIL_TRACKING_BASE_URL}/api/email-tracking/{tracking_token}/"
 
         msg['Message-ID'] = make_msgid(domain=email_domain)
         msg.set_content(full_body)
@@ -774,9 +804,9 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         else:
             main_html = f'<div style="font-family: sans-serif;">{html_body}</div>'
 
+        tracking_pixel = f"\n{build_tracking_pixel_html(tracking_token)}" if open_tracking_enabled else ''
         html_content = f"""<html><body>
-{main_html}<br>{html_signature}
-<img src="{tracking_url}" width="1" height="1" alt="" style="display:none;width:1px;height:1px;border:0;">
+{main_html}<br>{html_signature}{tracking_pixel}
 </body></html>"""
 
         from accounts.template_utils import convert_base64_images_to_cid
@@ -851,6 +881,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             sent_at=timezone.now(),
             message_id=str(msg['Message-ID']),
             tracking_token=tracking_token,
+            open_tracking_enabled=open_tracking_enabled,
             references=f"sender_ip:{sender_ip}"
         )
 
@@ -877,6 +908,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             'success': True,
             'tracking_id': outreach_email.id,
             'tracking_token': str(tracking_token),
+            'open_tracking_enabled': open_tracking_enabled,
         })
 
     @action(detail=False, methods=['get'], url_path='fetch-email-body')
@@ -888,7 +920,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             uid (str): Gmail message id (preferred)
             email_id (str): legacy alias for uid
         """
-        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        google_creds = get_mail_credentials(request.user)
         if not google_creds:
             return Response({'error': 'Gmail is not connected.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -906,9 +938,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='modify-message')
     def modify_message(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -945,9 +975,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='trash-message')
     def trash_message(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
         msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
@@ -962,9 +990,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='untrash-message')
     def untrash_message(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
         msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
@@ -979,9 +1005,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='delete-message')
     def delete_message(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
         msg_id = request.data.get('msg_id') or request.data.get('id') or request.data.get('uid')
@@ -996,9 +1020,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='save-draft')
     def save_draft(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1040,9 +1062,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='delete-draft')
     def delete_draft(self, request):
         user = request.user
-        from .models import GoogleMailCredentials
-        from .oauth_services import GmailOAuthService
-        google_creds = GoogleMailCredentials.objects.filter(user=user, is_active=True).first()
+        google_creds = get_mail_credentials(user)
         if not google_creds:
             return Response({'error': 'Google Mail credentials not found.'}, status=status.HTTP_400_BAD_REQUEST)
         draft_id = request.data.get('draft_id')
@@ -1068,7 +1088,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
               "new_messages": [...]           # only when unread messages exist
             }
         """
-        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        google_creds = get_mail_credentials(request.user)
         if not google_creds:
             return Response({'error': 'Gmail is not connected.'}, status=status.HTTP_200_OK)
 
@@ -1108,7 +1128,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
 
     def list(self, request):
         """Returns the connected Gmail mailbox (if any) for the signed-in user."""
-        google_creds = GoogleMailCredentials.objects.filter(user=request.user, is_active=True).first()
+        google_creds = get_mail_credentials(request.user)
         data = []
         if google_creds:
             data.append({
