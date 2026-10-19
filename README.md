@@ -136,9 +136,51 @@ When using Nginx, ensure you route the SPA correctly by using `try_files $uri $u
 | **LQ** (Lead Qualifier) | LQ Pipeline, Market Events (read-only), Key People, Inbox |
 | **Superuser/Admin** | All of the above + User Management |
 
+## Bulk Email Campaigns & Prospect Intelligence
+
+### 1. Sequential Bulk Email Campaigns (90-Second Interval)
+- **Controlled Pacing**: Sends each email sequentially with a strict **90-second minimum interval** between consecutive provider send operations. Later emails are never released prematurely if an earlier email takes time or requires retries.
+- **Database Queue**: Stored persistently in PostgreSQL (`EmailCampaign`, `EmailCampaignRecipient`, `EmailCampaignAttachment`) using row-level locking (`select_for_update`). Campaigns survive browser closures, API restarts, and worker restarts.
+- **Worker Execution**: Managed by the dedicated `process_campaign_queue` management command. Does not require Redis or Celery.
+- **Live Controls**: Users can pause, resume, and cancel campaigns from the Inbox interface, with real-time progress indicators and duration estimates `(N - 1) * 90s`.
+- **Full Deliverability Support**: Supports email templates, email signatures, multi-file attachments, and opt-in open tracking.
+
+#### Running the Campaign Worker
+**Development / Local:**
+```bash
+cd backend
+python manage.py process_campaign_queue --poll-interval 5
+# Or execute a single pass:
+python manage.py process_campaign_queue --run-once
+```
+
+**Production (systemd):**
+```bash
+sudo systemctl start marketintel-worker
+sudo systemctl status marketintel-worker
+sudo journalctl -u marketintel-worker -f
+```
+
+**Production (Docker Compose):**
+```bash
+docker compose -f deploy/aws/docker-compose.production.yml up -d campaign-worker
+docker compose -f deploy/aws/docker-compose.production.yml logs -f campaign-worker
+```
+
+### 2. Automatic Prospect Response Identification
+- **Accurate Inbound Matching**: Matches incoming email sender addresses (`From` header) against:
+  - Company official email (`Prospect.official_email_address`) -> attaches company badge & tag.
+  - Key contact official email (`ProspectContact.official_email`) -> attaches both company tag and key-person tag.
+- **Pipeline Access Control**: Strictly respects role-based visibility. PREs see their assigned prospects, LQs see their assigned pipeline, and Managers see all records.
+- **Virtual Prospect Responses Folder**: Dedicated view inside the existing Inbox (`/auth/mail-account/prospect-responses/`) leveraging Gmail server-side query batching (`from:(...)`) without modifying native Gmail folder labels.
+
 ## Running Tests
 
 ```bash
 cd backend
+# Run all tests:
 python manage.py test
+
+# Run new bulk campaign & prospect matching tests:
+python manage.py test prospects.test_bulk_campaigns prospects.test_prospect_matching
 ```

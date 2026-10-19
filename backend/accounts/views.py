@@ -688,11 +688,66 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         limit = int(request.query_params.get('limit', 20))
 
         try:
-            res = GmailOAuthService.fetch_messages(google_creds, folder=folder, limit=limit, search=search)
+            res = GmailOAuthService.fetch_messages(google_creds, folder=folder, limit=limit, search=search, user=request.user)
             return Response(res, status=status.HTTP_200_OK)
         except Exception as e:
             logging.getLogger(__name__).warning("Gmail fetch_messages error: %s", e)
             return Response({'error': str(e), 'messages': []}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=False, methods=['get'], url_path='prospect-responses')
+    def prospect_responses(self, request):
+        """
+        Fetch incoming email messages from authorized prospects and key contacts.
+        Uses Gmail server-side search querying known prospect addresses,
+        applies canonical ProspectMatcher, and returns matched responses.
+        """
+        google_creds = get_mail_credentials(request.user)
+        if not google_creds:
+            return Response(
+                {'error': 'Gmail is not connected. Please connect Gmail.', 'messages': [], 'emails': [], 'total': 0},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        limit = min(int(request.query_params.get('limit', 25)), 50)
+        user_search = request.query_params.get('search', '').strip()
+
+        from prospects.matching_service import ProspectMatcher
+        matcher = ProspectMatcher(request.user)
+        candidate_emails = matcher.get_authorized_candidate_emails()
+
+        if not candidate_emails:
+            # Current user has no accessible prospects with email addresses
+            return Response({'messages': [], 'emails': [], 'total': 0, 'partial': False}, status=status.HTTP_200_OK)
+
+        # Batch candidate emails into Gmail query:
+        # e.g., "from:(email1 OR email2 ...) -in:sent -in:trash -in:draft"
+        query_emails = candidate_emails[:50]
+        from_clause = " OR ".join(query_emails)
+        gmail_query = f"from:({from_clause}) -in:sent -in:trash -in:draft"
+        if user_search:
+            gmail_query += f" {user_search}"
+
+        try:
+            res = GmailOAuthService.fetch_messages(
+                google_creds,
+                folder='ALL',
+                limit=limit,
+                search=gmail_query,
+                user=request.user,
+                matcher=matcher,
+            )
+            raw_messages = res.get('messages', [])
+            # Only keep messages where prospect_match is True
+            matched_messages = [m for m in raw_messages if m.get('prospect_match')]
+            return Response({
+                'messages': matched_messages,
+                'emails': matched_messages,
+                'total': len(matched_messages),
+                'partial': res.get('partial', False),
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Gmail prospect_responses error: %s", e)
+            return Response({'error': str(e), 'messages': [], 'emails': [], 'total': 0}, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=False, methods=['post'], url_path='send-email')
     def send_email_action(self, request):

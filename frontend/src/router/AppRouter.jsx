@@ -103,10 +103,10 @@ const AppRouter = () => {
           
           <Route path="dashboard" element={<RoleRoute allowedRoles={['PRE']}><PreDashboardPage /></RoleRoute>} />
           
-          {/* Prospects — PRE full, MANAGER read-only */}
+          {/* Prospects — PRE full, MANAGER read-only, LQ can view detail of assigned prospects */}
           <Route path="prospects" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectsPage /></RoleRoute>} />
           <Route path="prospects/import-preview" element={<RoleRoute allowedRoles={['PRE']}><ImportPreviewPage /></RoleRoute>} />
-          <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
+          <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
 
           <Route path="government-entities" element={<RoleRoute allowedRoles={['PRE']}><GovernmentEntitiesPage /></RoleRoute>} />
 

@@ -1,6 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ProspectViewSet, LQPipelineViewSet, CallbackReminderViewSet, MeetingViewSet, ProspectContactViewSet, CommunicationActivityViewSet, CallActivityViewSet, OutreachEmailViewSet, EmailTrackingView, EmailLinkClickTrackingView, pre_dashboard_stats, AuditReverificationRequestViewSet, GovernmentEntityViewSet
+from .views import (
+    ProspectViewSet, LQPipelineViewSet, CallbackReminderViewSet, MeetingViewSet,
+    ProspectContactViewSet, CommunicationActivityViewSet, CallActivityViewSet,
+    OutreachEmailViewSet, EmailTrackingView, EmailLinkClickTrackingView,
+    pre_dashboard_stats, AuditReverificationRequestViewSet, GovernmentEntityViewSet,
+    EmailCampaignViewSet
+)
 from .verification_views import EmailVerificationViewSet
 from .manager_views import manager_dashboard
 
@@ -16,6 +22,7 @@ router.register(r'key-contacts', ProspectContactViewSet, basename='key-contacts'
 router.register(r'outreach/communications', CommunicationActivityViewSet, basename='communications')
 router.register(r'outreach/calls', CallActivityViewSet, basename='outreach-calls')
 router.register(r'outreach/emails', OutreachEmailViewSet, basename='outreach-emails')
+router.register(r'email-campaigns', EmailCampaignViewSet, basename='email-campaigns')
 router.register(r'email-verifications', EmailVerificationViewSet, basename='email-verifications')
 
 urlpatterns = [

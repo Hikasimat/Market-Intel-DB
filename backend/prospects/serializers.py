@@ -1,6 +1,10 @@
 from market_events.serializers import MarketEventSimpleSerializer
 from rest_framework import serializers
-from .models import Prospect, ProspectOffering, ProspectContact, AuditReverificationRequest, ProspectShareholding, GovernmentEntity, ProspectAcquisition
+from .models import (
+    Prospect, ProspectOffering, ProspectContact, AuditReverificationRequest,
+    ProspectShareholding, GovernmentEntity, ProspectAcquisition,
+    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment
+)
 
 class ProspectOfferingSerializer(serializers.ModelSerializer):
     class Meta:
@@ -123,10 +127,25 @@ class ProspectSerializer(serializers.ModelSerializer):
 
     pre_task_status = serializers.SerializerMethodField()
     audit_reverify_fields = serializers.SerializerMethodField()
+    lead_qualification = serializers.SerializerMethodField()
 
     def get_pre_task_status(self, obj):
         if hasattr(obj, 'lead_qualification') and obj.lead_qualification:
             return obj.lead_qualification.pre_task_status
+        return None
+
+    def get_lead_qualification(self, obj):
+        lq = getattr(obj, 'lead_qualification', None)
+        if lq:
+            return {
+                'id': lq.id,
+                'pre_task_status': lq.pre_task_status,
+                'verification_status': lq.verification_status,
+                'qualification_status': lq.qualification_status,
+                'issue_category': lq.issue_category,
+                'issue_details': lq.issue_details,
+                'verification_checklist': lq.verification_checklist,
+            }
         return None
 
     def get_audit_reverify_fields(self, obj):
@@ -153,9 +172,9 @@ class ProspectSerializer(serializers.ModelSerializer):
             'acquiring_companies', 'acquired_companies_detail',
             'primary_offering_type', 'products', 'services', 'solutions',
             'offerings_data', 'acquiring_companies_data', 'key_contacts', 'shareholdings', 'created_at', 'updated_at',
-            'created_by', 'updated_by', 'market_events', 'market_event_ids', 'company_email_verification_status', 'qualification_status', 'pre_task_status', 'audit_reverify_fields'
+            'created_by', 'updated_by', 'market_events', 'market_event_ids', 'company_email_verification_status', 'qualification_status', 'pre_task_status', 'audit_reverify_fields', 'lead_qualification'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by', 'updated_by', 'market_events', 'market_event_ids', 'company_email_verification_status', 'qualification_status', 'pre_task_status', 'audit_reverify_fields']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by', 'updated_by', 'market_events', 'market_event_ids', 'company_email_verification_status', 'qualification_status', 'pre_task_status', 'audit_reverify_fields', 'lead_qualification']
 
     def get_company_email_verification_status(self, obj):
         if not obj.official_email_address:
@@ -592,3 +611,66 @@ class AuditReverificationRequestSerializer(serializers.ModelSerializer):
         model = AuditReverificationRequest
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at', 'resolved_at', 'manager_notified']
+
+
+class EmailCampaignAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailCampaignAttachment
+        fields = ['id', 'original_filename', 'mime_type', 'size', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class EmailCampaignRecipientSerializer(serializers.ModelSerializer):
+    prospect_company_name = serializers.CharField(source='prospect.company_name', read_only=True, allow_null=True)
+    prospect_contact_name = serializers.CharField(source='prospect_contact.contact_name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = EmailCampaignRecipient
+        fields = [
+            'id', 'email_address', 'recipient_name', 'prospect', 'prospect_company_name',
+            'prospect_contact', 'prospect_contact_name', 'queue_order', 'status',
+            'attempt_count', 'scheduled_for', 'last_attempt_at', 'sent_at',
+            'error_message', 'outreach_email', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+class EmailCampaignSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+    total_count = serializers.IntegerField(read_only=True)
+    sent_count = serializers.IntegerField(read_only=True)
+    failed_count = serializers.IntegerField(read_only=True)
+    pending_count = serializers.IntegerField(read_only=True)
+    attachments_count = serializers.SerializerMethodField()
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return 'System'
+
+    def get_attachments_count(self, obj):
+        return obj.attachments.count()
+
+    class Meta:
+        model = EmailCampaign
+        fields = [
+            'id', 'name', 'sender_email', 'subject', 'interval_seconds', 'open_tracking_enabled',
+            'status', 'total_count', 'sent_count', 'failed_count', 'pending_count',
+            'attachments_count', 'started_at', 'paused_at', 'completed_at', 'cancelled_at',
+            'last_sent_at', 'next_eligible_at', 'created_at', 'updated_at', 'created_by_name'
+        ]
+        read_only_fields = [
+            'id', 'sender_email', 'status', 'total_count', 'sent_count', 'failed_count',
+            'pending_count', 'attachments_count', 'started_at', 'paused_at', 'completed_at',
+            'cancelled_at', 'last_sent_at', 'next_eligible_at', 'created_at', 'updated_at',
+            'created_by_name'
+        ]
+
+
+class EmailCampaignDetailSerializer(EmailCampaignSerializer):
+    recipients = EmailCampaignRecipientSerializer(many=True, read_only=True)
+    attachments = EmailCampaignAttachmentSerializer(many=True, read_only=True)
+
+    class Meta(EmailCampaignSerializer.Meta):
+        fields = EmailCampaignSerializer.Meta.fields + ['body', 'template_id', 'signature_id', 'recipients', 'attachments']
+

@@ -455,6 +455,28 @@ const LqPipelinePage = ({ filter = 'all' }) => {
         </div>
       )}
 
+      {/* PRE Updated Confirmation Banner for LQ */}
+      {!isManager && items.some(i => i.pre_task_status === 'PRE_UPDATED') && (
+        <div className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
+              <CheckCircle className="w-5 h-5 text-emerald-600" />
+            </div>
+            <div>
+              <h4 className="font-black text-emerald-950 text-sm flex items-center gap-2">
+                <span>PRE Has Completed Data Updates</span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold uppercase">
+                  {items.filter(i => i.pre_task_status === 'PRE_UPDATED').length} Prospect(s) Ready
+                </span>
+              </h4>
+              <p className="text-xs text-emerald-800 mt-1">
+                PRE has updated the missing information (such as missing email addresses) for {items.filter(i => i.pre_task_status === 'PRE_UPDATED').map(i => i.prospect?.company_name).filter(Boolean).slice(0, 3).join(', ')}{items.filter(i => i.pre_task_status === 'PRE_UPDATED').length > 3 ? '...' : ''}. Click &quot;Confirm Fixes&quot; on the record to review and proceed with outreach.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Table Container */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-4 border-b border-slate-200 space-y-3">

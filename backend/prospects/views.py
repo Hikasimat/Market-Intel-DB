@@ -7,8 +7,17 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
-from .models import Prospect, ProspectOffering, ProspectContact, LeadQualification, EmailVerification, AuditReverificationRequest, GovernmentEntity
-from .serializers import ProspectSerializer, LeadQualificationSerializer, ProspectContactSerializer, AuditReverificationRequestSerializer, GovernmentEntitySerializer
+from .models import (
+    Prospect, ProspectOffering, ProspectContact, LeadQualification,
+    EmailVerification, AuditReverificationRequest, GovernmentEntity,
+    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment
+)
+from .serializers import (
+    ProspectSerializer, LeadQualificationSerializer, ProspectContactSerializer,
+    AuditReverificationRequestSerializer, GovernmentEntitySerializer,
+    EmailCampaignSerializer, EmailCampaignDetailSerializer
+)
+from .campaign_service import create_campaign, pause_campaign, resume_campaign, cancel_campaign, trigger_background_worker
 
 def apply_lq_distribution_filter(queryset, user, prospect_field_prefix=''):
     """
@@ -461,6 +470,37 @@ class LQPipelineViewSet(viewsets.ModelViewSet):
                 queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             # MANAGER sees all records (no filter)
         return queryset
+
+    def get_object(self):
+        """
+        Supports lookup either by integer LeadQualification PK or by Prospect UUID.
+        This allows direct redirection from matched inbox cards, hyperlinks, or direct URLs.
+        """
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_val = str(self.kwargs.get(lookup_url_kwarg, '')).strip()
+
+        import uuid
+        is_uuid = False
+        uuid_obj = None
+        try:
+            uuid_obj = uuid.UUID(lookup_val)
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        if is_uuid:
+            queryset = self.filter_queryset(self.get_queryset())
+            obj = queryset.filter(prospect__id=uuid_obj).first()
+            if not obj:
+                # Fallback to general model queryset if not filtered in
+                obj = LeadQualification.objects.select_related('prospect').filter(prospect__id=uuid_obj).first()
+            if not obj:
+                from django.http import Http404
+                raise Http404("No LeadQualification matches the given prospect UUID.")
+            self.check_object_permissions(self.request, obj)
+            return obj
+
+        return super().get_object()
 
 
     def _evaluate_qualification_status(self, lq):
@@ -1926,3 +1966,185 @@ class AuditReverificationRequestViewSet(viewsets.ModelViewSet):
         req.manager_notified = True
         req.save(update_fields=['manager_notified'])
         return Response({'status': 'marked as notified'})
+
+
+class EmailCampaignViewSet(viewsets.ModelViewSet):
+    """
+    CRUD and operational control for bulk email campaigns with fixed 90-second pacing.
+    Enforces role-based visibility and ownership.
+    """
+    permission_classes = [IsLQOrManager]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = EmailCampaign.objects.all().prefetch_related('recipients', 'attachments').order_by('-created_at')
+        if user.is_superuser:
+            return qs
+        if hasattr(user, 'profile') and user.profile.role == 'MANAGER':
+            return qs
+        return qs.filter(created_by=user)
+
+    def get_serializer_class(self):
+        if self.action in ['retrieve', 'create']:
+            return EmailCampaignDetailSerializer
+        return EmailCampaignSerializer
+
+    def list(self, request, *args, **kwargs):
+        trigger_background_worker()
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        trigger_background_worker()
+        return super().retrieve(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        name = request.data.get('name', '').strip()
+        subject = request.data.get('subject', '').strip()
+        body = request.data.get('body', '')
+        template_id = request.data.get('template_id') or None
+        signature_id = request.data.get('signature_id') or None
+        open_tracking_raw = request.data.get('open_tracking_enabled', 'false')
+        open_tracking_enabled = str(open_tracking_raw).lower() in ['true', '1', 'yes']
+
+        # Parse recipients
+        recipients_raw = request.data.get('recipients')
+        import json
+        if isinstance(recipients_raw, str):
+            try:
+                recipients_data = json.loads(recipients_raw)
+            except Exception:
+                # Comma/newline separated plain string of emails
+                import re
+                recipients_data = [e.strip() for e in re.split(r'[,;\n\r]+', recipients_raw) if e.strip()]
+        elif isinstance(recipients_raw, list):
+            recipients_data = recipients_raw
+        else:
+            recipients_data = []
+
+        files = request.FILES.getlist('attachments')
+
+        try:
+            campaign = create_campaign(
+                user=user,
+                name=name,
+                subject=subject,
+                body=body,
+                recipients_data=recipients_data,
+                template_id=template_id,
+                signature_id=signature_id,
+                open_tracking_enabled=open_tracking_enabled,
+                attachments_files=files,
+                interval_seconds=90,
+            )
+            serializer = EmailCampaignDetailSerializer(campaign)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.exception("Error creating campaign: %s", exc)
+            return Response({'error': f"Failed to create campaign: {exc}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def pause(self, request, pk=None):
+        campaign = self.get_object()
+        try:
+            paused = pause_campaign(campaign, request.user)
+            return Response(EmailCampaignDetailSerializer(paused).data, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def resume(self, request, pk=None):
+        campaign = self.get_object()
+        try:
+            resumed = resume_campaign(campaign, request.user)
+            return Response(EmailCampaignDetailSerializer(resumed).data, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        campaign = self.get_object()
+        try:
+            cancelled = cancel_campaign(campaign, request.user)
+            return Response(EmailCampaignDetailSerializer(cancelled).data, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], url_path='recipient-directory')
+    def recipient_directory(self, request):
+        """
+        Returns authorized Prospect and Key Contact entries from the accessible LQ Pipeline
+        for recipient selection in the campaign composer.
+        """
+        user = request.user
+        search = request.query_params.get('search', '').strip().lower()
+
+        # Get authorized prospects
+        prospects_qs = Prospect.objects.all().select_related('lead_qualification')
+        if not user.is_superuser and hasattr(user, 'profile'):
+            role = user.profile.role
+            if role == 'PRE':
+                prospects_qs = prospects_qs.filter(created_by=user.username)
+            elif role == 'LQ':
+                prospects_qs = apply_lq_distribution_filter(prospects_qs, user, 'id__')
+
+        contacts_qs = ProspectContact.objects.filter(
+            prospect__in=prospects_qs
+        ).select_related('prospect', 'prospect__lead_qualification')
+
+        results = []
+
+        # Company official emails
+        for p in prospects_qs:
+            email_addr = (p.official_email_address or '').strip()
+            if not email_addr:
+                continue
+
+            matches_search = (
+                not search or
+                search in p.company_name.lower() or
+                search in email_addr.lower()
+            )
+            if matches_search:
+                results.append({
+                    'id': f"prospect_{p.id}",
+                    'type': 'company',
+                    'prospect_id': str(p.id),
+                    'prospect_contact_id': None,
+                    'company_name': p.company_name,
+                    'name': p.company_name,
+                    'email': email_addr,
+                    'designation': 'Company Official Email',
+                    'lq_status': getattr(getattr(p, 'lead_qualification', None), 'qualification_status', None),
+                })
+
+        # Key person official emails
+        for c in contacts_qs:
+            email_addr = (c.official_email or '').strip()
+            if not email_addr:
+                continue
+
+            matches_search = (
+                not search or
+                search in c.contact_name.lower() or
+                search in c.prospect.company_name.lower() or
+                search in email_addr.lower()
+            )
+            if matches_search:
+                results.append({
+                    'id': f"contact_{c.id}",
+                    'type': 'key_person',
+                    'prospect_id': str(c.prospect_id),
+                    'prospect_contact_id': str(c.id),
+                    'company_name': c.prospect.company_name,
+                    'name': c.contact_name,
+                    'email': email_addr,
+                    'designation': c.designation or 'Key Contact',
+                    'lq_status': getattr(getattr(c.prospect, 'lead_qualification', None), 'qualification_status', None),
+                })
+
+        return Response({'results': results[:200], 'total': len(results)})
+

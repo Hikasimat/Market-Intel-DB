@@ -1,5 +1,5 @@
 # ============================================================
-# Root .gitignore — MarketIntel
+# Root .gitignore — MarketIntel DB
 # ============================================================
 
 # Python bytecode & compiled files
@@ -18,6 +18,9 @@ ENV/
 backend/.venv/
 backend/venv/
 backend/env/
+**/.venv/
+**/venv/
+**/env/
 
 # Environment secrets & credentials — NEVER commit
 .env
@@ -38,6 +41,7 @@ google-credentials*.json
 token*.json
 *.bak
 *.backup
+*.env.backup
 
 # Cloudflare Tunnel & SSL Certificates
 .cloudflared/
@@ -50,11 +54,14 @@ tunnel-*.json
 
 # Databases & local SQLite DBs
 *.sqlite3
+*.sqlite3-journal
 *.sqlite
 *.db
+*.db-journal
 db.sqlite3
 backend/db.sqlite3
 backend/test_*.sqlite3
+**/test_*.sqlite3
 test_*.db
 backend/settings_*test*.py
 backend/settings_local*.py
@@ -69,12 +76,21 @@ backend/uploads/
 backend/attachments/
 attachments/
 
+# WhatsApp & WAHA session data
+.waha/
+waha-data/
+waha_data/
+sessions/
+
 # Testing, typing & coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
 .coverage
+.coverage.*
+coverage.xml
+*.lcov
 htmlcov/
 .tox/
 .nox/
@@ -82,18 +98,26 @@ htmlcov/
 # Frontend, Node & Bundlers
 node_modules/
 frontend/node_modules/
+**/node_modules/
 dist/
 build/
 frontend/dist/
 frontend/dist-ssr/
 frontend/.vite/
 .vite/
+**/.vite/
 .eslintcache
 .vercel/
+*.tsbuildinfo
+
+# Background worker & process files
+*.pid
+celerybeat-schedule*
 
 # Logs & temporary files
 *.log
 backend/*.log
+**/*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -102,11 +126,17 @@ scratch/
 *.tmp
 *.temp
 
-# IDEs & Editors
+# IDEs, Editors & AI Assistants
 .vscode/
 .idea/
 *.sublime-workspace
 *.sublime-project
+.agents/
+.gemini/
+.antigravity/
+.claude/
+.cursor/
+.windsurf/
 
 # Operating System files
 .DS_Store
@@ -119,3 +149,4 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+*.lnk

@@ -4,6 +4,7 @@ import { fetchLqPipeline, completePreTask } from '../features/lqPipeline/lqPipel
 import ProspectForm from '../components/prospects/ProspectForm';
 import SearchableSelect from '../components/common/SearchableSelect';
 import { AlertTriangle, CheckCircle, FileEdit, Building2 } from 'lucide-react';
+import { toast } from 'react-toastify';
 
 const PreTasksPage = () => {
   const dispatch = useDispatch();
@@ -161,6 +162,7 @@ const PreTasksPage = () => {
 
   const handleCompleteTask = (lqId) => {
     dispatch(completePreTask(lqId)).then(() => {
+      toast.success('Task marked as completed! Confirmation notification sent to LQ.');
       // Re-fetch the list to remove the completed task
       dispatch(fetchLqPipeline({ pre_task_status: 'ISSUE_SENT_TO_PRE' }));
     });

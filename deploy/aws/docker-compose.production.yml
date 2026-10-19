@@ -25,3 +25,25 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  campaign-worker:
+    image: ${API_IMAGE}
+    container_name: marketintel-campaign-worker
+    restart: unless-stopped
+    command: python manage.py process_campaign_queue --poll-interval 5
+
+    env_file:
+      - /opt/marketintel/.env
+
+    init: true
+
+    stop_grace_period: 30s
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

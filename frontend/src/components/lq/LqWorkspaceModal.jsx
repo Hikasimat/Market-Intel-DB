@@ -16,12 +16,13 @@ import {
   BarChart2,
   Eye,
   Activity,
-  Zap,
-  RefreshCw
+  RefreshCw,
+  Send,
+  AlertCircle
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
-import { confirmReverification } from '../../features/lqPipeline/lqPipelineSlice';
+import { reportIssueToPre, confirmReverification } from '../../features/lqPipeline/lqPipelineSlice';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
@@ -83,11 +84,135 @@ export default function LqWorkspaceModal({
   const dispatch = useDispatch();
   const { user } = useSelector(state => state.auth);
   
-  // Get safe prospect reference
-  const prospect = selectedLq?.prospect || {};
+  // Dynamic prospect and LQ state
+  const [currentProspect, setCurrentProspect] = useState(selectedLq?.prospect || {});
+  const [currentLq, setCurrentLq] = useState(selectedLq);
+  const [localIssueSent, setLocalIssueSent] = useState(selectedLq?.pre_task_status === 'ISSUE_SENT_TO_PRE');
+  const [isReportingMissingEmail, setIsReportingMissingEmail] = useState(false);
+  const [isConfirmingPreUpdate, setIsConfirmingPreUpdate] = useState(false);
+
+  // Get safe prospect reference pointing to dynamic currentProspect
+  const prospect = currentProspect;
   const [localVerified, setLocalVerified] = useState(selectedLq?.verification_status === 'Verified');
   const isVerified = localVerified;
   const isLeadQualified = selectedLq?.qualification_status === 'Lead Qualified';
+
+  useEffect(() => {
+    if (selectedLq) {
+      setCurrentLq(prev => {
+        if (prev?.id === selectedLq.id) {
+          if (localIssueSent && selectedLq.pre_task_status === 'NONE') {
+            return { ...selectedLq, pre_task_status: 'ISSUE_SENT_TO_PRE' };
+          }
+          if (prev?.pre_task_status === 'PRE_UPDATED' && selectedLq.pre_task_status === 'NONE') {
+            return { ...selectedLq, pre_task_status: 'PRE_UPDATED' };
+          }
+        }
+        return selectedLq;
+      });
+      setCurrentProspect(selectedLq.prospect || {});
+      if (selectedLq.pre_task_status === 'ISSUE_SENT_TO_PRE') {
+        setLocalIssueSent(true);
+      }
+    }
+  }, [selectedLq, localIssueSent]);
+
+  // Immediately load fresh authoritative LQ details on modal mount or prospect ID change
+  useEffect(() => {
+    if (selectedLq?.id) {
+      refreshProspectDetails();
+    }
+  }, [selectedLq?.id]);
+
+  const refreshProspectDetails = async () => {
+    try {
+      const lqId = currentLq?.id || selectedLq?.id;
+      const pId = currentProspect?.id || selectedLq?.prospect?.id;
+      if (lqId) {
+        const res = await api.get(`/lq-pipeline/${lqId}/`);
+        if (res.data) {
+          setCurrentLq(res.data);
+          const freshStatus = res.data.pre_task_status;
+          setLocalIssueSent(freshStatus === 'ISSUE_SENT_TO_PRE');
+          if (res.data.prospect) {
+            setCurrentProspect(res.data.prospect);
+            const keyContactWithEmail = res.data.prospect.key_contacts?.find(c => c.official_email && c.official_email.trim());
+            if (keyContactWithEmail) {
+              setToEmails([keyContactWithEmail.official_email]);
+            } else if (res.data.prospect.official_email_address) {
+              setToEmails([res.data.prospect.official_email_address]);
+            }
+          }
+          dispatch({ type: 'lqPipeline/setCachedDetail', payload: res.data });
+          return res.data;
+        }
+      } else if (pId) {
+        const res = await api.get(`/prospects/${pId}/`);
+        setCurrentProspect(res.data);
+        if (res.data.lead_qualification) {
+          setCurrentLq(res.data.lead_qualification);
+          setLocalIssueSent(res.data.lead_qualification.pre_task_status === 'ISSUE_SENT_TO_PRE');
+        }
+        return res.data;
+      }
+    } catch (e) {
+      console.error('Failed to refresh prospect details', e);
+    }
+    return null;
+  };
+
+  const handleSendMissingEmailToPre = async () => {
+    try {
+      setIsReportingMissingEmail(true);
+      const lqId = currentLq?.id || selectedLq?.id;
+      const issuePayload = {
+        issue_category: 'Missing Email Address',
+        issue_details: `Email address is missing for prospect "${currentProspect?.company_name}". Please enter the official company email or key contact email address so the introduction email can be sent.`,
+        verification_checklist: {
+          ...(currentLq?.verification_checklist || selectedLq?.verification_checklist || {}),
+          email: 'Incorrect',
+          official_email_address: 'Incorrect',
+          keyContacts: 'Incorrect'
+        }
+      };
+
+      const result = await dispatch(reportIssueToPre({ id: lqId, issueData: issuePayload })).unwrap();
+      setLocalIssueSent(true);
+      setCurrentLq(prev => ({
+        ...prev,
+        ...result,
+        pre_task_status: 'ISSUE_SENT_TO_PRE',
+        issue_category: 'Missing Email Address',
+        issue_details: `Email address was missing for prospect "${currentProspect?.company_name}".`
+      }));
+      toast.info('Missing email reported to PRE. A task has been sent to PRE.');
+    } catch (err) {
+      console.error('Failed to report missing email to PRE:', err);
+      toast.error('Failed to report task to PRE. Please try again.');
+    } finally {
+      setIsReportingMissingEmail(false);
+    }
+  };
+
+  const handleConfirmPreUpdate = async () => {
+    try {
+      setIsConfirmingPreUpdate(true);
+      const lqId = currentLq?.id || selectedLq?.id;
+      await dispatch(confirmReverification(lqId)).unwrap();
+      setLocalIssueSent(false);
+      setCurrentLq(prev => ({
+        ...prev,
+        pre_task_status: 'NONE'
+      }));
+      await refreshProspectDetails();
+      toast.success('PRE update confirmed! You can now select the recipient and proceed with outreach.');
+    } catch (err) {
+      console.error('Failed to confirm PRE update:', err);
+      toast.error('Failed to confirm update. Please try again.');
+    } finally {
+      setIsConfirmingPreUpdate(false);
+    }
+  };
 
   // --- OUTREACH  // Outreach State
   // Initialize from prop, but will be overridden by fresh fetch below
@@ -558,7 +683,6 @@ const handleAddCustomRecipient = (e) => {
   };
 
   const [callError, setCallError] = useState('');
-  const [localIssueSent, setLocalIssueSent] = useState(false);
   const [isSubmittingActivity, setIsSubmittingActivity] = useState(false);
 
   const handleSaveInbound = async (e) => {
@@ -957,6 +1081,33 @@ const handleAddCustomRecipient = (e) => {
 
         {/* Modal Scrollable Content Body */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-slate-50">
+          {/* Top Banner when PRE has updated data */}
+          {currentLq?.pre_task_status === 'PRE_UPDATED' && (
+            <div className="p-4 bg-emerald-50 border-2 border-emerald-300 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm animate-in fade-in">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
+                  <CheckCircle className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h4 className="font-black text-emerald-950 text-sm flex items-center gap-2">
+                    <span>PRE Task Completed — Data Updated</span>
+                    <span className="px-2 py-0.5 bg-emerald-200 text-emerald-900 rounded-full text-[10px] font-extrabold uppercase">Action Required</span>
+                  </h4>
+                  <p className="text-xs text-emerald-800 mt-1">
+                    PRE has updated the missing information ({currentLq?.issue_category || 'Missing Email Address'}) for {prospect.company_name}. Confirm the update to refresh and proceed with your outreach.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleConfirmPreUpdate}
+                disabled={isConfirmingPreUpdate}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition flex items-center gap-1.5 shrink-0 shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                <CheckCircle className="w-4 h-4" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed to Outreach'}
+              </button>
+            </div>
+          )}
           {activeTab === 'verification' && (
             <div className="space-y-6">
               <div className="p-4 bg-sky-50 border border-sky-200 rounded-xl flex items-start gap-3">
@@ -1207,13 +1358,110 @@ const handleAddCustomRecipient = (e) => {
                                     <span className="text-[10px] text-slate-400 font-semibold">Reception / Official Email - CC</span>
                                   </div>
                                 </label>
-
                               </div>
                             )}
-                            
-                            {(!prospect?.official_email_address && (!prospect?.key_contacts || prospect.key_contacts.length === 0)) && (
-                              <div className="p-2.5 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold">
-                                No official company email or key contacts found for this prospect. Please update the prospect details.
+
+                            {/* Banner if email exists but PRE just updated it */}
+                            {Boolean(
+                              (prospect?.official_email_address && prospect.official_email_address.trim()) ||
+                              (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
+                            ) && currentLq?.pre_task_status === 'PRE_UPDATED' && (
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-emerald-50 border border-emerald-300 rounded-xl mb-1">
+                                <div className="flex items-center gap-2">
+                                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                                  <span className="text-xs font-bold text-emerald-950">
+                                    PRE updated the email address! Click confirm to finalize.
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={handleConfirmPreUpdate}
+                                  disabled={isConfirmingPreUpdate}
+                                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shrink-0 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                >
+                                  <CheckCircle className="w-3.5 h-3.5" /> Confirm Fixes
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Handling when NO emails are available */}
+                            {!Boolean(
+                              (prospect?.official_email_address && prospect.official_email_address.trim()) ||
+                              (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
+                            ) && (
+                              <div className="rounded-2xl border p-4 shadow-sm transition-all bg-white">
+                                {localIssueSent || currentLq?.pre_task_status === 'ISSUE_SENT_TO_PRE' ? (
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl">
+                                    <div className="flex items-start gap-3">
+                                      <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
+                                        <Clock className="w-4 h-4 animate-spin text-amber-600" />
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2">
+                                          <span className="font-black text-amber-900 text-xs uppercase tracking-wide">Missing Email Task Sent to PRE</span>
+                                          <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-800 text-[10px] font-extrabold">In Progress</span>
+                                        </div>
+                                        <p className="text-xs text-amber-800 mt-1">
+                                          A task has been assigned to PRE to find and enter the missing email address. Once PRE completes this task, you will receive a confirmation here to proceed.
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={refreshProspectDetails}
+                                      className="px-3.5 py-1.5 bg-white border border-amber-300 hover:bg-amber-100/50 text-amber-900 font-extrabold text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5 text-amber-700" /> Check Status
+                                    </button>
+                                  </div>
+                                ) : currentLq?.pre_task_status === 'PRE_UPDATED' ? (
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl">
+                                    <div className="flex items-start gap-3">
+                                      <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
+                                        <CheckCircle className="w-4 h-4 text-emerald-600" />
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2">
+                                          <span className="font-black text-emerald-950 text-xs uppercase tracking-wide">PRE Task Completed</span>
+                                          <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold">Ready to Confirm</span>
+                                        </div>
+                                        <p className="text-xs text-emerald-800 mt-1">
+                                          PRE has updated the master data for this prospect. Please confirm to refresh and proceed with your email outreach.
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={handleConfirmPreUpdate}
+                                      disabled={isConfirmingPreUpdate}
+                                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                                    >
+                                      <CheckCircle className="w-3.5 h-3.5" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed'}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/50 border border-amber-200 rounded-xl">
+                                    <div className="flex items-start gap-3">
+                                      <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
+                                        <AlertTriangle className="w-4 h-4 text-amber-600" />
+                                      </div>
+                                      <div>
+                                        <span className="font-black text-amber-950 text-xs uppercase tracking-wide block">No Email Address Available</span>
+                                        <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                                          The email address was not entered for this prospect. You cannot send an introduction email without an email address. Send this to PRE as a task to find and enter the missing email.
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={handleSendMissingEmailToPre}
+                                      disabled={isReportingMissingEmail}
+                                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                                    >
+                                      <Send className="w-3.5 h-3.5" /> {isReportingMissingEmail ? 'Sending Task...' : 'Send Task to PRE'}
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             )}
 

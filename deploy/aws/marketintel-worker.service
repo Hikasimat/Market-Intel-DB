@@ -1,0 +1,26 @@
+[Unit]
+Description=MarketIntel Bulk Campaign Background Worker
+After=network.target marketintel.service
+
+[Service]
+Type=simple
+User=marketintel
+Group=marketintel
+WorkingDirectory=/opt/marketintel/repo/backend
+
+# Load production environment from the .env file
+EnvironmentFile=/opt/marketintel/.env
+
+# Run dedicated management command worker with 5-second polling interval
+ExecStart=/opt/marketintel/venv/bin/python manage.py process_campaign_queue --poll-interval 5
+
+# Restart policy: recover automatically if killed or on unhandled crash
+Restart=on-failure
+RestartSec=5s
+
+# Security and isolation
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

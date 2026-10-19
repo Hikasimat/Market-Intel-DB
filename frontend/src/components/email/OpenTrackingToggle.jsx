@@ -11,8 +11,9 @@ let cachedAvailability = null;
  * control is disabled and the parent value is forced to false. The backend enforces the
  * same rule, so this is only an accurate reflection of server behaviour.
  */
-export default function OpenTrackingToggle({ checked, onChange, disabled = false, id = 'enable-open-tracking' }) {
+export default function OpenTrackingToggle({ checked, enabled, value, onChange, disabled = false, id = 'enable-open-tracking' }) {
   const [available, setAvailable] = useState(cachedAvailability);
+  const isChecked = Boolean(checked ?? enabled ?? value);
 
   useEffect(() => {
     if (cachedAvailability !== null) return undefined;
@@ -30,8 +31,8 @@ export default function OpenTrackingToggle({ checked, onChange, disabled = false
   }, []);
 
   useEffect(() => {
-    if (available === false && checked) onChange(false);
-  }, [available, checked, onChange]);
+    if (available === false && isChecked) onChange(false);
+  }, [available, isChecked, onChange]);
 
   const unavailable = available === false;
   const isDisabled = disabled || unavailable || available === null;
@@ -41,10 +42,10 @@ export default function OpenTrackingToggle({ checked, onChange, disabled = false
       <input
         type="checkbox"
         id={id}
-        checked={!!checked && !unavailable}
+        checked={isChecked && !unavailable}
         disabled={isDisabled}
         onChange={(e) => onChange(e.target.checked)}
-        className="mt-0.5 w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 disabled:opacity-50"
+        className="mt-0.5 w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 disabled:opacity-50 cursor-pointer"
       />
       <label htmlFor={id} className={`text-[11px] font-bold ${isDisabled ? 'text-slate-400' : 'text-slate-700 cursor-pointer'}`}>
         <span className="inline-flex items-center gap-1"><Eye className="w-3 h-3" /> Enable email open tracking</span>

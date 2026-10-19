@@ -58,10 +58,12 @@ ufw allow 443/tcp
 echo "y" | ufw enable
 ufw status
 
-echo "=== [8/8] systemd service ==="
-cp /path/to/repo/deploy/aws/marketintel.service /etc/systemd/system/marketintel.service
+echo "=== [8/8] systemd services ==="
+cp "$APP_DIR/repo/deploy/aws/marketintel.service" /etc/systemd/system/marketintel.service
+cp "$APP_DIR/repo/deploy/aws/marketintel-worker.service" /etc/systemd/system/marketintel-worker.service
 systemctl daemon-reload
 systemctl enable marketintel
+systemctl enable marketintel-worker
 
 echo ""
 echo "=== Setup complete ==="
@@ -70,4 +72,5 @@ echo "  1. Create /opt/marketintel/.env (see backend/.env.example)"
 echo "  2. Copy nginx.conf to /etc/nginx/sites-available/marketintel"
 echo "  3. Enable nginx site and test"
 echo "  4. Run: sudo systemctl start marketintel"
-echo "  5. Run: sudo bash deploy.sh"
+echo "  5. Run: sudo systemctl start marketintel-worker"
+echo "  6. Run: sudo bash deploy.sh"

@@ -88,7 +88,7 @@ if _database_url:
     DATABASES = {
         'default': dj_database_url.config(
             default=_database_url,
-            conn_max_age=int(os.environ.get('CONN_MAX_AGE', 600)),
+            conn_max_age=int(os.environ.get('CONN_MAX_AGE', 0 if (':6543' in (_database_url or '') or 'pooler' in (_database_url or '')) else 600)),
             conn_health_checks=True,
             ssl_require=os.getenv('DB_SSL_REQUIRE', 'true').lower() == 'true',
         )

@@ -565,3 +565,110 @@ class ProspectAcquisition(models.Model):
 
     def __str__(self):
         return f"{self.acquiring_prospect.company_name} acquired {self.acquired_prospect.company_name}"
+
+
+class EmailCampaign(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'DRAFT', 'Draft'
+        QUEUED = 'QUEUED', 'Queued'
+        RUNNING = 'RUNNING', 'Running'
+        PAUSED = 'PAUSED', 'Paused'
+        COMPLETED = 'COMPLETED', 'Completed'
+        COMPLETED_WITH_ERRORS = 'COMPLETED_WITH_ERRORS', 'Completed with Errors'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='email_campaigns')
+    sender_email = models.EmailField()
+    subject = models.CharField(max_length=512)
+    body = models.TextField()
+    template_id = models.CharField(max_length=255, blank=True, null=True)
+    signature_id = models.CharField(max_length=255, blank=True, null=True)
+    open_tracking_enabled = models.BooleanField(default=False)
+    interval_seconds = models.PositiveIntegerField(default=90)
+    status = models.CharField(max_length=50, choices=Status.choices, default=Status.QUEUED)
+
+    # State tracking and scheduling timestamps
+    started_at = models.DateTimeField(null=True, blank=True)
+    paused_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    next_eligible_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Campaign: {self.name} ({self.status})"
+
+    @property
+    def total_count(self):
+        return self.recipients.count()
+
+    @property
+    def sent_count(self):
+        return self.recipients.filter(status='SENT').count()
+
+    @property
+    def failed_count(self):
+        return self.recipients.filter(status='FAILED').count()
+
+    @property
+    def pending_count(self):
+        return self.recipients.filter(status__in=['PENDING', 'SENDING', 'RETRY_PENDING']).count()
+
+
+class EmailCampaignRecipient(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        SENDING = 'SENDING', 'Sending'
+        SENT = 'SENT', 'Sent'
+        RETRY_PENDING = 'RETRY_PENDING', 'Retry Pending'
+        FAILED = 'FAILED', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    campaign = models.ForeignKey(EmailCampaign, on_delete=models.CASCADE, related_name='recipients')
+    email_address = models.EmailField()
+    recipient_name = models.CharField(max_length=255, blank=True, null=True)
+    prospect = models.ForeignKey(Prospect, on_delete=models.SET_NULL, null=True, blank=True, related_name='campaign_recipients')
+    prospect_contact = models.ForeignKey(ProspectContact, on_delete=models.SET_NULL, null=True, blank=True, related_name='campaign_recipients')
+    queue_order = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=50, choices=Status.choices, default=Status.PENDING)
+    attempt_count = models.PositiveIntegerField(default=0)
+    max_retries = models.PositiveIntegerField(default=3)
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, null=True)
+    outreach_email = models.ForeignKey(OutreachEmail, on_delete=models.SET_NULL, null=True, blank=True, related_name='campaign_recipients')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['queue_order', 'created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['campaign', 'email_address'], name='unique_campaign_recipient_email')
+        ]
+
+    def __str__(self):
+        return f"{self.email_address} in {self.campaign.name} ({self.status})"
+
+
+class EmailCampaignAttachment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    campaign = models.ForeignKey(EmailCampaign, on_delete=models.CASCADE, related_name='attachments')
+    file = models.FileField(upload_to='campaign_attachments/%Y/%m/%d/')
+    original_filename = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=255)
+    size = models.BigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.original_filename} ({self.campaign.name})"
+

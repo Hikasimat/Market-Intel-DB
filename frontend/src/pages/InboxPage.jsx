@@ -1,14 +1,17 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
-  Mail, Send, AlertTriangle, RefreshCw, ChevronLeft, Loader2, Paperclip, 
+  Mail, Send, AlertTriangle, RefreshCw, ChevronLeft, ChevronRight, Loader2, Paperclip, 
   Building2, Reply, Edit3, X, Download, BarChart2, Eye, Activity, Zap, TrendingUp, Clock,
-  Star, FileText, Trash2, MailOpen, ShieldAlert, Undo2, Save, Search
+  Star, FileText, Trash2, MailOpen, ShieldAlert, Undo2, Save, Search,
+  Users, User, Sparkles, ExternalLink
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useDispatch, useSelector } from 'react-redux';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import TemplatePicker from '../components/lq/TemplatePicker';
 import OpenTrackingToggle from '../components/email/OpenTrackingToggle';
+import BulkCampaignModal from '../components/email/BulkCampaignModal';
 import {
   setEmails,
   setInboxLoading,
@@ -67,6 +70,13 @@ const InboxPage = () => {
   const fileInputRef = useRef(null);
 
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Bulk Email Campaign & Prospect Responses State
+  const [showBulkCampaign, setShowBulkCampaign] = useState(false);
+  const [isProspectResponsesView, setIsProspectResponsesView] = useState(false);
+  const [prospectEmails, setProspectEmails] = useState([]);
+  const [prospectLoading, setProspectLoading] = useState(false);
+  const [prospectError, setProspectError] = useState(null);
 
   // Email Tracking State
   const [showTrackingModal, setShowTrackingModal] = useState(false);
@@ -526,32 +536,73 @@ const InboxPage = () => {
     }
   }, [userId, mailAccountId, dispatch]);
 
+  // ─── Prospect Responses fetch (virtual view) ──────────────────────────────
+
+  const loadProspectResponses = useCallback(async (silent = false) => {
+    if (silent && inFlightRef.current) return;
+    const seq = ++loadSeqRef.current;
+    inFlightRef.current = true;
+
+    if (!silent) {
+      setProspectLoading(true);
+      setProspectError(null);
+    }
+
+    try {
+      const searchParam = searchQuery ? `&search=${encodeURIComponent(searchQuery)}` : '';
+      const res = await api.get(`/auth/mail-account/prospect-responses/?limit=25${searchParam}`);
+      if (seq !== loadSeqRef.current) return;
+
+      const messages = res.data?.messages || [];
+      setProspectEmails(messages);
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
+      const msg = err.response?.data?.error || 'Failed to fetch prospect responses.';
+      setProspectError(msg);
+      if (!silent) toast.error(msg);
+    } finally {
+      if (seq === loadSeqRef.current) {
+        inFlightRef.current = false;
+        if (!silent) setProspectLoading(false);
+      }
+    }
+  }, [searchQuery]);
+
   // ─── Load on folder change ────────────────────────────────────────────────
 
   useEffect(() => {
+    if (isProspectResponsesView) return;
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
     dispatch(setEmails([]));
     loadFolder(activeFolder, false, searchQuery);
-  }, [activeFolder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeFolder, isProspectResponsesView]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Live Polling: Auto-sync active folder every 8 seconds in the background ───
+  // ─── Live Polling: Auto-sync active folder or prospect responses in background ───
 
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible' && !searchQuery) {
-        loadFolder(activeFolder, true, '', true /* silent */);
+        if (isProspectResponsesView) {
+          loadProspectResponses(true /* silent */);
+        } else {
+          loadFolder(activeFolder, true, '', true /* silent */);
+        }
       }
     }, 15000);
     return () => clearInterval(timer);
-  }, [activeFolder, searchQuery, loadFolder]);
+  }, [activeFolder, searchQuery, loadFolder, isProspectResponsesView, loadProspectResponses]);
 
   // ─── Live Focus / Visibility: Sync immediately on window focus or tab visibility ───
 
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible' && !searchQuery) {
-        loadFolder(activeFolder, true, '', true /* silent */);
+        if (isProspectResponsesView) {
+          loadProspectResponses(true /* silent */);
+        } else {
+          loadFolder(activeFolder, true, '', true /* silent */);
+        }
       }
     };
     window.addEventListener('focus', handleVisibilityOrFocus);
@@ -560,15 +611,19 @@ const InboxPage = () => {
       window.removeEventListener('focus', handleVisibilityOrFocus);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
     };
-  }, [activeFolder, searchQuery, loadFolder]);
+  }, [activeFolder, searchQuery, loadFolder, isProspectResponsesView, loadProspectResponses]);
 
   // ─── Cross-Component & Cross-Tab Live Events ──────────────────────────────
 
   useEffect(() => {
     const unsubscribe = subscribeMailEvents(async (event) => {
       if (['MAIL_SENT', 'MAIL_RECEIVED', 'DRAFT_SAVED', 'MAIL_MUTATED'].includes(event?.type)) {
-        // Silently reload current active folder
-        loadFolder(activeFolder, true, searchQuery, true);
+        if (isProspectResponsesView) {
+          loadProspectResponses(true);
+        } else {
+          // Silently reload current active folder
+          loadFolder(activeFolder, true, searchQuery, true);
+        }
         // If an email was sent and current folder is not SENT, reset the SENT cache so it reflects immediately when switched to
         if (event.type === 'MAIL_SENT' && activeFolder !== 'SENT' && userId) {
           try {
@@ -580,15 +635,23 @@ const InboxPage = () => {
       }
     });
     return unsubscribe;
-  }, [activeFolder, searchQuery, loadFolder, userId, mailAccountId]);
+  }, [activeFolder, searchQuery, loadFolder, userId, mailAccountId, isProspectResponsesView, loadProspectResponses]);
 
   // ─── Folder switch ────────────────────────────────────────────────────────
 
   const handleFolderSwitch = (folderId) => {
-    if (folderId === activeFolder) return;
+    setIsProspectResponsesView(false);
+    if (folderId === activeFolder && !isProspectResponsesView) return;
     dispatch(setActiveFolder(folderId));
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+  };
+
+  const handleSwitchToProspectResponses = () => {
+    setIsProspectResponsesView(true);
+    setSelectedEmail(null);
+    setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+    loadProspectResponses(false);
   };
 
   // ─── Explicit Sync (bypass cache) ────────────────────────────────────────
@@ -596,13 +659,21 @@ const InboxPage = () => {
   const handleRefresh = () => {
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
-    loadFolder(activeFolder, true /* bypassCache */, searchQuery);
+    if (isProspectResponsesView) {
+      loadProspectResponses(false);
+    } else {
+      loadFolder(activeFolder, true /* bypassCache */, searchQuery);
+    }
   };
 
   const handleSearchSubmit = (e) => {
     if (e) e.preventDefault();
     setSelectedEmail(null);
-    loadFolder(activeFolder, true, searchQuery);
+    if (isProspectResponsesView) {
+      loadProspectResponses(false);
+    } else {
+      loadFolder(activeFolder, true, searchQuery);
+    }
   };
 
   // ─── Open email (body cache-first) ────────────────────────────────────────
@@ -612,10 +683,11 @@ const InboxPage = () => {
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
 
     const uid = email.uid || email.id;
+    const currentFolder = isProspectResponsesView ? 'INBOX' : activeFolder;
 
     // Step 1: Check body cache using stable UID (bypass if body has stale unresolved CID)
     if (userId && uid) {
-      const cached = await getEmailBody(userId, mailAccountId, activeFolder, uid);
+      const cached = await getEmailBody(userId, mailAccountId, currentFolder, uid);
       if (cached && !cached.html_body?.includes('cid:')) {
         setEmailBodyState(cached);
         if (cached.tracking) {
@@ -629,12 +701,12 @@ const InboxPage = () => {
     setBodyLoading(true);
     try {
       const res = await api.get(
-        `/auth/mail-account/fetch-email-body/?folder=${encodeURIComponent(activeFolder)}&uid=${encodeURIComponent(uid)}`
+        `/auth/mail-account/fetch-email-body/?folder=${encodeURIComponent(currentFolder)}&uid=${encodeURIComponent(uid)}`
       );
       const body = res.data;
 
       if (userId && uid) {
-        await setEmailBody(userId, mailAccountId, activeFolder, uid, body);
+        await setEmailBody(userId, mailAccountId, currentFolder, uid, body);
       }
 
       setEmailBodyState(body);
@@ -837,10 +909,16 @@ const InboxPage = () => {
     );
   };
 
-  const displayEmails = emails.filter(e => {
+  const currentList = isProspectResponsesView ? prospectEmails : emails;
+  const isListLoading = isProspectResponsesView ? prospectLoading : loading;
+  const displayEmails = currentList.filter(e => {
     if (searchQuery) {
-      if (!e.prospect_company_name) return false;
-      return e.prospect_company_name.toLowerCase().includes(searchQuery.toLowerCase());
+      const q = searchQuery.toLowerCase();
+      const matchSubject = e.subject?.toLowerCase().includes(q);
+      const matchCompany = e.prospect_company_name?.toLowerCase().includes(q);
+      const matchContact = e.prospect_contact_name?.toLowerCase().includes(q);
+      const matchFrom = e.from?.toLowerCase().includes(q);
+      return matchSubject || matchCompany || matchContact || matchFrom;
     }
     return true;
   });
@@ -849,13 +927,13 @@ const InboxPage = () => {
     <div className="space-y-6 flex flex-col h-[calc(100vh-64px)] overflow-hidden">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
         <div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-sky-600 text-white flex items-center justify-center shadow-md">
-              <Mail className="w-5 h-5" />
+          <h1 className="text-xl font-semibold text-slate-900 tracking-tight flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
+              <Mail className="w-4 h-4" />
             </div>
-            Mail Inbox
+            Inbox
           </h1>
-          <p className="text-slate-500 text-sm mt-1 font-medium">
+          <p className="text-slate-500 text-xs mt-1 font-normal">
             {gmailStatus.is_connected
               ? `Connected to Google Mail (${gmailStatus.email}). Tracking enabled.`
               : senderMailStatus
@@ -865,15 +943,15 @@ const InboxPage = () => {
         </div>
         <div className="flex items-center gap-2.5 flex-wrap">
           {gmailStatus.is_connected ? (
-            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-800 shadow-xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-              <span className="font-bold shrink-0">Gmail:</span>
-              <span className="truncate max-w-[140px] sm:max-w-xs">{gmailStatus.email}</span>
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/80 px-3.5 py-1.5 rounded-full text-xs font-medium text-slate-700 shadow-2xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+              <span className="text-slate-500 shrink-0">Gmail:</span>
+              <span className="truncate max-w-[140px] sm:max-w-xs text-slate-800 font-medium">{gmailStatus.email}</span>
               <button
                 type="button"
                 onClick={handleDisconnectGmail}
                 disabled={disconnectingGmail}
-                className="ml-1 text-[11px] font-bold text-slate-400 hover:text-rose-600 transition underline disabled:opacity-50"
+                className="ml-1 text-[11px] font-medium text-slate-400 hover:text-rose-600 transition underline disabled:opacity-50 cursor-pointer"
               >
                 {disconnectingGmail ? '...' : 'Disconnect'}
               </button>
@@ -883,7 +961,7 @@ const InboxPage = () => {
               type="button"
               onClick={handleConnectGmail}
               disabled={connectingGmail}
-              className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-700 font-bold text-sm rounded-xl transition flex items-center gap-2 border border-slate-200 shadow-xs hover:border-slate-300 disabled:opacity-50"
+              className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 font-medium text-sm rounded-full transition flex items-center gap-2 border border-slate-200 shadow-2xs hover:border-slate-300 disabled:opacity-50 cursor-pointer"
               title="Connect your Google Mail account via OAuth"
             >
               <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
@@ -896,35 +974,84 @@ const InboxPage = () => {
             </button>
           )}
 
-          <button onClick={handleCompose} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-xl transition flex items-center gap-2 shadow-sm">
-            <Edit3 className="w-4 h-4" /> Compose
+          <button
+            type="button"
+            onClick={() => setShowBulkCampaign(true)}
+            className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-800 font-medium text-sm rounded-full transition flex items-center gap-2 shadow-2xs cursor-pointer"
+            title="Create and monitor safe 90-second bulk campaigns"
+          >
+            <Users className="w-4 h-4 text-blue-600" />
+            <span>Bulk Campaign</span>
           </button>
-          <button onClick={handleRefresh} disabled={loading} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm rounded-xl transition flex items-center gap-2 border border-slate-200 disabled:opacity-50">
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Sync
+          <button 
+            type="button"
+            onClick={handleCompose} 
+            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-medium text-sm rounded-full transition flex items-center gap-2 shadow-xs hover:shadow cursor-pointer"
+          >
+            <Edit3 className="w-4 h-4" />
+            <span>Compose</span>
+          </button>
+          <button 
+            type="button"
+            onClick={handleRefresh} 
+            disabled={isListLoading} 
+            className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-700 font-medium text-sm rounded-full transition flex items-center gap-2 shadow-2xs disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw className={`w-4 h-4 text-slate-500 ${isListLoading ? 'animate-spin' : ''}`} />
+            <span>Sync</span>
           </button>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 bg-white border border-slate-200 rounded-2xl shadow-sm flex overflow-hidden">
+      <div className="flex-1 min-h-0 bg-white border border-slate-200 rounded-2xl shadow-xs flex overflow-hidden">
         {/* Sidebar */}
-        <div className="w-56 border-r border-slate-200 bg-slate-50 flex flex-col shrink-0">
-          <div className="p-4 border-b border-slate-200">
-            <h2 className="text-xs font-black text-slate-400 uppercase tracking-wider">Folders</h2>
+        <div className="w-56 border-r border-slate-200/80 bg-slate-50/60 flex flex-col shrink-0">
+          <div className="p-3.5 border-b border-slate-200/60">
+            <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Mail</h2>
           </div>
           <nav className="flex-1 overflow-y-auto p-2 space-y-1">
             {FOLDERS.map((f) => {
               const Icon = f.icon;
+              const isActive = !isProspectResponsesView && activeFolder === f.id;
               return (
                 <button
                   key={f.id}
                   onClick={() => handleFolderSwitch(f.id)}
-                  className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-bold rounded-xl transition ${activeFolder === f.id ? 'bg-sky-100 text-sky-700' : 'text-slate-600 hover:bg-slate-100'}`}
+                  className={`w-full flex items-center gap-3 px-3.5 py-2 text-sm font-medium rounded-full transition cursor-pointer ${
+                    isActive ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-500'}`} />
                   {f.label}
                 </button>
               );
             })}
+
+            <div className="pt-3 pb-1 px-1">
+              <div className="h-px bg-slate-200/80 mb-2" />
+              <span className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase px-2">Prospects</span>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSwitchToProspectResponses}
+              className={`w-full flex items-center justify-between px-3.5 py-2 text-sm font-medium rounded-full transition cursor-pointer ${
+                isProspectResponsesView 
+                  ? 'bg-emerald-50 text-emerald-800 font-semibold border border-emerald-200/80' 
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+              title="Inbound email responses from matched prospects and key contacts"
+            >
+              <div className="flex items-center gap-2.5 truncate">
+                <Building2 className={`w-4 h-4 shrink-0 ${isProspectResponsesView ? 'text-emerald-700' : 'text-slate-500'}`} />
+                <span className="truncate">Prospect Responses</span>
+              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
+                isProspectResponsesView ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-200 text-slate-600'
+              }`}>
+                Prospects
+              </span>
+            </button>
           </nav>
         </div>
 
@@ -934,13 +1061,13 @@ const InboxPage = () => {
           <div className={`flex flex-col border-r border-slate-100 overflow-y-auto transition-all ${selectedEmail ? 'w-80 shrink-0' : 'flex-1'}`}>
             <div className="p-3 border-b border-slate-100 sticky top-0 bg-white z-10 shrink-0">
               <form onSubmit={handleSearchSubmit} className="relative flex items-center">
-                <Search className="w-4 h-4 absolute left-3 text-slate-400 pointer-events-none" />
+                <Search className="w-4 h-4 absolute left-3.5 text-slate-400 pointer-events-none" />
                 <input 
                   type="text" 
-                  placeholder="Search mail (press Enter)..." 
+                  placeholder="Search in mail..." 
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 placeholder-slate-400 rounded-xl pl-9 pr-8 py-2 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 font-medium transition-all"
+                  className="w-full bg-slate-100/80 hover:bg-slate-100 border border-slate-200/60 text-slate-900 placeholder-slate-400 rounded-full pl-10 pr-8 py-2 text-xs outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100 font-normal transition-all"
                 />
                 {searchQuery && (
                   <button
@@ -949,7 +1076,7 @@ const InboxPage = () => {
                       setSearchQuery('');
                       loadFolder(activeFolder, true, '');
                     }}
-                    className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-600 rounded-md"
+                    className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-600 rounded-full"
                     title="Clear search"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -957,18 +1084,41 @@ const InboxPage = () => {
                 )}
               </form>
             </div>
-            {loading ? (
-              <div className="flex items-center justify-center h-full text-slate-400 gap-2 font-medium">
-                <Loader2 className="w-5 h-5 animate-spin" /> Loading emails...
+            {isProspectResponsesView && (
+              <div className="bg-emerald-50/70 border-b border-emerald-200/60 px-4 py-2 text-xs flex items-center justify-between text-emerald-900 shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="font-medium truncate">Responses from matched prospects & contacts</span>
+                </div>
+                <span className="text-[10px] font-medium text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full shrink-0">
+                  {displayEmails.length} {displayEmails.length === 1 ? 'response' : 'responses'}
+                </span>
+              </div>
+            )}
+            {isListLoading ? (
+              <div className="flex items-center justify-center h-full text-slate-400 gap-2 font-normal text-xs">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-600" /> Loading messages...
               </div>
             ) : displayEmails.length === 0 ? (
-              !gmailStatus.is_connected && (!senderMailStatus || senderMailStatus.provider === 'GMAIL_OAUTH') ? (
-                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-4">
-                  <div className="w-14 h-14 rounded-2xl bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-600 shadow-xs">
-                    <Mail className="w-7 h-7" />
+              isProspectResponsesView ? (
+                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-3">
+                  <div className="w-12 h-12 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shadow-2xs">
+                    <Building2 className="w-6 h-6" />
                   </div>
                   <div className="space-y-1">
-                    <h3 className="font-bold text-slate-800 text-base">Connect Google Mail</h3>
+                    <h3 className="font-semibold text-slate-800 text-sm">No prospect responses yet</h3>
+                    <p className="text-slate-500 text-xs leading-relaxed">
+                      Emails arriving from companies or key people in your prospect directory will automatically appear here.
+                    </p>
+                  </div>
+                </div>
+              ) : !gmailStatus.is_connected && (!senderMailStatus || senderMailStatus.provider === 'GMAIL_OAUTH') ? (
+                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-4">
+                  <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shadow-2xs">
+                    <Mail className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="font-semibold text-slate-800 text-base">Connect Google Mail</h3>
                     <p className="text-slate-500 text-xs leading-relaxed">
                       Connect your Gmail account via Google OAuth to view your inbox, sync sent messages, and track outreach effortlessly.
                     </p>
@@ -977,19 +1127,18 @@ const InboxPage = () => {
                     type="button"
                     onClick={handleConnectGmail}
                     disabled={connectingGmail}
-                    className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm rounded-xl transition flex items-center gap-2 shadow-sm disabled:opacity-50"
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm rounded-full transition flex items-center gap-2 shadow-xs hover:shadow disabled:opacity-50 cursor-pointer"
                   >
                     <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                       <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                       <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                      <path fill="#ffffff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
                       <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
                     </svg>
                     <span>{connectingGmail ? 'Connecting...' : 'Connect Gmail'}</span>
                   </button>
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center h-full text-slate-400 font-medium p-6 text-center space-y-2">
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 font-normal p-6 text-center space-y-2 text-xs">
                   <Mail className="w-8 h-8 text-slate-300" />
                   <span>No emails found in this folder.</span>
                 </div>
@@ -1006,30 +1155,48 @@ const InboxPage = () => {
                         openEmail(email);
                       }
                     }}
-                    className={`p-3.5 cursor-pointer transition ${selectedEmail?.uid === email.uid ? 'bg-sky-50 border-l-2 border-sky-500' : 'hover:bg-slate-50'}`}
+                    className={`p-3.5 cursor-pointer transition ${selectedEmail?.uid === email.uid ? 'bg-blue-50/70 border-l-2 border-blue-600' : 'hover:bg-slate-50/80'}`}
                   >
                     <div className="flex items-center justify-between gap-1.5 mb-1">
                       <div className="flex items-center gap-1.5 min-w-0 flex-1">
                         <button
                           type="button"
                           onClick={(e) => handleToggleStar(e, email)}
-                          className="p-0.5 text-slate-300 hover:text-amber-400 transition shrink-0"
+                          className="p-1 text-slate-300 hover:text-amber-400 rounded-full hover:bg-slate-100 transition shrink-0"
                           title={email.is_starred ? 'Starred' : 'Star message'}
                         >
                           <Star className={`w-3.5 h-3.5 ${email.is_starred ? 'fill-amber-400 text-amber-400' : ''}`} />
                         </button>
 
-                        <span className={`text-xs truncate flex-1 ${email.is_unread ? 'font-bold text-slate-900' : 'font-medium text-slate-600'}`}>
+                        <span className={`text-xs truncate flex-1 flex items-center gap-1.5 flex-wrap ${email.is_unread ? 'font-semibold text-slate-900' : 'font-normal text-slate-700'}`}>
                           {email.prospect_company_name ? (
-                            <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-[10px] uppercase font-bold tracking-wider mr-1.5">
-                              <Building2 className="w-3 h-3" /> {email.prospect_company_name}
+                            (email.prospect_lq_id || email.prospect_id) ? (
+                              <Link
+                                to={`/lq-pipeline/${email.prospect_lq_id || email.prospect_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-950 px-2 py-0.5 rounded-full border border-emerald-200/80 text-[10px] font-medium shrink-0 transition"
+                                title={`View ${email.prospect_company_name} in LQ Pipeline`}
+                              >
+                                <Building2 className="w-3 h-3 text-emerald-600" /> {email.prospect_company_name}
+                              </Link>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/80 text-[10px] font-medium shrink-0" title={`Company: ${email.prospect_company_name}`}>
+                                <Building2 className="w-3 h-3 text-emerald-600" /> {email.prospect_company_name}
+                              </span>
+                            )
+                          ) : null}
+                          {email.prospect_contact_name ? (
+                            <span className="inline-flex items-center gap-1 text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/80 text-[10px] font-medium shrink-0" title={`Contact: ${email.prospect_contact_name}`}>
+                              <User className="w-3 h-3 text-indigo-600" /> {email.prospect_contact_name}
                             </span>
                           ) : null}
-                          {activeFolder === 'SENT' || activeFolder.includes('Sent') 
-                            ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}` 
-                            : activeFolder === 'DRAFT'
-                            ? `Draft: ${email.to?.replace(/<.*>/, '').trim() || '(No Recipient)'}`
-                            : email.from?.replace(/<.*>/, '').trim() || email.from}
+                          <span className="truncate">
+                            {!isProspectResponsesView && (activeFolder === 'SENT' || activeFolder.includes('Sent')) 
+                              ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}` 
+                              : !isProspectResponsesView && activeFolder === 'DRAFT'
+                              ? `Draft: ${email.to?.replace(/<.*>/, '').trim() || '(No Recipient)'}`
+                              : email.from?.replace(/<.*>/, '').trim() || email.from}
+                          </span>
                         </span>
                       </div>
 
@@ -1037,38 +1204,38 @@ const InboxPage = () => {
                         {email.tracking && (
                           email.tracking.open_tracking_enabled === false ? (
                             <span 
-                              className="px-1.5 py-0.2 rounded text-[9px] font-bold text-slate-500 bg-slate-100 border border-slate-200"
-                              title="Open tracking disabled for deliverability"
+                              className="px-2 py-0.5 rounded-full text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200"
+                              title="Open tracking disabled"
                             >
                               Untracked
                             </span>
                           ) : (
                             <span 
-                              className={`px-1.5 py-0.2 rounded text-[9px] font-extrabold uppercase border flex items-center gap-1 ${
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1 ${
                                 email.tracking.is_opened 
-                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-300' 
-                                  : 'bg-amber-50 text-amber-700 border-amber-300'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                                  : 'bg-amber-50 text-amber-700 border-amber-200'
                               }`}
                               title={email.tracking.is_opened ? `Opened ${email.tracking.open_count || 1}x` : 'Awaiting open'}
                             >
-                              <span className={`w-1 h-1 rounded-full ${email.tracking.is_opened ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                              <span className={`w-1.5 h-1.5 rounded-full ${email.tracking.is_opened ? 'bg-emerald-500' : 'bg-amber-500'}`} />
                               {email.tracking.is_opened ? `${email.tracking.open_count || 1}x` : 'Sent'}
                             </span>
                           )
                         )}
-                        <span className="text-[10px] text-slate-400 font-medium">{email.date?.split(' ').slice(1, 4).join(' ')}</span>
+                        <span className="text-[10px] text-slate-400 font-normal">{email.date?.split(' ').slice(1, 4).join(' ')}</span>
                       </div>
                     </div>
                     <div className="flex items-center justify-between gap-2">
-                      <h4 className={`text-xs truncate flex-1 ${email.is_unread ? 'font-bold text-slate-800' : 'font-semibold text-slate-600'}`}>
+                      <h4 className={`text-xs truncate flex-1 ${email.is_unread ? 'font-semibold text-slate-900' : 'font-normal text-slate-700'}`}>
                         {email.subject || '(No Subject)'}
                       </h4>
                       {email.is_unread && (
-                        <span className="w-2 h-2 rounded-full bg-sky-500 shrink-0" title="Unread" />
+                        <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" title="Unread" />
                       )}
                     </div>
                     {email.snippet && (
-                      <p className="text-[11px] text-slate-400 truncate mt-0.5">{email.snippet}</p>
+                      <p className="text-[11px] text-slate-400 truncate mt-0.5 font-normal">{email.snippet}</p>
                     )}
                   </li>
                 ))}
@@ -1082,7 +1249,8 @@ const InboxPage = () => {
               <div className="p-4 border-b border-slate-100 flex items-start gap-3 shrink-0 bg-white">
                 <button
                   onClick={() => { setSelectedEmail(null); setEmailBodyState({ html_body: '', text_body: '' }); }}
-                  className="p-1.5 hover:bg-slate-100 rounded-full transition text-slate-500 mt-0.5 shrink-0"
+                  className="p-2 hover:bg-slate-100 rounded-full transition text-slate-600 mt-0.5 shrink-0 cursor-pointer"
+                  title="Back to list"
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -1090,32 +1258,105 @@ const InboxPage = () => {
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h2 className="text-base font-bold text-slate-900 leading-tight">{selectedEmail.subject || '(No Subject)'}</h2>
+                        <h2 className="text-base font-semibold text-slate-900 leading-tight">{selectedEmail.subject || '(No Subject)'}</h2>
                         {(selectedEmail.tracking || emailBody.tracking) && (
                           (selectedEmail.tracking || emailBody.tracking)?.open_tracking_enabled === false ? (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold text-slate-600 bg-slate-100 border border-slate-300 shrink-0">
-                              Tracking Disabled
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 shrink-0">
+                              Untracked
                             </span>
                           ) : (
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 shrink-0 ${
+                            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1.5 shrink-0 ${
                               (emailBody.tracking || selectedEmail.tracking)?.is_opened
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
-                                : 'bg-amber-50 text-amber-700 border-amber-300'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
                             }`}>
                               <span className={`w-1.5 h-1.5 rounded-full ${(emailBody.tracking || selectedEmail.tracking)?.is_opened ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
                               {(emailBody.tracking || selectedEmail.tracking)?.is_opened 
                                 ? `Viewed (${(emailBody.tracking || selectedEmail.tracking)?.open_count || 1}x)` 
-                                : 'Not Viewed'}
+                                : 'Sent'}
                             </span>
                           )
                         )}
                       </div>
+
+                      {/* Prospect Identification Card */}
+                      {(selectedEmail.prospect_match || selectedEmail.prospect_company_name) && (() => {
+                        const targetLqId = selectedEmail.prospect_lq_id || selectedEmail.prospect_id;
+                        return (
+                          <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 mt-2.5 mb-1 flex items-center justify-between flex-wrap gap-2">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-medium shadow-2xs shrink-0">
+                                <Building2 className="w-4 h-4 text-emerald-700" />
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {targetLqId ? (
+                                    <Link
+                                      to={`/lq-pipeline/${targetLqId}`}
+                                      className="font-semibold text-xs text-slate-900 hover:text-indigo-600 hover:underline flex items-center gap-1 transition group"
+                                      title="Open related Lead Qualification Pipeline record"
+                                    >
+                                      <span>{selectedEmail.prospect_company_name}</span>
+                                      <ExternalLink className="w-3 h-3 text-slate-400 group-hover:text-indigo-600 transition" />
+                                    </Link>
+                                  ) : (
+                                    <span className="font-semibold text-xs text-slate-900">
+                                      {selectedEmail.prospect_company_name}
+                                    </span>
+                                  )}
+                                  {targetLqId ? (
+                                    <Link
+                                      to={`/lq-pipeline/${targetLqId}`}
+                                      className="px-2 py-0.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-[10px] font-medium rounded-full transition flex items-center gap-1 cursor-pointer"
+                                      title="Open related Lead Qualification Pipeline record"
+                                    >
+                                      <span>Matched Company</span>
+                                      <ChevronRight className="w-2.5 h-2.5 text-emerald-700" />
+                                    </Link>
+                                  ) : (
+                                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-medium rounded-full">
+                                      Matched Company
+                                    </span>
+                                  )}
+                                  {selectedEmail.prospect_contact_name && (
+                                    <>
+                                      <span className="text-slate-300">·</span>
+                                      <span className="font-medium text-xs text-indigo-900 flex items-center gap-1">
+                                        <User className="w-3 h-3 text-indigo-600" />
+                                        {selectedEmail.prospect_contact_name}
+                                      </span>
+                                      <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-[10px] font-medium rounded-full">
+                                        Contact
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 font-normal mt-0.5">
+                                  Matched prospect from your directory.
+                                </p>
+                              </div>
+                            </div>
+
+                            {targetLqId && (
+                              <Link
+                                to={`/lq-pipeline/${targetLqId}`}
+                                className="px-3 py-1.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 text-indigo-600 hover:text-indigo-700 rounded-lg text-xs font-semibold shadow-2xs transition flex items-center gap-1.5"
+                                title="Open related Lead Qualification Pipeline record"
+                              >
+                                <span>View in LQ Pipeline</span>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </Link>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 flex-wrap">
-                        <span>From: <span className="font-semibold text-slate-700">{selectedEmail.from}</span></span>
+                        <span>From: <span className="font-medium text-slate-700">{selectedEmail.from}</span></span>
                         {selectedEmail.to && (
                           <>
                             <span className="text-slate-300">·</span>
-                            <span>To: <span className="font-semibold text-slate-700">{selectedEmail.to}</span></span>
+                            <span>To: <span className="font-medium text-slate-700">{selectedEmail.to}</span></span>
                           </>
                         )}
                         <span className="text-slate-300">·</span>
@@ -1127,7 +1368,7 @@ const InboxPage = () => {
                       <button
                         type="button"
                         onClick={(e) => handleToggleStar(e, selectedEmail)}
-                        className={`p-1.5 rounded-xl border transition cursor-pointer ${
+                        className={`p-2 rounded-full border transition cursor-pointer ${
                           selectedEmail.is_starred
                             ? 'bg-amber-50 border-amber-200 text-amber-500 hover:bg-amber-100'
                             : 'bg-white border-slate-200 text-slate-400 hover:text-amber-500 hover:bg-slate-50'
@@ -1141,10 +1382,10 @@ const InboxPage = () => {
                       <button
                         type="button"
                         onClick={(e) => handleToggleRead(e, selectedEmail)}
-                        className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                        className="p-2 rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer"
                         title={selectedEmail.is_unread ? 'Mark as Read' : 'Mark as Unread'}
                       >
-                        {selectedEmail.is_unread ? <MailOpen className="w-3.5 h-3.5 text-sky-600" /> : <Mail className="w-3.5 h-3.5 text-slate-500" />}
+                        {selectedEmail.is_unread ? <MailOpen className="w-3.5 h-3.5 text-blue-600" /> : <Mail className="w-3.5 h-3.5 text-slate-500" />}
                       </button>
 
                       {/* Draft actions */}
@@ -1152,7 +1393,7 @@ const InboxPage = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenDraft(selectedEmail)}
-                          className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition flex items-center gap-1 shadow-xs cursor-pointer"
+                          className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-full transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                           <span>Edit Draft</span>
@@ -1164,7 +1405,7 @@ const InboxPage = () => {
                         <button
                           type="button"
                           onClick={() => handleToggleSpam(selectedEmail)}
-                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                          className="px-3.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-medium rounded-full transition flex items-center gap-1 cursor-pointer"
                           title="Not Spam (Move to Inbox)"
                         >
                           <Undo2 className="w-3.5 h-3.5" />
@@ -1174,7 +1415,7 @@ const InboxPage = () => {
                         <button
                           type="button"
                           onClick={() => handleToggleSpam(selectedEmail)}
-                          className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                          className="p-2 rounded-full border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                           title="Report Spam"
                         >
                           <ShieldAlert className="w-3.5 h-3.5" />
@@ -1187,7 +1428,7 @@ const InboxPage = () => {
                           <button
                             type="button"
                             onClick={() => handleUntrashMessage(selectedEmail)}
-                            className="px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                            className="px-3.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-medium rounded-full transition flex items-center gap-1 cursor-pointer"
                             title="Restore to Inbox"
                           >
                             <Undo2 className="w-3.5 h-3.5" />
@@ -1196,7 +1437,7 @@ const InboxPage = () => {
                           <button
                             type="button"
                             onClick={() => handleDeleteForever(selectedEmail)}
-                            className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold rounded-xl transition flex items-center gap-1 cursor-pointer"
+                            className="px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-medium rounded-full transition flex items-center gap-1 cursor-pointer"
                             title="Delete Forever"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1207,7 +1448,7 @@ const InboxPage = () => {
                         <button
                           type="button"
                           onClick={() => handleTrashMessage(selectedEmail)}
-                          className="p-1.5 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                          className="p-2 rounded-full border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                           title="Move to Trash"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -1219,17 +1460,17 @@ const InboxPage = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenTrackingModal()}
-                          className="px-2.5 py-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs rounded-xl transition flex items-center gap-1 border border-indigo-400/40 shadow-sm cursor-pointer"
+                          className="px-3.5 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-700 font-medium text-xs rounded-full transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
                           title="Open email tracking & engagement analytics"
                         >
-                          <BarChart2 className="w-3.5 h-3.5 text-indigo-200" />
+                          <BarChart2 className="w-3.5 h-3.5 text-blue-600" />
                           <span>Track</span>
                         </button>
                       )}
 
                       {/* Reply */}
                       {activeFolder !== 'DRAFT' && (
-                        <button onClick={handleReply} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 shrink-0 cursor-pointer">
+                        <button onClick={handleReply} className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-full transition flex items-center gap-1.5 shadow-2xs shrink-0 cursor-pointer">
                           <Reply className="w-3.5 h-3.5" /> Reply
                         </button>
                       )}
@@ -1270,16 +1511,16 @@ const InboxPage = () => {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5 z-50">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden border border-slate-200 flex flex-col">
             {/* Modal Header */}
-            <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-sky-700 p-4 text-white flex items-center justify-between shrink-0 shadow-sm">
+            <div className="bg-white border-b border-slate-200 px-5 py-3 text-slate-800 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shadow-xs">
-                  <Mail className="w-4 h-4 text-white" />
+                <div className="w-8 h-8 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <Mail className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-base tracking-tight leading-snug">Compose Email</h3>
+                  <h3 className="font-semibold text-sm text-slate-900 leading-snug">New message</h3>
                   {senderMailStatus && (
-                    <p className="text-[11px] text-blue-100/90 font-medium">
-                      From: <span className="font-semibold text-white">{senderMailStatus.display_name || senderMailStatus.email_address}</span> ({senderMailStatus.email_address})
+                    <p className="text-[11px] text-slate-500 font-normal">
+                      From: <span className="text-slate-700 font-medium">{senderMailStatus.display_name || senderMailStatus.email_address}</span> ({senderMailStatus.email_address})
                     </p>
                   )}
                 </div>
@@ -1287,33 +1528,34 @@ const InboxPage = () => {
               <button 
                 type="button"
                 onClick={() => setShowCompose(false)} 
-                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition"
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-full hover:bg-slate-100 transition cursor-pointer"
+                title="Close"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Modal Scrollable Body */}
             <div className="p-4 sm:p-5 flex-1 overflow-y-auto space-y-3.5 text-xs">
               {/* Recipient Fields */}
-              <div className="space-y-2 bg-slate-50/80 p-3 rounded-xl border border-slate-200/80">
+              <div className="space-y-2 bg-slate-50/70 p-3 rounded-xl border border-slate-200/80">
                 {/* To Field */}
                 <div className="flex items-center gap-2">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 w-12 shrink-0">To:</label>
+                  <label className="text-xs font-medium text-slate-500 w-10 shrink-0">To:</label>
                   <input 
                     type="text" 
                     value={composeData.to} 
                     onChange={(e) => setComposeData(prev => ({ ...prev, to: e.target.value }))}
                     disabled={sendingEmail}
-                    className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" 
+                    className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-normal text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition" 
                     placeholder="recipient@example.com (comma-separated for multiple)"
                   />
-                  <div className="flex items-center gap-1.5 shrink-0 text-[11px] font-bold">
+                  <div className="flex items-center gap-1 shrink-0 text-xs font-medium">
                     {!showCc && (
                       <button
                         type="button"
                         onClick={() => setShowCc(true)}
-                        className="px-2 py-1 text-slate-500 hover:text-indigo-600 hover:bg-white rounded-md transition"
+                        className="px-2.5 py-1 text-slate-500 hover:text-blue-600 hover:bg-white rounded-md transition cursor-pointer"
                       >
                         Cc
                       </button>
@@ -1322,7 +1564,7 @@ const InboxPage = () => {
                       <button
                         type="button"
                         onClick={() => setShowBcc(true)}
-                        className="px-2 py-1 text-slate-500 hover:text-indigo-600 hover:bg-white rounded-md transition"
+                        className="px-2.5 py-1 text-slate-500 hover:text-blue-600 hover:bg-white rounded-md transition cursor-pointer"
                       >
                         Bcc
                       </button>
@@ -1333,13 +1575,13 @@ const InboxPage = () => {
                 {/* Cc Field */}
                 {showCc && (
                   <div className="flex items-center gap-2">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-blue-600 w-12 shrink-0">Cc:</label>
+                    <label className="text-xs font-medium text-blue-600 w-10 shrink-0">Cc:</label>
                     <input 
                       type="text" 
                       value={composeData.cc || ''} 
                       onChange={(e) => setComposeData(prev => ({ ...prev, cc: e.target.value }))}
                       disabled={sendingEmail}
-                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" 
+                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-normal text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition" 
                       placeholder="cc_recipient@example.com"
                     />
                     <button
@@ -1356,13 +1598,13 @@ const InboxPage = () => {
                 {/* Bcc Field */}
                 {showBcc && (
                   <div className="flex items-center gap-2">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-purple-600 w-12 shrink-0">Bcc:</label>
+                    <label className="text-xs font-medium text-blue-600 w-10 shrink-0">Bcc:</label>
                     <input 
                       type="text" 
                       value={composeData.bcc || ''} 
                       onChange={(e) => setComposeData(prev => ({ ...prev, bcc: e.target.value }))}
                       disabled={sendingEmail}
-                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" 
+                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-normal text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition" 
                       placeholder="bcc_recipient@example.com"
                     />
                     <button
@@ -1393,32 +1635,32 @@ const InboxPage = () => {
 
               {/* Subject Field */}
               <div>
-                <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-600 mb-1">Subject</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Subject</label>
                 <input 
                   type="text" 
                   value={composeData.subject} 
                   onChange={(e) => setComposeData(prev => ({ ...prev, subject: e.target.value }))}
                   disabled={sendingEmail}
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" 
-                  placeholder="Enter subject"
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-normal text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition" 
+                  placeholder="Subject"
                 />
               </div>
 
               {/* Message Content */}
               <div>
-                <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-600 mb-1">Message Content</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Message</label>
                 <textarea 
                   rows={8}
                   value={composeData.body}
                   onChange={(e) => setComposeData(prev => ({ ...prev, body: e.target.value }))}
                   disabled={sendingEmail}
-                  className={`w-full p-3 bg-white border border-slate-200 text-xs font-medium text-slate-800 leading-relaxed focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 ${
+                  className={`w-full p-3 bg-white border border-slate-200 text-xs font-normal text-slate-800 leading-relaxed focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition ${
                     senderMailStatus?.default_signature && !templateSelection.signatureId ? 'rounded-t-xl' : 'rounded-xl'
                   }`}
                   placeholder="Write your email here..."
                 />
                 {senderMailStatus?.default_signature && !templateSelection.signatureId && (
-                  <div className="w-full p-3 bg-slate-50 border border-t-0 border-slate-200 rounded-b-xl text-xs text-slate-500 whitespace-pre-wrap">
+                  <div className="w-full p-3 bg-slate-50 border border-t-0 border-slate-200 rounded-b-xl text-xs text-slate-500 whitespace-pre-wrap font-normal">
                     {senderMailStatus.default_signature}
                   </div>
                 )}
@@ -1427,8 +1669,8 @@ const InboxPage = () => {
               {/* Attachments Section */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="text-[10px] font-extrabold uppercase tracking-wider text-slate-600">Attachments</label>
-                  <span className="text-[10px] text-slate-400">Max 10MB per file, 25MB total</span>
+                  <label className="text-xs font-medium text-slate-700">Attachments</label>
+                  <span className="text-[11px] text-slate-400">Max 10MB per file, 25MB total</span>
                 </div>
                 <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
                   <input 
@@ -1437,22 +1679,22 @@ const InboxPage = () => {
                     ref={fileInputRef}
                     onChange={handleFileChange} 
                     disabled={sendingEmail}
-                    className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer disabled:opacity-50"
+                    className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer disabled:opacity-50"
                   />
                   {attachmentError && (
-                    <div className="text-red-600 text-[10px] font-bold">{attachmentError}</div>
+                    <div className="text-red-600 text-[10px] font-medium">{attachmentError}</div>
                   )}
                   {attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 pt-1">
                       {attachments.map((file, i) => (
-                        <div key={i} className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 rounded-lg border border-slate-200 text-[11px] font-semibold text-slate-700">
+                        <div key={i} className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 rounded-full border border-slate-200 text-xs font-medium text-slate-700">
                           <Paperclip className="w-3 h-3 text-slate-400" />
                           <span className="truncate max-w-[160px]">{file.name}</span>
-                          <span className="text-slate-400">({(file.size / 1024 / 1024).toFixed(1)}MB)</span>
+                          <span className="text-slate-400 font-normal">({(file.size / 1024 / 1024).toFixed(1)}MB)</span>
                           <button 
                             type="button" 
                             onClick={() => removeAttachment(i)} 
-                            className="text-red-500 hover:text-red-700 font-bold ml-1 text-sm leading-none"
+                            className="text-slate-400 hover:text-rose-600 font-bold ml-1 text-sm leading-none cursor-pointer"
                             title="Remove attachment"
                           >
                             ×
@@ -1475,18 +1717,18 @@ const InboxPage = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex items-center justify-between shrink-0">
+            <div className="bg-slate-50/80 px-5 py-3 border-t border-slate-200 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={sendingEmail}
-                  className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-bold text-xs rounded-xl transition flex items-center gap-1.5 shadow-2xs"
+                  className="px-3.5 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-medium text-xs rounded-full transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
                 >
-                  <Paperclip className="w-3.5 h-3.5 text-indigo-600" />
+                  <Paperclip className="w-3.5 h-3.5 text-blue-600" />
                   <span>Attach</span>
                   {attachments.length > 0 && (
-                    <span className="px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-extrabold">
+                    <span className="px-1.5 py-0.2 rounded-full bg-blue-100 text-blue-700 text-[10px] font-medium">
                       {attachments.length}
                     </span>
                   )}
@@ -1497,25 +1739,25 @@ const InboxPage = () => {
                   type="button"
                   onClick={() => setShowCompose(false)} 
                   disabled={sendingEmail || savingDraft}
-                  className="px-4 py-2 bg-white border border-slate-200 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-100 transition cursor-pointer"
+                  className="px-4 py-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 font-medium text-xs rounded-full transition cursor-pointer"
                 >
-                  Cancel
+                  Discard
                 </button>
                 <button
                   type="button"
                   onClick={handleSaveDraft}
                   disabled={sendingEmail || savingDraft}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-medium text-xs rounded-full transition flex items-center gap-1.5 disabled:opacity-50 shadow-2xs cursor-pointer"
                   title="Save Draft to Gmail"
                 >
-                  {savingDraft ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 text-slate-600" />}
+                  {savingDraft ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 text-slate-500" />}
                   <span>{savingDraft ? 'Saving...' : 'Save Draft'}</span>
                 </button>
                 <button 
                   type="button"
                   onClick={sendEmail} 
                   disabled={sendingEmail || savingDraft || !composeData.to?.trim()} 
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-extrabold text-xs rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer"
+                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium text-xs rounded-full shadow-xs hover:shadow transition flex items-center gap-2 cursor-pointer"
                 >
                   {sendingEmail ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                   <span>{sendingEmail ? 'Sending...' : 'Send'}</span>
@@ -1531,40 +1773,41 @@ const InboxPage = () => {
         <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-200">
             {/* Modal Header */}
-            <div className="bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 p-5 text-white flex items-center justify-between border-b border-indigo-900/50">
+            <div className="bg-white border-b border-slate-200 px-6 py-4 text-slate-800 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 flex items-center justify-center font-bold shadow-inner">
+                <div className="w-9 h-9 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
                   <BarChart2 className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-base font-extrabold tracking-tight text-white">Email Tracking & Engagement Analytics</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-semibold text-slate-900">Email engagement & tracking</h3>
                     {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_tracking_enabled === false ? (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border bg-slate-500/20 text-slate-300 border-slate-400/40 flex items-center gap-1">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium border bg-slate-100 text-slate-600 border-slate-200">
                         Tracking Disabled
                       </span>
                     ) : (
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1 ${
                         (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened
-                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
-                          : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-amber-50 text-amber-700 border-amber-200'
                       }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                        <span className={`w-1.5 h-1.5 rounded-full ${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
                         {(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.is_opened 
                           ? `Viewed (${(trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.open_count || 1}x)` 
                           : 'Awaiting Open'}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-slate-300 mt-0.5 truncate max-w-md">
-                    {selectedEmail?.to || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.to_email || 'Recipient'} &bull; <span className="text-indigo-200 font-semibold">{selectedEmail?.subject || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.subject || '(No Subject)'}</span>
+                  <p className="text-xs text-slate-500 mt-0.5 truncate max-w-md">
+                    {selectedEmail?.to || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.to_email || 'Recipient'} &bull; <span className="text-slate-700 font-medium">{selectedEmail?.subject || (trackingModalData || emailBody.tracking || selectedEmail?.tracking)?.subject || '(No Subject)'}</span>
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowTrackingModal(false)}
-                className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+                title="Close"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1743,23 +1986,23 @@ const InboxPage = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="p-4 bg-slate-50/80 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={handleSimulateOpen}
                   disabled={isSimulatingOpen || !(trackingModalData?.id || emailBody.tracking?.id || selectedEmail?.tracking?.id)}
-                  className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-extrabold text-xs rounded-xl border border-indigo-200/80 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  className="px-3.5 py-1.5 bg-blue-50 hover:bg-blue-100 disabled:opacity-50 text-blue-700 font-medium text-xs rounded-full border border-blue-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
                   title="Simulate recipient opening the email (test live tracking)"
                 >
-                  <Zap className={`w-3.5 h-3.5 ${isSimulatingOpen ? 'animate-bounce text-indigo-600' : 'text-indigo-500'}`} />
-                  <span>{isSimulatingOpen ? 'Recording...' : '⚡ Test Open Ping'}</span>
+                  <Zap className={`w-3.5 h-3.5 ${isSimulatingOpen ? 'animate-bounce text-blue-600' : 'text-blue-500'}`} />
+                  <span>{isSimulatingOpen ? 'Recording...' : 'Test open ping'}</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleRefreshTracking}
                   disabled={isRefreshingTracking}
-                  className="px-3 py-1.5 bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-700 font-extrabold text-xs rounded-xl border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  className="px-3.5 py-1.5 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-700 font-medium text-xs rounded-full border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? 'animate-spin text-slate-500' : 'text-slate-400'}`} />
                   <span>{isRefreshingTracking ? 'Refreshing...' : 'Refresh'}</span>
@@ -1769,7 +2012,7 @@ const InboxPage = () => {
               <button
                 type="button"
                 onClick={() => setShowTrackingModal(false)}
-                className="px-5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs rounded-xl transition shadow-sm cursor-pointer"
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-medium text-xs rounded-full transition shadow-2xs cursor-pointer"
               >
                 Close
               </button>
@@ -1777,6 +2020,12 @@ const InboxPage = () => {
           </div>
         </div>
       )}
+
+      {/* Bulk Email Campaign Modal */}
+      <BulkCampaignModal
+        isOpen={showBulkCampaign}
+        onClose={() => setShowBulkCampaign(false)}
+      />
     </div>
   );
 };

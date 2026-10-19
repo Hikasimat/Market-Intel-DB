@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { toast } from 'react-toastify';
 import { fetchProspectById, clearSelectedProspect } from '../features/prospects/prospectSlice';
@@ -10,6 +10,7 @@ import { ArrowLeft, Building2, Globe, Mail, Phone, MapPin, Network, Package, Use
 
 const ProspectDetailPage = () => {
   const { id } = useParams();
+  const navigate = useNavigate();
   const dispatch = useDispatch();
   const { selectedProspect, loading, error } = useSelector((state) => state.prospects);
   const { user } = useSelector((state) => state.auth);
@@ -71,9 +72,19 @@ const ProspectDetailPage = () => {
   return (
     <div className="space-y-6">
       <div>
-        <Link to="/prospects" className="inline-flex items-center text-sm font-medium text-indigo-600 hover:text-indigo-800 mb-4 transition-colors">
-          <ArrowLeft size={16} className="mr-1" /> Back to Prospects
-        </Link>
+        <button
+          type="button"
+          onClick={() => {
+            if (window.history.length > 1) {
+              navigate(-1);
+            } else {
+              navigate(user?.role === 'LQ' ? '/key-people' : '/prospects');
+            }
+          }}
+          className="inline-flex items-center text-sm font-medium text-indigo-600 hover:text-indigo-800 mb-4 transition-colors cursor-pointer"
+        >
+          <ArrowLeft size={16} className="mr-1" /> {user?.role === 'LQ' ? 'Back' : 'Back to Prospects'}
+        </button>
         
         <div className="flex items-start justify-between">
           <div>

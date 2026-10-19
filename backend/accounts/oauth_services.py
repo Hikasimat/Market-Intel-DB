@@ -388,7 +388,7 @@ class GmailOAuthService:
         return None
 
     @classmethod
-    def fetch_messages(cls, credentials, folder='INBOX', limit=20, search=''):
+    def fetch_messages(cls, credentials, folder='INBOX', limit=20, search='', user=None, matcher=None):
         """
         Fetches messages from Gmail via Gmail REST API.
         Maps folders to Gmail query filters (in:inbox, is:starred, in:sent, in:draft, in:spam, in:trash).
@@ -439,6 +439,16 @@ class GmailOAuthService:
         import re
         email_pattern = re.compile(r'[\w\.-]+@[\w\.-]+\.\w+')
 
+        # Initialize canonical prospect matcher
+        if matcher is None:
+            user_obj = user or getattr(credentials, 'user', None)
+            try:
+                from prospects.matching_service import ProspectMatcher
+                matcher = ProspectMatcher(user_obj)
+            except Exception as e:
+                logger.warning("Could not initialize ProspectMatcher: %s", e)
+                matcher = None
+
         def _fetch_meta(msg_id):
             msg_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID"
             for _attempt in range(3):
@@ -478,21 +488,46 @@ class GmailOAuthService:
             is_trash = 'TRASH' in label_ids
             thread_id = m_data.get('threadId', '')
 
-            # Match prospect company name
+            # Match prospect company and key contact metadata
+            prospect_match = False
+            prospect_match_type = None
+            prospect_id = None
+            prospect_lq_id = None
             prospect_company_name = None
-            try:
-                from prospects.models import ProspectContact, Prospect, OutreachEmail
-                all_addrs = email_pattern.findall(from_hdr) + email_pattern.findall(to_hdr)
-                if all_addrs:
-                    contact = ProspectContact.objects.filter(official_email__in=all_addrs).select_related('prospect').first()
-                    if contact and contact.prospect:
-                        prospect_company_name = contact.prospect.company_name
-                    else:
-                        prospect = Prospect.objects.filter(official_email_address__in=all_addrs).first()
-                        if prospect:
-                            prospect_company_name = prospect.company_name
-            except Exception:
-                pass
+            prospect_contact_id = None
+            prospect_contact_name = None
+            prospect_tags = []
+
+            is_outbound = 'SENT' in folder_clean
+
+            if matcher:
+                if is_outbound:
+                    # Outbound email: match recipient in To header to identify recipient company
+                    to_addrs = email_pattern.findall(to_hdr)
+                    for addr in to_addrs:
+                        m_res = matcher.match_address(addr, subject=subject, snippet=m_data.get('snippet', ''))
+                        if m_res.get('prospect_match'):
+                            prospect_match = True
+                            prospect_match_type = m_res.get('prospect_match_type')
+                            prospect_id = m_res.get('prospect_id')
+                            prospect_lq_id = m_res.get('prospect_lq_id')
+                            prospect_company_name = m_res.get('prospect_company_name')
+                            prospect_contact_id = m_res.get('prospect_contact_id')
+                            prospect_contact_name = m_res.get('prospect_contact_name')
+                            prospect_tags = m_res.get('prospect_tags', [])
+                            break
+                else:
+                    # Inbound email: match sender From header only
+                    m_res = matcher.match_address(from_hdr, subject=subject, snippet=m_data.get('snippet', ''))
+                    if m_res.get('prospect_match'):
+                        prospect_match = True
+                        prospect_match_type = m_res.get('prospect_match_type')
+                        prospect_id = m_res.get('prospect_id')
+                        prospect_lq_id = m_res.get('prospect_lq_id')
+                        prospect_company_name = m_res.get('prospect_company_name')
+                        prospect_contact_id = m_res.get('prospect_contact_id')
+                        prospect_contact_name = m_res.get('prospect_contact_name')
+                        prospect_tags = m_res.get('prospect_tags', [])
 
             # Match email tracking
             tracking_info = None
@@ -536,7 +571,14 @@ class GmailOAuthService:
                 'message_id': msg_id_hdr,
                 'folder': folder,
                 'is_owned': True,
+                'prospect_match': prospect_match,
+                'prospect_match_type': prospect_match_type,
+                'prospect_id': prospect_id,
+                'prospect_lq_id': prospect_lq_id,
                 'prospect_company_name': prospect_company_name,
+                'prospect_contact_id': prospect_contact_id,
+                'prospect_contact_name': prospect_contact_name,
+                'prospect_tags': prospect_tags,
                 'tracking': tracking_info,
             })
 
