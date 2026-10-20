@@ -18,7 +18,7 @@ if not DEBUG and SECRET_KEY == _default_key:
 
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,accepting-chef-shoulder-identical.trycloudflare.com').split(',')
+    for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,host.docker.internal,accepting-chef-shoulder-identical.trycloudflare.com').split(',')
     if h.strip()
 ]
 

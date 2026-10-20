@@ -122,16 +122,24 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
     contact_name = serializers.SerializerMethodField()
     prospect_name = serializers.SerializerMethodField()
     prospect_phone = serializers.SerializerMethodField()
+    contact_designation = serializers.SerializerMethodField()
+    contact_email = serializers.SerializerMethodField()
+    prospect_id = serializers.SerializerMethodField()
 
     class Meta:
         model = WhatsAppConversation
         fields = [
             "id",
             "chat_id",
+            "phone_number",
             "is_matched",
             "whatsapp_name",
+            "custom_avatar_url",
             "contact_name",
+            "contact_designation",
+            "contact_email",
             "prospect_name",
+            "prospect_id",
             "prospect_phone",
             "prospect_contact",
             "unread_count",
@@ -143,20 +151,47 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_contact_name(self, obj):
-        if obj.prospect_contact:
+        if obj.prospect_contact and obj.prospect_contact.contact_name:
             return obj.prospect_contact.contact_name
         if getattr(obj, "whatsapp_name", None):
             return obj.whatsapp_name
         return None
 
     def get_prospect_name(self, obj):
-        if obj.prospect:
+        if obj.prospect and obj.prospect.company_name:
             return obj.prospect.company_name
+        if obj.prospect_contact and obj.prospect_contact.prospect:
+            return obj.prospect_contact.prospect.company_name
         return None
-        
+
     def get_prospect_phone(self, obj):
-        if obj.prospect_contact and getattr(obj.prospect_contact, 'phone', None):
-            return obj.prospect_contact.phone
+        if obj.prospect_contact:
+            val = getattr(obj.prospect_contact, 'phone_number', None) or getattr(obj.prospect_contact, 'phone', None)
+            if val:
+                return val
+        if getattr(obj, 'phone_number', None):
+            return obj.phone_number
+        if obj.chat_id and not obj.chat_id.endswith('@lid'):
+            digits = obj.chat_id.split('@')[0].split(':')[0]
+            if digits.isdigit() and len(digits) >= 7:
+                return f"+{digits}"
+        return None
+
+    def get_contact_designation(self, obj):
+        if obj.prospect_contact:
+            return getattr(obj.prospect_contact, 'designation', None)
+        return None
+
+    def get_contact_email(self, obj):
+        if obj.prospect_contact:
+            return getattr(obj.prospect_contact, 'official_email', None)
+        return None
+
+    def get_prospect_id(self, obj):
+        if obj.prospect_id:
+            return str(obj.prospect_id)
+        if obj.prospect_contact and obj.prospect_contact.prospect_id:
+            return str(obj.prospect_contact.prospect_id)
         return None
 
 

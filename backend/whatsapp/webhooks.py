@@ -28,7 +28,36 @@ import urllib.error
 import urllib.parse
 import mimetypes
 import os
+import re
+from typing import Optional
+
 from django.core.files.base import ContentFile
+from django.db import transaction, IntegrityError
+from django.utils import timezone
+
+from .models import (
+    WhatsAppAuditLog,
+    WhatsAppConversation,
+    WhatsAppEvent,
+    WhatsAppMessage,
+    WhatsAppOptOut,
+    WhatsAppSafetyEvent,
+    WhatsAppSession,
+)
+from .services import (
+    _write_audit_log,
+    check_incoming_for_opt_out,
+)
+
+logger = logging.getLogger(__name__)
+
+# In-memory cache for the latest QR code pushed by WAHA
+LATEST_QR_CACHE: dict = {}
+
+def get_cached_qr(session_name: str = "default") -> Optional[dict]:
+    """Return the most recently received QR code for a session."""
+    return LATEST_QR_CACHE.get(session_name)
+
 
 def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
     """Store WAHA's local media URL directly in the database - no re-download needed."""
@@ -55,25 +84,27 @@ def _download_and_save_media_bg(message_id, session_name: str, media_url: str = 
     import logging as _logging
 
     try:
-        wa_message = WhatsAppMessage.objects.get(pk=message_id)
+        wa_message = WhatsAppMessage.objects.select_related("conversation").get(pk=message_id)
+        chat_id = wa_message.conversation.chat_id if wa_message.conversation else ""
+        if "status@broadcast" in chat_id or chat_id.endswith("@broadcast"):
+            return  # strictly ignore status stories/broadcast media
     except WhatsAppMessage.DoesNotExist:
         return
 
     waha_url = os.getenv('WHATSAPP_SERVICE_URL', 'http://localhost:3000').rstrip('/')
     api_key = os.getenv('WHATSAPP_SERVICE_API_KEY')
 
-    # Always use the WAHA message download endpoint to avoid stale localhost URLs.
-    # Direct file URLs (e.g. http://localhost:3000/api/files/...) become stale when
-    # WAHA restarts or when the service URL changes (e.g. tunnel URL).
-    download_url = f'{waha_url}/api/messages/{urllib.parse.quote(wa_message.waha_message_id)}/download?session={urllib.parse.quote(session_name)}'
-
-    # Fallback: if the download endpoint fails but a direct URL was provided, try it.
-    urls_to_try = [download_url]
-    if media_url and media_url != download_url:
-        urls_to_try.append(media_url)
-        # Also try with actual waha_url replacing any localhost variant in media_url
-        if 'localhost:3000' in media_url:
-            urls_to_try.append(media_url.replace('http://localhost:3000', waha_url))
+    urls_to_try = []
+    if media_url:
+        if media_url.startswith('http'):
+            urls_to_try.append(media_url)
+        else:
+            urls_to_try.append(f"{waha_url}/{media_url.lstrip('/')}")
+    
+    # Try direct WAHA files endpoint
+    if wa_message.waha_message_id:
+        urls_to_try.append(f'{waha_url}/api/files/{urllib.parse.quote(session_name)}/{urllib.parse.quote(wa_message.waha_message_id)}')
+        urls_to_try.append(f'{waha_url}/api/messages/{urllib.parse.quote(wa_message.waha_message_id)}/download?session={urllib.parse.quote(session_name)}')
 
     for url in urls_to_try:
         try:
@@ -83,12 +114,14 @@ def _download_and_save_media_bg(message_id, session_name: str, media_url: str = 
 
             with urllib.request.urlopen(req, timeout=30) as response:
                 content = response.read()
-                content_type = response.headers.get('Content-Type', '')
+                content_type = response.headers.get('Content-Type', '') or mime_type or 'application/octet-stream'
                 ext = mimetypes.guess_extension(content_type.split(';')[0]) or '.bin'
-                file_name = f'{wa_message.waha_message_id}{ext}'
+                file_name = f'{wa_message.waha_message_id or message_id}{ext}'
 
                 wa_message.has_media = True
                 wa_message.media_mime_type = content_type
+                if media_url and not wa_message.media_url:
+                    wa_message.media_url = media_url
                 wa_message.media_file.save(file_name, ContentFile(content), save=True)
                 _logging.getLogger(__name__).info(
                     'Successfully downloaded media for %s from %s', wa_message.waha_message_id, url
@@ -103,24 +136,44 @@ def _download_and_save_media_bg(message_id, session_name: str, media_url: str = 
         'All download attempts failed for message %s', wa_message.waha_message_id
     )
 
-import os
-import re
-from typing import Optional
 
-from django.db import transaction
-from django.utils import timezone
+def _fetch_contact_profile_picture_bg(conversation_id, session_name: str, chat_id: str):
+    """
+    Fetch profile picture from WAHA in background and store in conversation.custom_avatar_url.
+    GET /api/contacts/profile-picture?contactId=...&session=...
+    """
+    from whatsapp.models import WhatsAppConversation
+    try:
+        conv = WhatsAppConversation.objects.get(pk=conversation_id)
+        if conv.custom_avatar_url:
+            return  # already cached
+    except WhatsAppConversation.DoesNotExist:
+        return
 
-from .models import (
-    WhatsAppAuditLog,
-    WhatsAppConversation,
-    WhatsAppEvent,
-    WhatsAppMessage,
-    WhatsAppOptOut,
-    WhatsAppSession,
-)
-from .services import check_incoming_for_opt_out, _write_audit_log
+    waha_url = os.getenv('WHATSAPP_SERVICE_URL', 'http://localhost:3000').rstrip('/')
+    api_key = os.getenv('WHATSAPP_SERVICE_API_KEY')
 
-logger = logging.getLogger(__name__)
+    # Try standard WAHA profile picture endpoints
+    urls = [
+        f"{waha_url}/api/contacts/profile-picture?session={urllib.parse.quote(session_name)}&contactId={urllib.parse.quote(chat_id)}",
+        f"{waha_url}/api/contacts/profile-picture?contactId={urllib.parse.quote(chat_id)}",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url)
+            if api_key:
+                req.add_header('X-Api-Key', api_key)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                pic_url = data.get("url") or data.get("profilePictureURL") or data.get("picture")
+                if pic_url and isinstance(pic_url, str) and pic_url.startswith("http"):
+                    conv.custom_avatar_url = pic_url
+                    conv.save(update_fields=["custom_avatar_url"])
+                    logger.info("Saved WAHA profile picture for %s: %s", chat_id, pic_url)
+                    return
+        except Exception:
+            pass
+
 
 # Maximum allowed age of a webhook event (seconds).
 # Events older than this are rejected to prevent replay attacks.
@@ -129,8 +182,17 @@ WEBHOOK_MAX_AGE_SECONDS = 300  # 5 minutes
 # Allowed WAHA event types. Anything else is rejected.
 ALLOWED_EVENT_TYPES = frozenset([
     "message",
+    "message.any",
     "message.ack",
+    "message.reaction",
     "session.status",
+    "session.connected",
+    "session.disconnected",
+    "auth.qr",
+    "auth.pairing_code",
+    "presence.update",
+    "group.v2.participants",
+    "group.v2.update",
     "message.waiting",
 ])
 
@@ -150,27 +212,17 @@ class WebhookDuplicateError(Exception):
 
 
 def _get_webhook_secret() -> str:
-    secret = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
-    if len(secret) < 32:
-        raise RuntimeError(
-            "WHATSAPP_WEBHOOK_SECRET is not configured or too short. "
-            "Minimum 32 characters required."
-        )
+    secret = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError("WHATSAPP_WEBHOOK_SECRET is not configured.")
     return secret
 
 
-def verify_hmac_signature(request_body: bytes, signature_header: str, algorithm: str = "sha256") -> bool:
+def verify_hmac_signature(request_body: bytes, signature_header: str, algorithm: str = "sha256", timestamp: str = "") -> bool:
     """
-    Verify the HMAC-SHA256 signature from WAHA.
-
-    WAHA signs the raw request body with the configured HMAC secret.
-    The signature is sent in the X-Whatsapp-Signature header.
-
-    Returns True if valid, False if invalid.
-
-    SECURITY NOTE: This function must NEVER be short-circuited with "return True".
-    Doing so disables webhook authentication entirely, allowing any attacker to
-    inject arbitrary webhook events including fake inbound messages.
+    Verify the HMAC signature from WAHA.
+    Supports WAHA's cryptographic format (${timestamp}.${rawBody}) as well as raw body.
+    Supports both sha512 and sha256.
     """
     if not signature_header:
         logger.warning("Webhook received without signature header.")
@@ -182,20 +234,24 @@ def verify_hmac_signature(request_body: bytes, signature_header: str, algorithm:
         logger.error("WHATSAPP_WEBHOOK_SECRET not configured. Cannot verify webhook.")
         return False
 
-    # Dynamically select the digestmod based on the provided algorithm
-    digestmod = hashlib.sha512 if algorithm.lower() == "sha512" else hashlib.sha256
+    received_mac = signature_header.removeprefix("sha256=").removeprefix("sha512=").strip()
 
-    expected_mac = hmac.new(
-        key=secret.encode("utf-8"),
-        msg=request_body,
-        digestmod=digestmod,
-    ).hexdigest()
+    bodies_to_test = []
+    if timestamp:
+        bodies_to_test.append(f"{timestamp}.".encode("utf-8") + request_body)
+    bodies_to_test.append(request_body)
 
-    # Compare using constant-time comparison to prevent timing attacks.
-    # Strip any "sha256=" prefix that WAHA may add.
-    received_mac = signature_header.removeprefix("sha256=").strip()
+    for body in bodies_to_test:
+        for digestmod in (hashlib.sha512, hashlib.sha256):
+            expected_mac = hmac.new(
+                key=secret.encode("utf-8"),
+                msg=body,
+                digestmod=digestmod,
+            ).hexdigest()
+            if hmac.compare_digest(expected_mac, received_mac):
+                return True
 
-    return hmac.compare_digest(expected_mac, received_mac)
+    return False
 
 
 def _compute_payload_hash(raw_body: bytes) -> str:
@@ -248,10 +304,10 @@ def _extract_phone_digits(chat_id: str) -> Optional[str]:
         return None
 
     # Only process individual chats (not groups).
-    if not (chat_id.endswith("@c.us") or chat_id.endswith("@lid")):
+    if not (chat_id.endswith("@c.us") or chat_id.endswith("@lid") or chat_id.endswith("@s.whatsapp.net")):
         return None
 
-    digits = chat_id.split("@")[0]
+    digits = chat_id.split("@")[0].split(":")[0]
 
     if not PHONE_DIGITS_RE.match(digits):
         return None
@@ -264,22 +320,12 @@ def process_webhook_event(
     signature_header: str,
     algorithm: str = "sha256",
     remote_addr: str = "",
+    timestamp: str = "",
 ) -> Optional[WhatsAppEvent]:
     """
     Process an incoming WAHA webhook event.
 
     This is the main entry point called by the webhook view.
-
-    Steps:
-      1. Verify HMAC signature.
-      2. Parse and validate JSON payload.
-      3. Check for duplicate event.
-      4. Route to appropriate handler.
-      5. Return the WhatsAppEvent record.
-
-    Returns None if the event is rejected (logged and silently discarded).
-    Raises WebhookVerificationError if signature/schema is invalid.
-    Raises WebhookDuplicateError if this event was already processed.
     """
     # -----------------------------------------------------------------------
     # 1. HMAC verification
@@ -289,7 +335,7 @@ def process_webhook_event(
 
     if bypass_hmac:
         logger.warning("Bypassing webhook HMAC verification because DEBUG=True and WAHA sent no signature.")
-    elif not verify_hmac_signature(raw_body, signature_header, algorithm):
+    elif not verify_hmac_signature(raw_body, signature_header, algorithm, timestamp=timestamp):
         logger.warning(
             "Webhook HMAC verification FAILED from %s. Request rejected.",
             remote_addr,
@@ -340,12 +386,18 @@ def process_webhook_event(
     # 6. Route to handler
     # -----------------------------------------------------------------------
     try:
-        if event_type == "message":
+        if event_type in ("message", "message.any"):
             _handle_incoming_message(event_data, session_name, event_record)
         elif event_type == "message.ack":
             _handle_message_ack(event_data, session_name, event_record)
         elif event_type == "session.status":
             _handle_session_status(event_data, session_name, event_record)
+        elif event_type == "session.connected":
+            _handle_session_connected(event_data, session_name, event_record)
+        elif event_type == "session.disconnected":
+            _handle_session_disconnected(event_data, session_name, event_record)
+        elif event_type == "auth.qr":
+            _handle_auth_qr(event_data, session_name, event_record)
 
         # Mark as processed.
         event_record.processing_status = WhatsAppEvent.ProcessingStatus.PROCESSED
@@ -371,60 +423,104 @@ def process_webhook_event(
 # Event handlers
 # ---------------------------------------------------------------------------
 
+def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
+    qr = event_data.get("qr") or event_data.get("value")
+    qr_base64 = event_data.get("qrBase64") or ""
+    if qr:
+        LATEST_QR_CACHE[session_name] = {
+            "qr": qr,
+            "qrBase64": qr_base64,
+            "session": session_name,
+            "timestamp": timezone.now().isoformat(),
+        }
+        WhatsAppSession.objects.filter(session_name=session_name).update(
+            status=WhatsAppSession.Status.QR_REQUIRED
+        )
+        logger.info("Received and cached auth.qr for session: %s", session_name)
+
+
+def _handle_session_connected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
+    LATEST_QR_CACHE.pop(session_name, None)
+    me = event_data.get("me") or {}
+    phone = me.get("phone") or (me.get("id", "").split(":")[0] if ":" in me.get("id", "") else me.get("id", "").split("@")[0])
+    name = me.get("name") or ""
+
+    session, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+    session.status = WhatsAppSession.Status.READY
+    if phone:
+        session.phone_number = phone
+    session.started_at = timezone.now()
+    session.reconnect_count += 1
+    session.save()
+    logger.info("Session %s connected successfully! Phone: %s Name: %s", session_name, phone, name)
+
+
+def _handle_session_disconnected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
+    LATEST_QR_CACHE.pop(session_name, None)
+    is_logged_out = bool(event_data.get("isLoggedOut", False))
+    new_status = WhatsAppSession.Status.FAILED if is_logged_out else WhatsAppSession.Status.DISCONNECTED
+    WhatsAppSession.objects.filter(session_name=session_name).update(
+        status=new_status,
+        stopped_at=timezone.now()
+    )
+    logger.warning("Session %s disconnected (logged_out=%s)", session_name, is_logged_out)
+
+
 def _handle_incoming_message(
     event_data: dict,
     session_name: str,
     event_record: WhatsAppEvent,
 ) -> None:
     """
-    Handle an incoming WhatsApp message event.
-
-    Flow:
-      1. Extract and validate chat ID.
-      2. Check for opt-out keywords.
-      3. Find matching conversation (via chat_id).
-      4. If unmatched: quarantine (do not guess associations).
-      5. Create WhatsAppMessage record.
-      6. Update conversation metadata.
-      7. Write audit log.
-      8. (Notification to frontend via Django signal or channel — not implemented here)
+    Handle an incoming or sync WhatsApp message event.
     """
-    # Safely extract fields — never trust them.
     raw_from = str(event_data.get("from") or "")
+    raw_to = str(event_data.get("to") or "")
     raw_body = str(event_data.get("body") or "")
     waha_message_id = str(event_data.get("id") or "")
     is_from_me = bool(event_data.get("fromMe", False))
 
-    # Skip messages sent by us (avoid creating inbound records for our own sends).
-    if is_from_me:
-        logger.debug("Skipping fromMe=true incoming message event.")
+    target_chat_id = raw_to if is_from_me else raw_from
+
+    # -----------------------------------------------------------------------
+    # CRITICAL: Ignore WhatsApp status updates, stories, and broadcast media.
+    # Do not fetch, download, or store any status media.
+    # -----------------------------------------------------------------------
+    if (
+        "status@broadcast" in raw_from
+        or "status@broadcast" in raw_to
+        or "status@broadcast" in target_chat_id
+        or raw_from.endswith("@broadcast")
+        or raw_to.endswith("@broadcast")
+        or target_chat_id.endswith("@broadcast")
+        or event_data.get("broadcast") is True
+        or (event_data.get("_data") or {}).get("broadcast") is True
+        or (event_data.get("_data") or {}).get("key", {}).get("remoteJid") == "status@broadcast"
+    ):
+        logger.info("Ignoring WhatsApp Status story/broadcast media from %s", raw_from)
         return
 
     # Validate chat ID.
-    if not VALID_CHAT_ID_RE.match(raw_from):
-        logger.warning("Incoming message with invalid chat ID: %r — ignored.", raw_from)
+    if not VALID_CHAT_ID_RE.match(target_chat_id):
+        logger.warning("Incoming message with invalid chat ID: %r — ignored.", target_chat_id)
         return
 
-    phone_digits = _extract_phone_digits(raw_from)
+    phone_digits = _extract_phone_digits(target_chat_id)
 
-    # -----------------------------------------------------------------------
-    # Opt-out keyword check BEFORE any other processing.
-    # -----------------------------------------------------------------------
-    # Scope conversation lookup to the session that received this message.
-    # This enforces the ownership chain even for inbound messages.
+    # Opt-out keyword check only for incoming messages from contacts
     conversation = WhatsAppConversation.objects.filter(
-        chat_id=raw_from,
+        chat_id=target_chat_id,
         session__session_name=session_name,
     ).first()
 
-    opt_out_registered = check_incoming_for_opt_out(
-        message_body=raw_body,
-        phone_digits=phone_digits or "",
-        prospect_contact=conversation.prospect_contact if conversation else None,
-    )
-
-    if opt_out_registered:
-        logger.info("Opt-out registered from incoming message: phone=%s", phone_digits)
+    if not is_from_me:
+        opt_out_registered = check_incoming_for_opt_out(
+            message_body=raw_body,
+            phone_digits=phone_digits or "",
+            prospect_contact=conversation.prospect_contact if conversation else None,
+        )
+        if opt_out_registered:
+            logger.info("Opt-out registered from incoming message: phone=%s", phone_digits)
 
     # -----------------------------------------------------------------------
     # Find or create conversation record.
@@ -432,70 +528,148 @@ def _handle_incoming_message(
     is_matched = False
     prospect_contact = None
     
-    # Extract name from WAHA payload (can be in different fields based on engine)
+    # Extract name from WAHA payload (Baileys puts pushName in _data.pushName or top-level)
+    _data = event_data.get("_data") or {}
+    key = _data.get("key") or {}
+
     extracted_name = (
-        event_data.get("_data", {}).get("notifyName") 
-        or event_data.get("pushName") 
+        _data.get("pushName")
+        or event_data.get("pushName")
+        or _data.get("notifyName")
+        or event_data.get("sender", {}).get("pushname")
+        or event_data.get("sender", {}).get("name")
         or ""
-    )
+    ).strip()
+
+    # Extract real phone number (Baileys senderPn/participantPn for @lid messages)
+    resolved_phone = None
+    sender_pn = key.get("senderPn") or key.get("participantPn") or event_data.get("senderPn")
+    if sender_pn:
+        d = re.sub(r"\D+", "", str(sender_pn).split("@")[0].split(":")[0])
+        if len(d) >= 8:
+            resolved_phone = f"+{d}"
+
+    if not resolved_phone and not target_chat_id.endswith("@lid"):
+        d = re.sub(r"\D+", "", target_chat_id.split("@")[0].split(":")[0])
+        if len(d) >= 8:
+            resolved_phone = f"+{d}"
+
+    # For @lid messages without sender_pn, inherit phone_number if previously saved
+    if not resolved_phone and target_chat_id.endswith("@lid"):
+        existing_saved = WhatsAppConversation.objects.filter(
+            chat_id=target_chat_id,
+            phone_number__isnull=False
+        ).exclude(phone_number="").first()
+        if existing_saved:
+            resolved_phone = existing_saved.phone_number
+
+    search_digits = re.sub(r"\D+", "", resolved_phone or phone_digits or "")
 
     if conversation:
         is_matched = conversation.is_matched
         prospect_contact = conversation.prospect_contact
-        
+        conv_updates = []
+
+        # Update phone number if resolved
+        if resolved_phone and not conversation.phone_number:
+            conversation.phone_number = resolved_phone
+            conv_updates.append("phone_number")
+
         # Opportunistically update the name if we got one and it was missing
-        if extracted_name and not conversation.whatsapp_name:
+        if extracted_name and (not conversation.whatsapp_name or conversation.whatsapp_name.startswith("+") or "@" in conversation.whatsapp_name):
             conversation.whatsapp_name = extracted_name
-            conversation.save(update_fields=["whatsapp_name"])
+            conv_updates.append("whatsapp_name")
+            
+        # If conversation exists but is unmatched, attempt to match against ProspectContact
+        if not is_matched and search_digits and len(search_digits) >= 8:
+            from prospects.models import ProspectContact
+            for contact in ProspectContact.objects.filter(
+                phone_number__isnull=False
+            ).select_related("prospect"):
+                stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
+                if stored_digits and (
+                    stored_digits == search_digits
+                    or (len(search_digits) >= 10 and stored_digits.endswith(search_digits[-10:]))
+                    or (len(stored_digits) >= 10 and search_digits.endswith(stored_digits[-10:]))
+                ):
+                    conversation.prospect_contact = contact
+                    conversation.prospect = contact.prospect
+                    conversation.is_matched = True
+                    is_matched = True
+                    prospect_contact = contact
+                    if not conversation.phone_number and contact.phone_number:
+                        conversation.phone_number = contact.phone_number
+                        conv_updates.append("phone_number")
+                    if not conversation.whatsapp_name:
+                        conversation.whatsapp_name = contact.contact_name
+                        conv_updates.append("whatsapp_name")
+                    conv_updates.extend(["prospect_contact", "prospect", "is_matched"])
+                    break
+
+        if conv_updates:
+            conversation.save(update_fields=list(set(conv_updates)))
             
     else:
         # Try to match by phone number against ProspectContact records.
         from prospects.models import ProspectContact
 
         matched_contact = None
-        if phone_digits:
-            # Search for ProspectContact by phone number.
-            # We strip non-digits from stored numbers for comparison.
+        if search_digits and len(search_digits) >= 8:
             for contact in ProspectContact.objects.filter(
                 phone_number__isnull=False
             ).select_related("prospect"):
                 stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                if stored_digits == phone_digits or stored_digits.endswith(phone_digits[-10:]):
+                if stored_digits and (stored_digits == search_digits or stored_digits.endswith(search_digits[-10:])):
                     matched_contact = contact
                     break
 
         with transaction.atomic():
             session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+            if session_obj.owner is None and session_name.startswith("user_"):
+                try:
+                    u_id = int(session_name.split("_")[1])
+                    from django.contrib.auth import get_user_model
+                    User = get_user_model()
+                    u = User.objects.filter(id=u_id).first()
+                    if u:
+                        session_obj.owner = u
+                        session_obj.save(update_fields=["owner"])
+                except Exception:
+                    pass
+
+            final_name = extracted_name or (matched_contact.contact_name if matched_contact else "")
+            final_phone = resolved_phone or (matched_contact.phone_number if matched_contact else None)
             conversation = WhatsAppConversation.objects.create(
-                chat_id=raw_from,
+                chat_id=target_chat_id,
+                phone_number=final_phone,
                 prospect_contact=matched_contact,
                 prospect=matched_contact.prospect if matched_contact else None,
                 session=session_obj,
                 is_matched=matched_contact is not None,
-                whatsapp_name=extracted_name,
+                whatsapp_name=final_name,
             )
 
         is_matched = conversation.is_matched
         prospect_contact = conversation.prospect_contact
 
     if not is_matched:
-        # Quarantine: do not expose to any user.
-        logger.warning(
-            "Incoming WhatsApp message from unmatched number %s — quarantined.",
-            raw_from,
+        logger.info(
+            "WhatsApp message for unmatched number %s under session %s.",
+            target_chat_id,
+            session_name,
         )
 
     # -----------------------------------------------------------------------
     # Create WhatsAppMessage record.
     # -----------------------------------------------------------------------
-    # Generate an idempotency key for this inbound message.
+    # Generate an idempotency key for this message.
     body_hash = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
-    inbound_idempotency = hashlib.sha256(
-        f"inbound:{raw_from}:{waha_message_id}:{body_hash}".encode()
+    msg_idempotency = hashlib.sha256(
+        f"{'outbound' if is_from_me else 'inbound'}:{target_chat_id}:{waha_message_id}:{body_hash}".encode()
     ).hexdigest()
 
     existing_message = WhatsAppMessage.objects.filter(
-        idempotency_key=inbound_idempotency
+        idempotency_key=msg_idempotency
     ).first()
 
     if existing_message:
@@ -504,58 +678,91 @@ def _handle_incoming_message(
         event_record.save(update_fields=["whatsapp_message"])
         return
 
-    with transaction.atomic():
-        wa_message = WhatsAppMessage.objects.create(
-            idempotency_key=inbound_idempotency,
-            conversation=conversation,
-            performed_by=None,  # Inbound: no Market Intel user sent this.
-            waha_message_id=waha_message_id or None,
-            direction=WhatsAppMessage.Direction.INBOUND,
-            # DELIVERED (not READ): inbound messages are not read until the user opens them.
-            # The UI marks them as read when the user views the conversation.
-            status=WhatsAppMessage.Status.DELIVERED,
-            body_preview=raw_body[:200],
-            full_body=raw_body,
-            body_hash=body_hash,
-            message_type=str(event_data.get("type") or "chat"),
-        )
+    has_media = bool(event_data.get("hasMedia", False))
+    _media_url = event_data.get("mediaUrl") or (event_data.get("media") or {}).get("url") or None
+    _media_info = event_data.get("media") or {}
+    _mime_type = _media_info.get("mimetype") or ""
 
-        # Update conversation metadata.
-        conversation.last_message_at = timezone.now()
-        conversation.last_message_preview = raw_body[:200]
-        conversation.last_message_from_me = False
-        conversation.unread_count = models_f("unread_count") + 1 if False else conversation.unread_count + 1
-        conversation.save(update_fields=[
-            "last_message_at", "last_message_preview", "last_message_from_me", "unread_count"
-        ])
+    msg_type = str(event_data.get("type") or "chat")
+    if has_media or _media_url:
+        has_media = True
+        if _mime_type.startswith("image/"):
+            msg_type = "image"
+        elif _mime_type.startswith("video/"):
+            msg_type = "video"
+        elif _mime_type.startswith("audio/"):
+            msg_type = "audio"
+        elif _mime_type:
+            msg_type = "document"
 
-        # Update session receive count.
-        WhatsAppSession.objects.filter(session_name=session_name).update(
-            receive_count=models_f_whatsapp("receive_count") + 1
-        )
+    try:
+        with transaction.atomic():
+            wa_message = WhatsAppMessage.objects.create(
+                idempotency_key=msg_idempotency,
+                conversation=conversation,
+                performed_by=None,
+                waha_message_id=waha_message_id or None,
+                direction=WhatsAppMessage.Direction.OUTBOUND if is_from_me else WhatsAppMessage.Direction.INBOUND,
+                status=WhatsAppMessage.Status.SENT if is_from_me else WhatsAppMessage.Status.DELIVERED,
+                body_preview=raw_body[:200],
+                full_body=raw_body,
+                body_hash=body_hash,
+                message_type=msg_type,
+                has_media=has_media,
+                media_url=_media_url,
+                media_mime_type=_mime_type,
+            )
 
-        event_record.whatsapp_message = wa_message
-        event_record.save(update_fields=["whatsapp_message"])
+            # Update conversation metadata.
+            conversation.last_message_at = timezone.now()
+            conversation.last_message_preview = raw_body[:200] if raw_body else f"[{msg_type.capitalize()}]"
+            conversation.last_message_from_me = is_from_me
+            if not is_from_me:
+                conversation.unread_count = conversation.unread_count + 1
+            conversation.save(update_fields=[
+                "last_message_at", "last_message_preview", "last_message_from_me", "unread_count"
+            ])
 
-    if event_data.get("hasMedia") and wa_message.waha_message_id:
+            # Update session receive count.
+            if not is_from_me:
+                WhatsAppSession.objects.filter(session_name=session_name).update(
+                    receive_count=models_f_whatsapp("receive_count") + 1
+                )
+
+            event_record.whatsapp_message = wa_message
+            event_record.save(update_fields=["whatsapp_message"])
+    except IntegrityError:
+        # Concurrent webhook already created this message
+        wa_message = WhatsAppMessage.objects.filter(idempotency_key=msg_idempotency).first()
+        if wa_message:
+            event_record.whatsapp_message = wa_message
+            event_record.save(update_fields=["whatsapp_message"])
+            return
+        raise
+
+    if has_media and wa_message.waha_message_id:
         import threading
-        _media_info = event_data.get("media") or {}
-        _media_url = _media_info.get("url") or None
-        _mime_type = _media_info.get("mimetype") or None
         threading.Thread(
             target=_download_and_save_media_bg,
             args=(wa_message.pk, session_name, _media_url, _mime_type)
+        ).start()
+
+    if not conversation.custom_avatar_url:
+        import threading
+        threading.Thread(
+            target=_fetch_contact_profile_picture_bg,
+            args=(conversation.pk, session_name, target_chat_id)
         ).start()
 
     _write_audit_log(
         action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,
         prospect_contact=prospect_contact,
         session_name=session_name,
-        chat_id=raw_from,
+        chat_id=target_chat_id,
         message_id=wa_message.pk,
         success=True,
         result_code="RECEIVED",
-        result_detail="matched" if is_matched else "unmatched-quarantined",
+        result_detail="matched" if is_matched else "unmatched",
     )
 
     logger.info(

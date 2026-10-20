@@ -251,6 +251,21 @@ class WhatsAppConversation(models.Model):
         help_text="Name provided by WhatsApp profile (pushName or notifyName)",
     )
 
+    # Custom avatar image URL or data URI
+    custom_avatar_url = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Custom avatar image URL or data URI",
+    )
+
+    # Direct phone number of the contact (e.g. +919003619221 or 919003619221)
+    phone_number = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Direct phone number of the contact",
+    )
+
     # Reference to the ProspectContact (Key Person) this conversation belongs to.
     # This is the primary multi-tenancy anchor.
     prospect_contact = models.ForeignKey(

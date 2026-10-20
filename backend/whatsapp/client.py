@@ -83,12 +83,9 @@ class WAHAClient:
 
     @staticmethod
     def _get_api_key() -> str:
-        key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "")
-        if len(key) < 32:
-            raise RuntimeError(
-                "WHATSAPP_SERVICE_API_KEY is not configured or is too short. "
-                "Minimum 32 characters required."
-            )
+        key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("WHATSAPP_SERVICE_API_KEY is not configured.")
         return key
 
     @staticmethod
@@ -226,6 +223,13 @@ class WAHAClient:
         )
         return body
 
+    def delete_session(self, session_name: str = "default") -> None:
+        """Delete a WAHA session and wipe its directory."""
+        self._request(
+            "DELETE",
+            f"/api/sessions/{session_name}",
+        )
+
     def get_session_status(self, session_name: str = "default") -> dict:
         """Get the current state of a WAHA session."""
         _status, body = self._request(
@@ -243,7 +247,24 @@ class WAHAClient:
         """Get the QR code for a session (as image bytes or data URL)."""
         _status, body = self._request(
             "GET",
-            f"/api/sessions/{session_name}/auth/qr",
+            f"/api/{session_name}/auth/qr",
+        )
+        return body
+
+    def request_code(self, session_name: str, phone_number: str) -> dict:
+        """Request 8-character pairing code for phone-number linking."""
+        _status, body = self._request(
+            "POST",
+            f"/api/{session_name}/auth/request-code",
+            payload={"phoneNumber": phone_number},
+        )
+        return body
+
+    def dispatch_qr(self, session_name: str = "default") -> dict:
+        """Force re-dispatch of QR code via webhook."""
+        _status, body = self._request(
+            "POST",
+            f"/api/{session_name}/auth/qr/dispatch",
         )
         return body
 
@@ -331,6 +352,53 @@ class WAHAClient:
         )
         return body
 
+    def send_voice(
+        self,
+        session_name: str,
+        chat_id: str,
+        file: dict,
+    ) -> dict:
+        """Send a voice audio note."""
+        _status, body = self._request(
+            "POST",
+            "/api/sendVoice",
+            payload={
+                "session": session_name,
+                "chatId": chat_id,
+                "file": file,
+            },
+        )
+        return body
+
+    def send_reaction(
+        self,
+        session_name: str,
+        chat_id: str,
+        message_id: str,
+        reaction: str,
+    ) -> dict:
+        """Send an emoji reaction to a message."""
+        _status, body = self._request(
+            "POST",
+            "/api/sendReaction",
+            payload={
+                "session": session_name,
+                "chatId": chat_id,
+                "messageId": message_id,
+                "reaction": reaction,
+            },
+        )
+        return body
+
+    def check_number_exists(self, phone: str, session_name: str = "default") -> dict:
+        """Check if a phone number exists on WhatsApp."""
+        _status, body = self._request(
+            "GET",
+            "/api/contacts/check-exists",
+            query={"phone": phone, "session": session_name},
+        )
+        return body
+
     # -- Chat / messages -----------------------------------------------------
 
     def get_chats(self, session_name: str = "default", limit: int = 50) -> list:
@@ -356,12 +424,15 @@ class WAHAClient:
         )
         return body if isinstance(body, list) else []
 
-    def mark_as_read(self, session_name: str, chat_id: str) -> dict:
-        """Mark all messages in a chat as read."""
+    def mark_as_read(self, session_name: str, chat_id: str, message_id: str = None) -> dict:
+        """Mark messages in a chat as read via WAHA sendSeen."""
+        payload = {"session": session_name, "chatId": chat_id}
+        if message_id:
+            payload["messageId"] = message_id
         _status, body = self._request(
             "POST",
-            f"/api/chats/{chat_id}/messages/read",
-            payload={"session": session_name},
+            "/api/sendSeen",
+            payload=payload,
         )
         return body
 
