@@ -337,12 +337,12 @@ class FacebookStatusView(APIView):
             'required_permissions': [
                 'pages_show_list',
                 'pages_read_engagement',
-                'pages_manage_posts',
+                'business_management',
             ],
             'notes': [
                 "Facebook Page management requires authorizing Pages you manage.",
                 "Personal profile posts are not supported by the Graph API; Pages are required.",
-                "Ensure 'pages_manage_posts' is added under Use Cases in Meta Developer App for posting.",
+                "Add 'pages_manage_posts' in Meta Developer App Use Cases if live page publishing is needed.",
             ]
         }, status=status.HTTP_200_OK)
 
@@ -405,7 +405,7 @@ class FacebookCallbackView(APIView):
                 conn.profile_picture_url = pic_url
                 conn.set_access_token(page_token or user_access_token)
                 conn.token_expiry = timezone.now() + timezone.timedelta(seconds=expires_in)
-                conn.scopes = 'pages_show_list,pages_read_engagement,pages_manage_posts'
+                conn.scopes = 'pages_show_list,pages_read_engagement,business_management'
                 conn.is_active = True
                 conn.metadata = {
                     'category': category,

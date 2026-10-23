@@ -115,7 +115,6 @@ class MetaService:
             default_scopes = [
                 'pages_show_list',
                 'pages_read_engagement',
-                'pages_manage_posts',
                 'business_management',
             ]
             env_scopes = os.getenv('META_FACEBOOK_SCOPES', '')

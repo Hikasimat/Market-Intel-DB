@@ -310,7 +310,7 @@ const FacebookPage = () => {
         </div>
         <ul className="list-disc list-inside space-y-1 text-slate-500 pl-1">
           <li><strong>Supported:</strong> Publishing feed messages, link attachments, and retrieving reaction/comment insights.</li>
-          <li><strong>API Permissions:</strong> <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>pages_manage_posts</code>.</li>
+          <li><strong>API Permissions:</strong> <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>business_management</code>.</li>
           <li><strong>Policy Note:</strong> Personal profiles are excluded by Meta Graph API policy. Management is strictly scoped to authorized business/brand Pages.</li>
         </ul>
       </div>
