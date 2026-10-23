@@ -8,6 +8,7 @@ import { logout, loginSuccess } from '../../features/auth/authSlice';
 import api from '../../services/api';
 import { store } from '../../app/store';
 import NotificationCenter from './NotificationCenter';
+import { InstagramIcon, FacebookIcon, TwitterXIcon } from '../common/SocialIcons';
 
 const Layout = () => {
   const { user, accessToken, refreshToken } = useSelector((state) => state.auth);
@@ -130,6 +131,14 @@ const Layout = () => {
       { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
       { path: '/users', label: 'User Management', icon: Users },
     );
+  } else if (user?.role === 'DM') {
+    navItems.push(
+      { path: '/digital-marketing', label: 'Dashboard', icon: LayoutDashboard },
+      { path: '/digital-marketing/instagram', label: 'Instagram', icon: InstagramIcon },
+      { path: '/digital-marketing/facebook', label: 'Facebook', icon: FacebookIcon },
+      { path: '/digital-marketing/twitter', label: 'Twitter / X', icon: TwitterXIcon },
+      { path: '/digital-marketing/ads-insights', label: 'Ads & Insights', icon: BarChart2 },
+    );
   }
 
   return (
@@ -228,6 +237,8 @@ const Layout = () => {
                   ? 'Lead Qualifier'
                   : user.role === 'MANAGER'
                   ? 'Manager'
+                  : user.role === 'DM'
+                  ? 'Digital Marketing'
                   : user.is_superuser
                   ? 'Administrator'
                   : user.role}

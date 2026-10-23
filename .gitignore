@@ -28,8 +28,10 @@ backend/env/
 !.env.example
 backend/.env
 backend/.env.*
+!backend/.env.example
 frontend/.env
 frontend/.env.*
+!frontend/.env.example
 frontend/.env.local
 frontend/.env.production.local
 frontend/.env.development.local
@@ -71,10 +73,14 @@ staticfiles/
 backend/staticfiles/
 media/
 backend/media/
+**/media/
 uploads/
 backend/uploads/
+**/uploads/
 backend/attachments/
 attachments/
+social_posts/
+**/social_posts/
 
 # WhatsApp & WAHA session data
 .waha/
@@ -123,8 +129,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 scratch/
+backend/scratch/
+**/scratch/
 *.tmp
 *.temp
+test_*.py
 
 # IDEs, Editors & AI Assistants
 .vscode/

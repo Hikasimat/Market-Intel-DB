@@ -8,6 +8,7 @@ urlpatterns = [
     path('api/', include('prospects.urls')),
     path('api/', include('market_events.urls')),
     path('api/whatsapp/', include('whatsapp.urls')),
+    path('api/digital-marketing/', include('digital_marketing.urls')),
     
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

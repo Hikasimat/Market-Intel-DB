@@ -27,6 +27,12 @@ import SettingsPage from '../pages/SettingsPage';
 import GmailCallbackPage from '../pages/GmailCallbackPage';
 import CalendarCallbackPage from '../pages/CalendarCallbackPage';
 
+import DigitalMarketingDashboardPage from '../pages/digitalMarketing/DigitalMarketingDashboardPage';
+import InstagramPage from '../pages/digitalMarketing/InstagramPage';
+import FacebookPage from '../pages/digitalMarketing/FacebookPage';
+import TwitterPage from '../pages/digitalMarketing/TwitterPage';
+import AdsInsightsPage from '../pages/digitalMarketing/AdsInsightsPage';
+
 import Layout from '../components/layout/Layout';
 
 const RoleRoute = ({ children, allowedRoles, requireAdmin }) => {
@@ -44,7 +50,8 @@ const RoleRoute = ({ children, allowedRoles, requireAdmin }) => {
     // Redirect based on role
     if (user.role === 'LQ') return <Navigate to="/lq-pipeline" replace />;
     if (user.role === 'MANAGER') return <Navigate to="/manager-dashboard" replace />;
-    return <Navigate to="/prospects" replace />;
+    if (user.role === 'DM') return <Navigate to="/digital-marketing" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
   
   return children;
@@ -88,9 +95,9 @@ const AppRouter = () => {
           <Route index element={<ManagerDashboardPage />} />
         </Route>
 
-        {/* ── PRE / LQ / Manager shared routes ─────────────── */}
+        {/* ── PRE / LQ / Manager / DM shared routes ─────────────── */}
         <Route path="/" element={
-          <RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><Layout /></RoleRoute>
+          <RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER', 'DM']}><Layout /></RoleRoute>
         }>
           {/* Default redirect by role */}
           <Route index element={
@@ -98,6 +105,8 @@ const AppRouter = () => {
               ? <Navigate to="/lq-pipeline" replace />
               : user?.role === 'MANAGER'
               ? <Navigate to="/manager-dashboard" replace />
+              : user?.role === 'DM'
+              ? <Navigate to="/digital-marketing" replace />
               : <Navigate to="/dashboard" replace />
           } />
           
@@ -139,6 +148,13 @@ const AppRouter = () => {
           <Route path="calendar" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
           <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
           <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
+
+          {/* ── Digital Marketing Workspace ────────────────────────────── */}
+          <Route path="digital-marketing" element={<RoleRoute allowedRoles={['DM']}><DigitalMarketingDashboardPage /></RoleRoute>} />
+          <Route path="digital-marketing/instagram" element={<RoleRoute allowedRoles={['DM']}><InstagramPage /></RoleRoute>} />
+          <Route path="digital-marketing/facebook" element={<RoleRoute allowedRoles={['DM']}><FacebookPage /></RoleRoute>} />
+          <Route path="digital-marketing/twitter" element={<RoleRoute allowedRoles={['DM']}><TwitterPage /></RoleRoute>} />
+          <Route path="digital-marketing/ads-insights" element={<RoleRoute allowedRoles={['DM']}><AdsInsightsPage /></RoleRoute>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -8,6 +8,7 @@ class UserProfile(models.Model):
         ('PRE', 'Prospect Research Engineer'),
         ('LQ', 'Lead Qualifier'),
         ('MANAGER', 'Manager'),
+        ('DM', 'Digital Marketing'),
     )
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='PRE')

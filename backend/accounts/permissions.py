@@ -108,3 +108,18 @@ class IsPREOrLQOrManager(permissions.BasePermission):
             hasattr(request.user, 'profile') and
             request.user.profile.role in ['PRE', 'LQ', 'MANAGER']
         )
+
+
+class IsDigitalMarketing(permissions.BasePermission):
+    """Allows access to Digital Marketing role and Superuser."""
+
+    def has_permission(self, request, view):
+        if request.user and request.user.is_superuser:
+            return True
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            hasattr(request.user, 'profile') and
+            request.user.profile.role == 'DM'
+        )
+

@@ -48,3 +48,6 @@ packaging==26.3
 six==1.17.0
 typing_extensions==4.16.0
 tzdata==2026.4
+
+# Media & Image Processing
+Pillow>=10.4.0

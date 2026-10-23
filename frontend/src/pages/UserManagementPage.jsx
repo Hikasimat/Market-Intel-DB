@@ -71,7 +71,7 @@ const UserManagementPage = () => {
           <p className="mt-2 text-sm text-slate-600">
             {isManager
               ? 'Create, edit, and manage user accounts (Manager cannot modify superusers).'
-              : 'Create, edit, and manage user accounts and their roles (PRE / LQ / MANAGER).'}
+              : 'Create, edit, and manage user accounts and their roles (PRE / LQ / MANAGER / DM).'}
           </p>
         </div>
         <div className="mt-4 sm:mt-0">
@@ -127,16 +127,30 @@ const UserManagementPage = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 inline-flex text-xs leading-5 font-bold rounded text-white ${
-                        user.role === 'PRE'
+                      <span className={`px-2.5 py-1 inline-flex text-xs leading-4 font-bold rounded-lg text-white ${
+                        user.is_superuser
+                          ? 'bg-slate-700'
+                          : user.role === 'PRE'
                           ? 'bg-indigo-600'
+                          : user.role === 'LQ'
+                          ? 'bg-emerald-600'
                           : user.role === 'MANAGER'
                           ? 'bg-amber-600'
-                          : user.is_superuser
-                          ? 'bg-slate-700'
-                          : 'bg-emerald-600'
+                          : user.role === 'DM'
+                          ? 'bg-purple-600'
+                          : 'bg-slate-500'
                       }`}>
-                        {user.is_superuser ? 'ADMIN' : user.role}
+                        {user.is_superuser
+                          ? 'Administrator'
+                          : user.role === 'DM'
+                          ? 'Digital Marketing'
+                          : user.role === 'PRE'
+                          ? 'Prospect Research Engineer'
+                          : user.role === 'LQ'
+                          ? 'Lead Qualifier'
+                          : user.role === 'MANAGER'
+                          ? 'Manager'
+                          : user.role}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">

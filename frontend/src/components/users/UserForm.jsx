@@ -124,7 +124,8 @@ const UserForm = ({ isOpen, onClose, userToEdit }) => {
                   options={[
                     { value: 'PRE', label: 'Prospect Research Engineer (PRE)' },
                     { value: 'LQ', label: 'Lead Qualifier (LQ)' },
-                    { value: 'MANAGER', label: 'Manager' }
+                    { value: 'MANAGER', label: 'Manager' },
+                    { value: 'DM', label: 'Digital Marketing' }
                   ]}
                 />
               </div>
