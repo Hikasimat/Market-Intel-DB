@@ -148,8 +148,18 @@ class InstagramAuthURLView(APIView):
 
     def get(self, request):
         try:
-            url, signed_state = MetaService.generate_auth_url(request.user.id, platform='INSTAGRAM')
-            return Response({'url': url, 'state': signed_state}, status=status.HTTP_200_OK)
+            custom_redirect = request.query_params.get('redirect_uri')
+            redirect_uri = MetaService.get_redirect_uri(
+                platform='INSTAGRAM',
+                request=request,
+                custom_redirect_uri=custom_redirect
+            )
+            url, signed_state = MetaService.generate_auth_url(
+                request.user.id,
+                platform='INSTAGRAM',
+                redirect_uri=redirect_uri
+            )
+            return Response({'url': url, 'state': signed_state, 'redirect_uri': redirect_uri}, status=status.HTTP_200_OK)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -166,11 +176,14 @@ class InstagramCallbackView(APIView):
         code = serializer.validated_data['code']
         state = serializer.validated_data['state']
 
-        if not MetaService.verify_state(state, request.user.id):
+        state_payload = MetaService.get_state_payload(state, request.user.id)
+        if not state_payload:
             return Response({'error': 'Invalid or expired OAuth state.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        redirect_uri = state_payload.get('redirect_uri')
+
         try:
-            tokens = MetaService.exchange_code_for_token(code, platform='INSTAGRAM')
+            tokens = MetaService.exchange_code_for_token(code, platform='INSTAGRAM', redirect_uri=redirect_uri)
             access_token = tokens.get('access_token')
             expires_in = tokens.get('expires_in', 5184000)  # ~60 days default
 
@@ -388,8 +401,18 @@ class FacebookAuthURLView(APIView):
 
     def get(self, request):
         try:
-            url, signed_state = MetaService.generate_auth_url(request.user.id, platform='FACEBOOK')
-            return Response({'url': url, 'state': signed_state}, status=status.HTTP_200_OK)
+            custom_redirect = request.query_params.get('redirect_uri')
+            redirect_uri = MetaService.get_redirect_uri(
+                platform='FACEBOOK',
+                request=request,
+                custom_redirect_uri=custom_redirect
+            )
+            url, signed_state = MetaService.generate_auth_url(
+                request.user.id,
+                platform='FACEBOOK',
+                redirect_uri=redirect_uri
+            )
+            return Response({'url': url, 'state': signed_state, 'redirect_uri': redirect_uri}, status=status.HTTP_200_OK)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -406,11 +429,14 @@ class FacebookCallbackView(APIView):
         code = serializer.validated_data['code']
         state = serializer.validated_data['state']
 
-        if not MetaService.verify_state(state, request.user.id):
+        state_payload = MetaService.get_state_payload(state, request.user.id)
+        if not state_payload:
             return Response({'error': 'Invalid or expired OAuth state.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        redirect_uri = state_payload.get('redirect_uri')
+
         try:
-            tokens = MetaService.exchange_code_for_token(code, platform='FACEBOOK')
+            tokens = MetaService.exchange_code_for_token(code, platform='FACEBOOK', redirect_uri=redirect_uri)
             user_access_token = tokens.get('access_token')
             expires_in = tokens.get('expires_in', 5184000)
 
@@ -793,8 +819,10 @@ class TwitterAuthURLView(APIView):
 
     def get(self, request):
         try:
-            url, signed_state, _ = TwitterService.generate_auth_url(request.user.id)
-            return Response({'url': url, 'state': signed_state}, status=status.HTTP_200_OK)
+            custom_redirect = request.query_params.get('redirect_uri')
+            redirect_uri = TwitterService.get_redirect_uri(request=request, custom_redirect_uri=custom_redirect)
+            url, signed_state, _ = TwitterService.generate_auth_url(request.user.id, redirect_uri=redirect_uri)
+            return Response({'url': url, 'state': signed_state, 'redirect_uri': redirect_uri}, status=status.HTTP_200_OK)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -811,12 +839,12 @@ class TwitterCallbackView(APIView):
         code = serializer.validated_data['code']
         state = serializer.validated_data['state']
 
-        is_valid, code_verifier = TwitterService.verify_state_and_extract_verifier(state, request.user.id)
+        is_valid, code_verifier, redirect_uri = TwitterService.verify_state_and_extract_verifier(state, request.user.id)
         if not is_valid or not code_verifier:
             return Response({'error': 'Invalid or expired Twitter/X OAuth state.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            tokens = TwitterService.exchange_code_for_tokens(code, code_verifier)
+            tokens = TwitterService.exchange_code_for_tokens(code, code_verifier, redirect_uri=redirect_uri)
             access_token = tokens.get('access_token')
             refresh_token = tokens.get('refresh_token', '')
             expires_in = tokens.get('expires_in', 7200)

@@ -170,7 +170,10 @@ const FacebookPage = () => {
 
   const handleConnect = async () => {
     try {
-      const res = await api.get('/digital-marketing/facebook/auth-url/');
+      const redirectUri = `${window.location.origin}/digital-marketing/facebook`;
+      const res = await api.get('/digital-marketing/facebook/auth-url/', {
+        params: { redirect_uri: redirectUri }
+      });
       if (res.data?.url) {
         window.location.href = res.data.url;
       }
@@ -390,7 +393,7 @@ const FacebookPage = () => {
             <div className="font-bold text-amber-900">Required Environment Variables:</div>
             <code className="block font-mono text-[11px] text-slate-700">META_APP_ID=&lt;your-facebook-app-id&gt;</code>
             <code className="block font-mono text-[11px] text-slate-700">META_APP_SECRET=&lt;your-facebook-app-secret&gt;</code>
-            <code className="block font-mono text-[11px] text-slate-700">META_REDIRECT_URI=http://localhost:5173/digital-marketing/facebook</code>
+            <code className="block font-mono text-[11px] text-slate-700">META_FACEBOOK_REDIRECT_URI={typeof window !== 'undefined' ? `${window.location.origin}/digital-marketing/facebook` : 'https://marketinteldbapp.hikasimat.com/digital-marketing/facebook'}</code>
           </div>
         </div>
       )}

@@ -58,28 +58,87 @@ class MetaService:
     STATE_SALT = 'meta_oauth_state'
 
     @classmethod
-    def get_redirect_uri(cls, platform: str = 'INSTAGRAM') -> str:
+    def get_redirect_uri(cls, platform: str = 'INSTAGRAM', request=None, custom_redirect_uri: str = None) -> str:
+        """
+        Determines the appropriate OAuth redirect URI.
+        Priority:
+        1. Valid custom_redirect_uri from frontend request query param
+        2. Extracted origin from request Origin / Referer header (preserves current domain)
+        3. Environment variable (META_FACEBOOK_REDIRECT_URI / META_INSTAGRAM_REDIRECT_URI / META_REDIRECT_URI)
+        4. Fallback to settings.FRONTEND_URL
+        """
+        # 1. Custom redirect URI (e.g. sent by frontend from window.location.origin)
+        if custom_redirect_uri and isinstance(custom_redirect_uri, str):
+            custom_uri = custom_redirect_uri.strip()
+            try:
+                parsed = urllib.parse.urlparse(custom_uri)
+                if parsed.scheme in ('http', 'https') and parsed.netloc:
+                    host = parsed.netloc.split(':')[0].lower()
+                    allowed_hosts = [h.strip().lower() for h in getattr(settings, 'ALLOWED_HOSTS', []) if h.strip()]
+                    cors_origins = [
+                        urllib.parse.urlparse(o).netloc.split(':')[0].lower()
+                        for o in getattr(settings, 'CORS_ALLOWED_ORIGINS', []) if o
+                    ]
+                    if (
+                        host in ('localhost', '127.0.0.1')
+                        or host in allowed_hosts
+                        or host in cors_origins
+                        or host == 'marketinteldbapp.hikasimat.com'
+                        or host.endswith('.hikasimat.com')
+                    ):
+                        return custom_uri
+            except Exception:
+                pass
+
+        # 2. Extract origin from request headers (works whether client is localhost or production domain)
+        if request:
+            origin = request.headers.get('Origin') or request.META.get('HTTP_ORIGIN')
+            if not origin:
+                referer = request.headers.get('Referer') or request.META.get('HTTP_REFERER')
+                if referer:
+                    try:
+                        p = urllib.parse.urlparse(referer)
+                        if p.scheme and p.netloc:
+                            origin = f"{p.scheme}://{p.netloc}"
+                    except Exception:
+                        pass
+            if origin:
+                clean_origin = origin.rstrip('/')
+                if platform == 'FACEBOOK':
+                    return f"{clean_origin}/digital-marketing/facebook"
+                elif platform == 'INSTAGRAM':
+                    return f"{clean_origin}/digital-marketing/instagram"
+                elif platform == 'META_ADS':
+                    return f"{clean_origin}/digital-marketing/ads"
+
+        # 3. Explicit environment variable overrides
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        if platform == 'FACEBOOK':
+            env_uri = os.getenv('META_FACEBOOK_REDIRECT_URI', '').strip()
+            if env_uri:
+                return env_uri
+        elif platform == 'INSTAGRAM':
+            env_uri = os.getenv('META_INSTAGRAM_REDIRECT_URI', '').strip() or os.getenv('META_REDIRECT_URI', '').strip()
+            if env_uri:
+                return env_uri
+
+        # 4. Fallback to settings.FRONTEND_URL
         frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
         if platform == 'FACEBOOK':
-            return os.getenv(
-                'META_FACEBOOK_REDIRECT_URI',
-                f"{frontend_url}/digital-marketing/facebook"
-            ).strip()
+            return f"{frontend_url}/digital-marketing/facebook"
         elif platform == 'INSTAGRAM':
-            return os.getenv(
-                'META_INSTAGRAM_REDIRECT_URI',
-                os.getenv('META_REDIRECT_URI', f"{frontend_url}/digital-marketing/instagram")
-            ).strip()
-        return os.getenv('META_REDIRECT_URI', f"{frontend_url}/digital-marketing/instagram").strip()
+            return f"{frontend_url}/digital-marketing/instagram"
+        return f"{frontend_url}/digital-marketing/instagram"
 
     @classmethod
-    def get_config(cls, platform: str = 'INSTAGRAM'):
+    def get_config(cls, platform: str = 'INSTAGRAM', request=None, custom_redirect_uri: str = None):
         """Returns configured Meta credentials or None if missing."""
         from dotenv import load_dotenv
         load_dotenv(override=True)
         app_id = os.getenv('META_APP_ID', '').strip()
         app_secret = os.getenv('META_APP_SECRET', '').strip()
-        redirect_uri = cls.get_redirect_uri(platform)
+        redirect_uri = cls.get_redirect_uri(platform, request=request, custom_redirect_uri=custom_redirect_uri)
         return {
             'app_id': app_id,
             'app_secret': app_secret,
@@ -88,10 +147,12 @@ class MetaService:
         }
 
     @classmethod
-    def generate_auth_url(cls, user_id: int, platform: str = 'INSTAGRAM') -> tuple:
+    def generate_auth_url(cls, user_id: int, platform: str = 'INSTAGRAM', redirect_uri: str = None) -> tuple:
         """
         Generates OAuth authorization URL with signed state preventing CSRF.
         platform can be: 'INSTAGRAM', 'FACEBOOK', or 'META_ADS'.
+        The exact redirect_uri is bound into the signed state to guarantee exact
+        match during the token exchange step.
         """
         cfg = cls.get_config(platform=platform)
         if not cfg['is_configured']:
@@ -99,8 +160,14 @@ class MetaService:
                 "Meta App credentials not configured. Please set META_APP_ID and META_APP_SECRET in the environment."
             )
 
+        effective_redirect_uri = redirect_uri or cfg['redirect_uri']
+
         signer = TimestampSigner(salt=cls.STATE_SALT)
-        payload = json.dumps({'user_id': user_id, 'platform': platform})
+        payload = json.dumps({
+            'user_id': user_id,
+            'platform': platform,
+            'redirect_uri': effective_redirect_uri,
+        })
         signed_state = signer.sign(payload)
 
         if platform == 'INSTAGRAM':
@@ -134,7 +201,7 @@ class MetaService:
 
         params = {
             'client_id': cfg['app_id'],
-            'redirect_uri': cfg['redirect_uri'],
+            'redirect_uri': effective_redirect_uri,
             'scope': ','.join(scopes),
             'response_type': 'code',
             'state': signed_state,
@@ -144,35 +211,45 @@ class MetaService:
         return url, signed_state
 
     @classmethod
-    def verify_state(cls, state: str, user_id: int) -> bool:
-        """Verifies signed state token matches current user and hasn't expired."""
+    def get_state_payload(cls, state: str, user_id: int) -> dict:
+        """Verifies signed state token matches current user and returns payload dict or None."""
         if not state:
-            return False
+            return None
         signer = TimestampSigner(salt=cls.STATE_SALT)
         try:
             unsigned = signer.unsign(state, max_age=cls.STATE_MAX_AGE)
             data = json.loads(unsigned)
-            return data.get('user_id') == user_id
+            if data.get('user_id') == user_id:
+                return data
+            return None
         except (BadSignature, SignatureExpired, Exception) as exc:
             logger.warning("Meta OAuth state verification failed: %s", exc)
-            return False
+            return None
 
     @classmethod
-    def exchange_code_for_token(cls, code: str, platform: str = 'INSTAGRAM') -> dict:
+    def verify_state(cls, state: str, user_id: int) -> bool:
+        """Verifies signed state token matches current user and hasn't expired."""
+        return cls.get_state_payload(state, user_id) is not None
+
+    @classmethod
+    def exchange_code_for_token(cls, code: str, platform: str = 'INSTAGRAM', redirect_uri: str = None) -> dict:
         """
         Exchanges authorization code for user access token and exchanges
         for a long-lived 60-day token via Graph API.
+        Uses redirect_uri extracted from signed state if provided.
         """
         cfg = cls.get_config(platform=platform)
         if not cfg['is_configured']:
             raise ValueError("Meta credentials are missing.")
+
+        effective_redirect_uri = redirect_uri or cfg['redirect_uri']
 
         # Step 1: Exchange code for short-lived token
         token_url = f"{GRAPH_BASE_URL}/oauth/access_token"
         params = {
             'client_id': cfg['app_id'],
             'client_secret': cfg['app_secret'],
-            'redirect_uri': cfg['redirect_uri'],
+            'redirect_uri': effective_redirect_uri,
             'code': code,
         }
         res = _http_request(token_url, method='GET', params=params)

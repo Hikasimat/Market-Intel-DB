@@ -63,17 +63,62 @@ class TwitterService:
     STATE_MAX_AGE = 600  # 10 minutes
     STATE_SALT = 'twitter_oauth_state'
 
-    @staticmethod
-    def get_config():
+    @classmethod
+    def get_redirect_uri(cls, request=None, custom_redirect_uri: str = None) -> str:
+        """Determines appropriate Twitter OAuth redirect URI."""
+        if custom_redirect_uri and isinstance(custom_redirect_uri, str):
+            custom_uri = custom_redirect_uri.strip()
+            try:
+                parsed = urllib.parse.urlparse(custom_uri)
+                if parsed.scheme in ('http', 'https') and parsed.netloc:
+                    host = parsed.netloc.split(':')[0].lower()
+                    allowed_hosts = [h.strip().lower() for h in getattr(settings, 'ALLOWED_HOSTS', []) if h.strip()]
+                    cors_origins = [
+                        urllib.parse.urlparse(o).netloc.split(':')[0].lower()
+                        for o in getattr(settings, 'CORS_ALLOWED_ORIGINS', []) if o
+                    ]
+                    if (
+                        host in ('localhost', '127.0.0.1')
+                        or host in allowed_hosts
+                        or host in cors_origins
+                        or host == 'marketinteldbapp.hikasimat.com'
+                        or host.endswith('.hikasimat.com')
+                    ):
+                        return custom_uri
+            except Exception:
+                pass
+
+        if request:
+            origin = request.headers.get('Origin') or request.META.get('HTTP_ORIGIN')
+            if not origin:
+                referer = request.headers.get('Referer') or request.META.get('HTTP_REFERER')
+                if referer:
+                    try:
+                        p = urllib.parse.urlparse(referer)
+                        if p.scheme and p.netloc:
+                            origin = f"{p.scheme}://{p.netloc}"
+                    except Exception:
+                        pass
+            if origin:
+                return f"{origin.rstrip('/')}/digital-marketing/twitter"
+
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        env_uri = os.getenv('TWITTER_REDIRECT_URI', '').strip()
+        if env_uri:
+            return env_uri
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+        return f"{frontend_url}/digital-marketing/twitter"
+
+    @classmethod
+    def get_config(cls, request=None, custom_redirect_uri: str = None):
         """Returns Twitter/X app credentials from environment."""
         from dotenv import load_dotenv
         load_dotenv(override=True)
         client_id = os.getenv('TWITTER_CLIENT_ID', '').strip()
         client_secret = os.getenv('TWITTER_CLIENT_SECRET', '').strip()
-        redirect_uri = os.getenv(
-            'TWITTER_REDIRECT_URI',
-            f"{settings.FRONTEND_URL}/digital-marketing/twitter"
-        ).strip()
+        redirect_uri = cls.get_redirect_uri(request=request, custom_redirect_uri=custom_redirect_uri)
         return {
             'client_id': client_id,
             'client_secret': client_secret,
@@ -90,7 +135,7 @@ class TwitterService:
         return verifier, challenge
 
     @classmethod
-    def generate_auth_url(cls, user_id: int) -> tuple:
+    def generate_auth_url(cls, user_id: int, redirect_uri: str = None) -> tuple:
         """
         Generates OAuth 2.0 authorization URL with PKCE and signed state.
         Returns (url, state, code_verifier).
@@ -101,11 +146,16 @@ class TwitterService:
                 "Twitter/X API credentials not configured. Please set TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET in the environment."
             )
 
+        effective_redirect_uri = redirect_uri or cfg['redirect_uri']
         code_verifier, code_challenge = cls.generate_pkce_pair()
 
         from django.core import signing
         signed_state = signing.dumps(
-            {'user_id': user_id, 'code_verifier': code_verifier},
+            {
+                'user_id': user_id,
+                'code_verifier': code_verifier,
+                'redirect_uri': effective_redirect_uri,
+            },
             salt=cls.STATE_SALT
         )
 
@@ -114,7 +164,7 @@ class TwitterService:
         params = {
             'response_type': 'code',
             'client_id': cfg['client_id'],
-            'redirect_uri': cfg['redirect_uri'],
+            'redirect_uri': effective_redirect_uri,
             'scope': ' '.join(scopes),
             'state': signed_state,
             'code_challenge': code_challenge,
@@ -126,18 +176,18 @@ class TwitterService:
     @classmethod
     def verify_state_and_extract_verifier(cls, state: str, user_id: int) -> tuple:
         """
-        Verifies signed state token and extracts the bound code_verifier.
-        Returns (is_valid, code_verifier).
+        Verifies signed state token and extracts the bound code_verifier and redirect_uri.
+        Returns (is_valid, code_verifier, redirect_uri).
         """
         if not state:
-            return False, ''
+            return False, '', None
         from django.core import signing
         try:
             data = signing.loads(state, salt=cls.STATE_SALT, max_age=cls.STATE_MAX_AGE)
             if data.get('user_id') == user_id:
-                return True, data.get('code_verifier', '')
+                return True, data.get('code_verifier', ''), data.get('redirect_uri')
             logger.warning("Twitter state user mismatch: expected %s, got %s", user_id, data.get('user_id'))
-            return False, ''
+            return False, '', None
         except Exception as exc:
             # Fallback to TimestampSigner if coming from an older state format
             try:
@@ -145,18 +195,20 @@ class TwitterService:
                 unsigned = signer.unsign(state, max_age=cls.STATE_MAX_AGE)
                 data = json.loads(unsigned)
                 if data.get('user_id') == user_id:
-                    return True, data.get('code_verifier', '')
+                    return True, data.get('code_verifier', ''), data.get('redirect_uri')
             except Exception:
                 pass
             logger.warning("Twitter OAuth state verification failed: %s", exc)
-            return False, ''
+            return False, '', None
 
     @classmethod
-    def exchange_code_for_tokens(cls, code: str, code_verifier: str) -> dict:
+    def exchange_code_for_tokens(cls, code: str, code_verifier: str, redirect_uri: str = None) -> dict:
         """Exchanges authorization code and PKCE code_verifier for X access/refresh tokens."""
         cfg = cls.get_config()
         if not cfg['is_configured']:
             raise ValueError("Twitter/X credentials are missing.")
+
+        effective_redirect_uri = redirect_uri or cfg['redirect_uri']
 
         auth_header = base64.b64encode(f"{cfg['client_id']}:{cfg['client_secret']}".encode('utf-8')).decode('utf-8')
         headers = {
@@ -167,7 +219,7 @@ class TwitterService:
             'code': code,
             'grant_type': 'authorization_code',
             'client_id': cfg['client_id'],
-            'redirect_uri': cfg['redirect_uri'],
+            'redirect_uri': effective_redirect_uri,
             'code_verifier': code_verifier,
         }
 

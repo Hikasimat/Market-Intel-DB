@@ -152,7 +152,10 @@ const InstagramPage = () => {
 
   const handleConnect = async () => {
     try {
-      const res = await api.get('/digital-marketing/instagram/auth-url/');
+      const redirectUri = `${window.location.origin}/digital-marketing/instagram`;
+      const res = await api.get('/digital-marketing/instagram/auth-url/', {
+        params: { redirect_uri: redirectUri }
+      });
       if (res.data?.url) {
         window.location.href = res.data.url;
       }

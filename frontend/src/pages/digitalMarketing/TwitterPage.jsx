@@ -87,7 +87,10 @@ const TwitterPage = () => {
 
   const handleConnect = async () => {
     try {
-      const res = await api.get('/digital-marketing/twitter/auth-url/');
+      const redirectUri = `${window.location.origin}/digital-marketing/twitter`;
+      const res = await api.get('/digital-marketing/twitter/auth-url/', {
+        params: { redirect_uri: redirectUri }
+      });
       if (res.data?.url) {
         window.location.href = res.data.url;
       }
