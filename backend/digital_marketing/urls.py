@@ -19,14 +19,28 @@ from .views import (
     AdsOverviewView,
     AdsCampaignsView,
     SocialPostDeleteView,
+    UniversalPostUploadView,
+    ConversationListView,
+    ConversationMessagesView,
+    ConversationSyncView,
+    MetaWebhookView,
+    PostCommentsView,
 )
 
 urlpatterns = [
+    # Messaging endpoints (Instagram DMs & Facebook Messenger)
+    path('conversations/', ConversationListView.as_view(), name='dm_conversations_list'),
+    path('conversations/sync/', ConversationSyncView.as_view(), name='dm_conversations_sync'),
+    path('conversations/<int:thread_id>/messages/', ConversationMessagesView.as_view(), name='dm_conversations_messages'),
+    path('webhooks/meta/', MetaWebhookView.as_view(), name='dm_meta_webhook'),
+
     # Dashboard summary
     path('dashboard/', DigitalMarketingDashboardView.as_view(), name='dm_dashboard'),
 
-    # Post management
+    # Post management, universal broadcast & comments
+    path('posts/universal/', UniversalPostUploadView.as_view(), name='dm_universal_post_upload'),
     path('posts/<int:pk>/', SocialPostDeleteView.as_view(), name='dm_post_delete'),
+    path('posts/<str:platform>/<str:post_id>/comments/', PostCommentsView.as_view(), name='dm_post_comments'),
 
     # Instagram endpoints
     path('instagram/status/', InstagramStatusView.as_view(), name='dm_instagram_status'),

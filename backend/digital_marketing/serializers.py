@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SocialAccountConnection, SocialPost, AdCampaign
+from .models import SocialAccountConnection, SocialPost, AdCampaign, ConversationThread, DirectMessage
 
 
 class SocialAccountConnectionSerializer(serializers.ModelSerializer):
@@ -109,8 +109,67 @@ class FacebookPublishSerializer(serializers.Serializer):
 
 class TwitterTweetSerializer(serializers.Serializer):
     text = serializers.CharField(required=True, max_length=280)
+    publish_live = serializers.BooleanField(required=False, default=True)
 
 
 class OAuthCallbackSerializer(serializers.Serializer):
     code = serializers.CharField(required=True)
     state = serializers.CharField(required=True)
+
+
+class DirectMessageSerializer(serializers.ModelSerializer):
+    """Serializes individual message items."""
+    class Meta:
+        model = DirectMessage
+        fields = [
+            'id',
+            'thread',
+            'external_message_id',
+            'sender_type',
+            'sender_id',
+            'sender_name',
+            'text',
+            'media_url',
+            'media_type',
+            'timestamp',
+            'is_read',
+            'delivery_status',
+            'error_message',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+class ConversationThreadSerializer(serializers.ModelSerializer):
+    """Serializes conversation threads with recent messages."""
+    account_name = serializers.CharField(source='account_connection.account_name', read_only=True)
+    account_username = serializers.CharField(source='account_connection.account_username', read_only=True)
+
+    class Meta:
+        model = ConversationThread
+        fields = [
+            'id',
+            'platform',
+            'account_connection',
+            'account_name',
+            'account_username',
+            'external_thread_id',
+            'participant_id',
+            'participant_name',
+            'participant_username',
+            'participant_avatar_url',
+            'last_message_text',
+            'last_message_at',
+            'unread_count',
+            'is_archived',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class SendMessageSerializer(serializers.Serializer):
+    """Payload for replying to an ongoing conversation."""
+    text = serializers.CharField(required=True, allow_blank=False, max_length=2000)
+    media_url = serializers.URLField(required=False, allow_blank=True, default='')
+

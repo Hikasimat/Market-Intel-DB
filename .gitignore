@@ -9,6 +9,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.pdb
+*.so
 
 # Virtual environments
 .venv/
@@ -25,16 +26,14 @@ backend/env/
 # Environment secrets & credentials — NEVER commit
 .env
 .env.*
+.env.local
+.env.*.local
+**/.env
+**/.env.*
+**/.env.local
+**/.env.*.local
 !.env.example
-backend/.env
-backend/.env.*
-!backend/.env.example
-frontend/.env
-frontend/.env.*
-!frontend/.env.example
-frontend/.env.local
-frontend/.env.production.local
-frontend/.env.development.local
+!**/.env.example
 service-account*.json
 credentials*.json
 client_secret*.json
@@ -45,14 +44,17 @@ token*.json
 *.backup
 *.env.backup
 
-# Cloudflare Tunnel & SSL Certificates
+# Cloudflare Tunnel, SSL Certificates & Keys
 .cloudflared/
+**/.cloudflared/
 *.pem
 *.key
 *.crt
 *.pfx
 cert.pem
 tunnel-*.json
+id_rsa*
+id_ed25519*
 
 # Databases & local SQLite DBs
 *.sqlite3
@@ -62,15 +64,19 @@ tunnel-*.json
 *.db-journal
 db.sqlite3
 backend/db.sqlite3
+**/db.sqlite3
 backend/test_*.sqlite3
 **/test_*.sqlite3
 test_*.db
 backend/settings_*test*.py
 backend/settings_local*.py
+**/settings_*test*.py
+**/settings_local*.py
 
-# Django generated static & user media
+# Django generated static & user media / attachments
 staticfiles/
 backend/staticfiles/
+**/staticfiles/
 media/
 backend/media/
 **/media/
@@ -79,19 +85,31 @@ backend/uploads/
 **/uploads/
 backend/attachments/
 attachments/
+**/attachments/
 social_posts/
 **/social_posts/
+.tempmediaStorage/
+**/.tempmediaStorage/
+.user_uploaded/
+**/.user_uploaded/
 
 # WhatsApp & WAHA session data
 .waha/
+**/.waha/
 waha-data/
 waha_data/
+**/waha-data/
+**/waha_data/
 sessions/
+**/sessions/
 
 # Testing, typing & coverage
 .pytest_cache/
+**/.pytest_cache/
 .mypy_cache/
+**/.mypy_cache/
 .ruff_cache/
+**/.ruff_cache/
 .hypothesis/
 .coverage
 .coverage.*
@@ -109,11 +127,15 @@ dist/
 build/
 frontend/dist/
 frontend/dist-ssr/
+**/dist/
+**/dist-ssr/
 frontend/.vite/
 .vite/
 **/.vite/
 .eslintcache
 .vercel/
+.turbo/
+.output/
 *.tsbuildinfo
 
 # Background worker & process files

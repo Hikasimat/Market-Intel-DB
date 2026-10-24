@@ -18,20 +18,73 @@ import {
   HelpCircle
 } from 'lucide-react';
 import api from '../../services/api';
-import { InstagramIcon } from '../../components/common/SocialIcons';
+import { InstagramIcon, FacebookIcon } from '../../components/common/SocialIcons';
 
 const InstagramPage = () => {
   const [loading, setLoading] = useState(true);
   const [statusData, setStatusData] = useState(null);
+  const [fbStatus, setFbStatus] = useState(null);
   const [postsData, setPostsData] = useState({ database_posts: [], live_posts: [] });
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [formData, setFormData] = useState({ image_url: '', caption: '', publish_live: true });
+  const [targetPlatforms, setTargetPlatforms] = useState({ instagram: true, facebook: true });
   const [selectedFile, setSelectedFile] = useState(null);
   const [filePreview, setFilePreview] = useState('');
   const [uploadMode, setUploadMode] = useState('file'); // 'file' or 'url'
   const [deletingId, setDeletingId] = useState(null);
   const [disconnecting, setDisconnecting] = useState(false);
+
+  // Live Post Comments & Exact Engagement State
+  const [activePostFilter, setActivePostFilter] = useState('ALL'); // 'ALL' | 'LIVE' | 'WORKSPACE'
+  const [selectedPostForComments, setSelectedPostForComments] = useState(null);
+  const [commentsList, setCommentsList] = useState([]);
+  const [loadingComments, setLoadingComments] = useState(false);
+  const [commentReplyText, setCommentReplyText] = useState('');
+  const [submittingComment, setSubmittingComment] = useState(false);
+  const [replyingToComment, setReplyingToComment] = useState(null);
+
+  const handleOpenComments = async (post) => {
+    setSelectedPostForComments(post);
+    setLoadingComments(true);
+    setCommentsList([]);
+    setCommentReplyText('');
+    setReplyingToComment(null);
+    try {
+      const res = await api.get(`/digital-marketing/posts/INSTAGRAM/${post.id}/comments/`);
+      setCommentsList(res.data.comments || []);
+    } catch (err) {
+      toast.error('Failed to load post comments.');
+    } finally {
+      setLoadingComments(false);
+    }
+  };
+
+  const handleSendCommentReply = async (e) => {
+    e?.preventDefault();
+    if (!commentReplyText.trim() || !selectedPostForComments) return;
+    setSubmittingComment(true);
+    try {
+      const targetCommentId = replyingToComment ? replyingToComment.id : selectedPostForComments.id;
+      const res = await api.post(`/digital-marketing/posts/INSTAGRAM/${selectedPostForComments.id}/comments/`, {
+        comment_id: targetCommentId,
+        message: commentReplyText.trim()
+      });
+      toast.success(res.data.detail || 'Reply published live to Instagram!');
+      setCommentReplyText('');
+      setReplyingToComment(null);
+      // Refresh comments
+      const updated = await api.get(`/digital-marketing/posts/INSTAGRAM/${selectedPostForComments.id}/comments/`);
+      setCommentsList(updated.data.comments || []);
+      // Also refresh posts to update comment counters
+      fetchPosts();
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Failed to submit comment reply.';
+      toast.error(msg);
+    } finally {
+      setSubmittingComment(false);
+    }
+  };
 
   const location = useLocation();
   const oauthProcessedRef = useRef(false);
@@ -54,9 +107,18 @@ const InstagramPage = () => {
     }
   };
 
+  const fetchFbStatus = async () => {
+    try {
+      const res = await api.get('/digital-marketing/facebook/status/');
+      setFbStatus(res.data);
+    } catch (e) {
+      // optional
+    }
+  };
+
   const loadData = async () => {
     setLoading(true);
-    await Promise.all([fetchStatus(), fetchPosts()]);
+    await Promise.all([fetchStatus(), fetchPosts(), fetchFbStatus()]);
     setLoading(false);
   };
 
@@ -135,8 +197,14 @@ const InstagramPage = () => {
       toast.error('Please choose an image file, enter an image URL, or add a caption.');
       return;
     }
+
+    if (!targetPlatforms.instagram && !targetPlatforms.facebook) {
+      toast.error('Please select at least one destination platform (Instagram or Facebook).');
+      return;
+    }
+
     const shouldPublishLive = isConnected && Boolean(formData.publish_live);
-    if (shouldPublishLive && !selectedFile && !formData.image_url) {
+    if (shouldPublishLive && targetPlatforms.instagram && !selectedFile && !formData.image_url) {
       toast.error('Direct Instagram live publishing requires an image file or an image URL.');
       return;
     }
@@ -153,16 +221,21 @@ const InstagramPage = () => {
       data.append('publish_live', shouldPublishLive ? 'true' : 'false');
       data.append('caption', formData.caption || '');
 
-      const res = await api.post('/digital-marketing/instagram/posts/', data, {
+      const platformsList = [];
+      if (targetPlatforms.instagram) platformsList.push('INSTAGRAM');
+      if (targetPlatforms.facebook) platformsList.push('FACEBOOK');
+      data.append('platforms', platformsList.join(','));
+
+      const res = await api.post('/digital-marketing/posts/universal/', data, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      toast.success(res.data.detail || 'Post uploaded successfully!');
+      toast.success(res.data.detail || 'Post published successfully!');
       setIsPublishModalOpen(false);
       handleClearFile();
       setFormData({ image_url: '', caption: '', publish_live: true });
       fetchPosts();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Upload failed.');
+      toast.error(err.response?.data?.error || 'Universal upload failed.');
     } finally {
       setPublishing(false);
     }
@@ -341,11 +414,17 @@ const InstagramPage = () => {
 
         {/* Connected Metrics Bar */}
         {isConnected && (
-          <div className="mt-6 pt-6 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-3 gap-4 text-center">
+          <div className="mt-6 pt-6 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
             <div className="p-3 bg-slate-50 rounded-xl">
               <div className="text-xs text-slate-400 font-medium">Followers</div>
               <div className="text-xl font-bold text-slate-900 mt-0.5">
                 {(account?.metadata?.followers_count || 0).toLocaleString()}
+              </div>
+            </div>
+            <div className="p-3 bg-slate-50 rounded-xl">
+              <div className="text-xs text-slate-400 font-medium">Following</div>
+              <div className="text-xl font-bold text-slate-900 mt-0.5">
+                {(account?.metadata?.follows_count || 0).toLocaleString()}
               </div>
             </div>
             <div className="p-3 bg-slate-50 rounded-xl">
@@ -354,10 +433,10 @@ const InstagramPage = () => {
                 {(account?.metadata?.media_count || 0).toLocaleString()}
               </div>
             </div>
-            <div className="p-3 bg-slate-50 rounded-xl col-span-2 sm:col-span-1">
-              <div className="text-xs text-slate-400 font-medium">Account Category</div>
+            <div className="p-3 bg-slate-50 rounded-xl">
+              <div className="text-xs text-slate-400 font-medium">Account Type</div>
               <div className="text-sm font-bold text-slate-900 mt-1">
-                Professional (Business / Creator)
+                Professional (Business)
               </div>
             </div>
           </div>
@@ -371,99 +450,201 @@ const InstagramPage = () => {
           Supported Capabilities & Official Permissions
         </div>
         <ul className="list-disc list-inside space-y-1 text-slate-500 pl-1">
-          <li><strong>Supported:</strong> Single-image photo publishing, caption composition, recent post performance insights.</li>
+          <li><strong>Supported:</strong> Live post engagement, exact likes counter, public post comments viewer and replies, photo publishing.</li>
           <li><strong>Required Scopes:</strong> <code>instagram_basic</code>, <code>instagram_content_publish</code>, <code>instagram_manage_insights</code>, <code>pages_show_list</code>.</li>
-          <li><strong>Note:</strong> Instagram API requires an Instagram Professional account linked to an official Facebook Page. Personal profiles are not eligible.</li>
+          <li><strong>Privacy Note:</strong> In accordance with Meta official privacy policies, exact follower counts and commenters' usernames are provided for free; individual follower profiles are protected.</li>
         </ul>
       </div>
 
       {/* Instagram Posts & Insights Feed */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-        <div className="flex items-center justify-between mb-6">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-2">
             <ImageIcon className="w-5 h-5 text-pink-600" />
-            <h3 className="font-bold text-slate-900 text-base">Posts & Engagement Insights</h3>
+            <h3 className="font-bold text-slate-900 text-base">Posts & Exact Engagement</h3>
           </div>
-          <span className="text-xs text-slate-400">
-            {postsData.live_posts?.length > 0 ? 'Live from Instagram Graph API' : 'Published via Market Intel DB'}
-          </span>
-        </div>
 
-        {postsData.database_posts?.length === 0 && postsData.live_posts?.length === 0 ? (
-          <div className="py-12 text-center text-slate-400 text-sm">
-            <InstagramIcon className="w-12 h-12 text-slate-200 mx-auto mb-3" />
-            <p className="font-bold text-slate-700 text-base">No posts in this workspace yet</p>
-            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-              You can upload an image from your device and write a caption to manage your posts right here.
-            </p>
+          {/* Filter Tabs */}
+          <div className="flex items-center rounded-xl bg-slate-100 p-1 text-xs font-bold">
             <button
-              onClick={() => {
-                setFormData(prev => ({ ...prev, publish_live: false }));
-                setIsPublishModalOpen(true);
-              }}
-              className="mt-4 inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl text-xs font-bold hover:from-pink-700 hover:to-purple-700 transition shadow-md shadow-pink-500/20"
+              onClick={() => setActivePostFilter('ALL')}
+              className={`px-3 py-1.5 rounded-lg transition ${activePostFilter === 'ALL' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
             >
-              <Plus className="w-4 h-4" />
-              Upload Your First Post
+              All ({(postsData.live_posts?.length || 0) + (postsData.database_posts?.length || 0)})
+            </button>
+            <button
+              onClick={() => setActivePostFilter('LIVE')}
+              className={`px-3 py-1.5 rounded-lg transition ${activePostFilter === 'LIVE' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+            >
+              Live Meta Posts ({postsData.live_posts?.length || 0})
+            </button>
+            <button
+              onClick={() => setActivePostFilter('WORKSPACE')}
+              className={`px-3 py-1.5 rounded-lg transition ${activePostFilter === 'WORKSPACE' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+            >
+              Workspace ({postsData.database_posts?.length || 0})
             </button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {postsData.database_posts.map((post) => (
-              <div key={post.id} className="border border-slate-200 rounded-2xl overflow-hidden flex flex-col justify-between hover:shadow-md transition bg-white">
-                <div>
-                  {(post.media_display_url || post.media_url) ? (
-                    <img
-                      src={post.media_display_url || post.media_url}
-                      alt={post.caption || 'Instagram Post'}
-                      className="w-full h-48 object-cover bg-slate-100"
-                      onError={(e) => { e.target.style.display = 'none'; }}
-                    />
-                  ) : (
-                    <div className="w-full h-40 bg-slate-100 flex items-center justify-center text-slate-400">
-                      <ImageIcon className="w-8 h-8" />
-                    </div>
-                  )}
+        </div>
 
-                  <div className="p-4">
-                    <p className="text-xs text-slate-800 line-clamp-3">
-                      {post.caption || <span className="text-slate-400 italic">No caption provided</span>}
-                    </p>
-                    <div className="mt-3 text-[11px] text-slate-400">
-                      {post.published_at ? new Date(post.published_at).toLocaleString() : 'Just now'}
-                    </div>
-                  </div>
-                </div>
+        {(() => {
+          const liveList = (postsData.live_posts || []).map(p => ({
+            id: p.id,
+            caption: p.caption,
+            media_url: p.media_url || p.thumbnail_url,
+            permalink: p.permalink,
+            published_at: p.timestamp,
+            likes_count: p.like_count ?? 0,
+            comments_count: p.comments_count ?? 0,
+            is_live: true,
+          }));
 
-                <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-                  <div className="flex items-center gap-3">
-                    <span className="flex items-center gap-1 font-bold">
-                      <Heart className="w-3.5 h-3.5 text-rose-500" />
-                      {post.metrics?.likes || 0}
-                    </span>
-                    <span className="flex items-center gap-1 font-bold">
-                      <MessageCircle className="w-3.5 h-3.5 text-blue-500" />
-                      {post.metrics?.comments || 0}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded">
-                      {post.status}
-                    </span>
-                    <button
-                      onClick={() => handleDeletePost(post.id)}
-                      disabled={deletingId === post.id}
-                      className="text-slate-400 hover:text-rose-600 p-1 rounded transition"
-                      title="Delete post"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
+          const dbList = (postsData.database_posts || []).map(p => ({
+            id: p.id,
+            external_post_id: p.external_post_id,
+            caption: p.caption,
+            media_url: p.media_display_url || p.media_url,
+            published_at: p.published_at,
+            likes_count: p.metrics?.likes ?? 0,
+            comments_count: p.metrics?.comments ?? 0,
+            status: p.status,
+            is_live: Boolean(p.external_post_id && (p.status === 'PUBLISHED' || !p.status)),
+          }));
+
+          const seenIds = new Set();
+          const merged = [];
+          for (const l of liveList) {
+            seenIds.add(l.id);
+            merged.push(l);
+          }
+          for (const d of dbList) {
+            if (!d.external_post_id || !seenIds.has(d.external_post_id)) {
+              if (d.external_post_id) seenIds.add(d.external_post_id);
+              merged.push(d);
+            }
+          }
+
+          let combined = [];
+          if (activePostFilter === 'LIVE') combined = merged.filter(p => p.is_live);
+          else if (activePostFilter === 'WORKSPACE') combined = merged.filter(p => !p.is_live);
+          else combined = merged;
+
+          if (combined.length === 0) {
+            return (
+              <div className="py-12 text-center text-slate-400 text-sm">
+                <InstagramIcon className="w-12 h-12 text-slate-200 mx-auto mb-3" />
+                <p className="font-bold text-slate-700 text-base">No posts found for this view</p>
+                <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                  Upload an image to your workspace or publish live to Instagram to see your engagement counters.
+                </p>
+                <button
+                  onClick={() => {
+                    setFormData(prev => ({ ...prev, publish_live: isConnected }));
+                    setIsPublishModalOpen(true);
+                  }}
+                  className="mt-4 inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl text-xs font-bold hover:from-pink-700 hover:to-purple-700 transition shadow-md shadow-pink-500/20"
+                >
+                  <Plus className="w-4 h-4" />
+                  Upload Post
+                </button>
               </div>
-            ))}
-          </div>
-        )}
+            );
+          }
+
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {combined.map((post) => (
+                <div key={post.id} className="border border-slate-200 rounded-2xl overflow-hidden flex flex-col justify-between hover:shadow-md transition bg-white group">
+                  <div>
+                    {post.media_url ? (
+                      <div className="relative">
+                        <img
+                          src={post.media_url}
+                          alt={post.caption || 'Instagram Post'}
+                          className="w-full h-48 object-cover bg-slate-100"
+                          onError={(e) => { e.target.style.display = 'none'; }}
+                        />
+                        <div className="absolute top-2 left-2">
+                          {post.is_live ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-900/80 backdrop-blur-sm text-white border border-white/20 shadow-sm">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                              Live on Instagram
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-900/80 backdrop-blur-sm text-white">
+                              Workspace Draft
+                            </span>
+                          )}
+                        </div>
+                        {post.permalink && (
+                          <a
+                            href={post.permalink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="absolute top-2 right-2 p-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm text-white hover:bg-pink-600 transition"
+                            title="Open on Instagram"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="w-full h-40 bg-slate-100 flex items-center justify-center text-slate-400">
+                        <ImageIcon className="w-8 h-8" />
+                      </div>
+                    )}
+
+                    <div className="p-4">
+                      <p className="text-xs text-slate-800 line-clamp-3">
+                        {post.caption || <span className="text-slate-400 italic">No caption provided</span>}
+                      </p>
+                      <div className="mt-3 text-[11px] text-slate-400">
+                        {post.published_at ? new Date(post.published_at).toLocaleString() : 'Just now'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1 font-bold text-rose-600" title="Exact Likes">
+                        <Heart className="w-4 h-4 fill-rose-500 text-rose-500" />
+                        {post.likes_count.toLocaleString()}
+                      </span>
+
+                      <button
+                        onClick={() => handleOpenComments(post)}
+                        className="flex items-center gap-1 font-bold text-blue-600 hover:text-blue-800 transition"
+                        title="View comments"
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                        {post.comments_count.toLocaleString()}
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleOpenComments(post)}
+                        className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-white border border-slate-200 text-slate-700 hover:border-pink-300 hover:text-pink-600 transition shadow-xs"
+                      >
+                        Comments ({post.comments_count})
+                      </button>
+                      {!post.is_live && (
+                        <button
+                          onClick={() => handleDeletePost(post.id)}
+                          disabled={deletingId === post.id}
+                          className="text-slate-400 hover:text-rose-600 p-1 rounded transition"
+                          title="Delete post"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Publish / Normal Upload Modal */}
@@ -567,10 +748,59 @@ const InstagramPage = () => {
                 </div>
               </div>
 
+              {/* Target Platforms: Universal Cross-Posting */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 flex items-center justify-between">
+                  <span>Publish Destinations</span>
+                  {targetPlatforms.instagram && targetPlatforms.facebook && (
+                    <span className="text-[10px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">
+                      ⚡ Universal Post Active
+                    </span>
+                  )}
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition ${targetPlatforms.instagram ? 'bg-pink-50/70 border-pink-300' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                    <input
+                      type="checkbox"
+                      checked={targetPlatforms.instagram}
+                      onChange={(e) => setTargetPlatforms(prev => ({ ...prev, instagram: e.target.checked }))}
+                      className="rounded text-pink-600 focus:ring-pink-500 w-4 h-4"
+                    />
+                    <div className="flex items-center gap-2">
+                      <InstagramIcon className="w-4 h-4 text-pink-600 shrink-0" />
+                      <div className="text-left">
+                        <div className="text-xs font-bold text-slate-900">Instagram</div>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[120px]">
+                          {account?.account_username ? `@${account.account_username}` : 'Instagram Account'}
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition ${targetPlatforms.facebook ? 'bg-blue-50/70 border-blue-300' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                    <input
+                      type="checkbox"
+                      checked={targetPlatforms.facebook}
+                      onChange={(e) => setTargetPlatforms(prev => ({ ...prev, facebook: e.target.checked }))}
+                      className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
+                    />
+                    <div className="flex items-center gap-2">
+                      <FacebookIcon className="w-4 h-4 text-blue-600 shrink-0" />
+                      <div className="text-left">
+                        <div className="text-xs font-bold text-slate-900">Facebook Page</div>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[120px]">
+                          {fbStatus?.pages?.[0]?.account_name || 'Market Intel DB'}
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
               {/* Status Info / Publish Live Option */}
               {isConnected ? (
                 <div className="space-y-2">
-                  <label className="flex items-start gap-3 cursor-pointer bg-pink-50/70 p-3.5 rounded-xl border border-pink-200/80 hover:bg-pink-50 transition">
+                  <label className="flex items-start gap-3 cursor-pointer bg-slate-50 p-3.5 rounded-xl border border-slate-200 hover:bg-slate-100/60 transition">
                     <input
                       type="checkbox"
                       checked={formData.publish_live}
@@ -578,14 +808,15 @@ const InstagramPage = () => {
                       className="mt-0.5 rounded text-pink-600 focus:ring-pink-500 w-4 h-4"
                     />
                     <div className="flex-1">
-                      <div className="text-xs font-bold text-pink-950 flex items-center gap-1.5">
-                        <InstagramIcon className="w-3.5 h-3.5 text-pink-600" />
-                        Publish live to connected Instagram account (@{account?.account_username || 'mohanraj65415'})
+                      <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                        Publish live via Meta Graph API
                       </div>
-                      <div className="text-[10px] text-pink-700/80 mt-0.5 leading-relaxed">
-                        {uploadMode === 'file'
-                          ? 'Your local image will be automatically uploaded and published live to your official Instagram account via Meta Graph API.'
-                          : 'Public image URL will be dispatched directly to your live Instagram account.'}
+                      <div className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">
+                        {targetPlatforms.instagram && targetPlatforms.facebook
+                          ? 'This post will be broadcast live to both your Instagram account and Facebook Page simultaneously.'
+                          : targetPlatforms.facebook
+                            ? 'This post will be published live to your official Facebook Page.'
+                            : 'This post will be published live to your official Instagram account.'}
                       </div>
                     </div>
                   </label>
@@ -612,12 +843,180 @@ const InstagramPage = () => {
                 <button
                   type="submit"
                   disabled={publishing}
-                  className="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-700 hover:to-purple-700 transition shadow-sm disabled:opacity-50"
+                  className="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-pink-600 via-purple-600 to-blue-600 hover:opacity-90 transition shadow-sm disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
                   {publishing
-                    ? (formData.publish_live && isConnected ? 'Publishing to Instagram...' : 'Uploading...')
-                    : (formData.publish_live && isConnected ? 'Publish to Instagram' : 'Upload Post')}
+                    ? 'Publishing live...'
+                    : targetPlatforms.instagram && targetPlatforms.facebook
+                      ? '🚀 Publish to Instagram & Facebook'
+                      : targetPlatforms.facebook
+                        ? 'Publish to Facebook'
+                        : 'Publish to Instagram'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Comments & Discussion Modal */}
+      {selectedPostForComments && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200 flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-pink-100 text-pink-600 flex items-center justify-center">
+                  <MessageCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">Post Comments & Engagement</h3>
+                  <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-0.5">
+                    <span className="flex items-center gap-1 font-semibold text-rose-600">
+                      <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />
+                      {selectedPostForComments.likes_count ?? 0} Likes
+                    </span>
+                    <span>•</span>
+                    <span className="font-semibold text-slate-700">
+                      {commentsList.length} Comments
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setSelectedPostForComments(null);
+                  setReplyingToComment(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Post Caption Snippet */}
+            {selectedPostForComments.caption && (
+              <div className="p-3 bg-slate-50 border-b border-slate-100 text-xs text-slate-600 flex items-start gap-2.5">
+                <span className="font-bold text-slate-900 shrink-0">Caption:</span>
+                <p className="line-clamp-2 italic text-slate-700">"{selectedPostForComments.caption}"</p>
+              </div>
+            )}
+
+            {/* Comments List */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3.5 divide-y divide-slate-100">
+              {loadingComments ? (
+                <div className="py-12 text-center text-slate-400 text-xs flex flex-col items-center gap-2">
+                  <RefreshCw className="w-5 h-5 animate-spin text-pink-600" />
+                  Loading comments from Instagram...
+                </div>
+              ) : commentsList.length === 0 ? (
+                <div className="py-12 text-center text-slate-400 text-xs space-y-2">
+                  <MessageCircle className="w-8 h-8 text-slate-300 mx-auto" />
+                  <p className="font-bold text-slate-700">No comments on this post yet</p>
+                  <p className="text-[11px] text-slate-400">
+                    Write a comment below to start the conversation!
+                  </p>
+                </div>
+              ) : (
+                commentsList.map((c) => (
+                  <div key={c.id} className="pt-3 first:pt-0 space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2.5">
+                        <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-pink-500 to-purple-600 text-white font-bold text-xs flex items-center justify-center shrink-0">
+                          {(c.username || c.name || 'U').charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-xs text-slate-900">
+                              {c.name && c.name !== c.username ? c.name : (c.username ? `@${c.username}` : 'Instagram User')}
+                            </span>
+                            {c.name && c.username && c.name !== c.username && (
+                              <span className="text-[11px] text-slate-500 font-medium">
+                                (@{c.username})
+                              </span>
+                            )}
+                            <span className="text-[10px] text-slate-400">
+                              • {c.timestamp ? new Date(c.timestamp).toLocaleDateString() : ''}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-700 mt-1 whitespace-pre-wrap leading-relaxed">
+                            {c.text}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {c.like_count > 0 && (
+                          <span className="flex items-center gap-1 text-[10px] text-rose-600 font-bold">
+                            <Heart className="w-3 h-3 fill-rose-500" /> {c.like_count}
+                          </span>
+                        )}
+                        <button
+                          onClick={() => {
+                            setReplyingToComment(c);
+                            setCommentReplyText(c.username ? `@${c.username} ` : '');
+                          }}
+                          className="text-[11px] font-bold text-pink-600 hover:text-pink-800 transition"
+                        >
+                          Reply
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Nested Replies */}
+                    {c.replies?.length > 0 && (
+                      <div className="ml-9 pl-3 border-l-2 border-slate-100 space-y-2 mt-2">
+                        {c.replies.map((r) => (
+                          <div key={r.id} className="text-xs">
+                            <div className="flex items-center gap-1.5 font-bold text-slate-900 text-[11px]">
+                              <span>{r.name && r.name !== r.username ? `${r.name} (@${r.username})` : `@${r.username || 'user'}`}</span>
+                              <span className="text-[9px] text-slate-400 font-normal">
+                                • {r.timestamp ? new Date(r.timestamp).toLocaleDateString() : ''}
+                              </span>
+                            </div>
+                            <p className="text-slate-600 text-[11px] mt-0.5">{r.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Reply / Comment Composer */}
+            <form onSubmit={handleSendCommentReply} className="p-3 border-t border-slate-100 bg-slate-50/50 space-y-2">
+              {replyingToComment && (
+                <div className="flex items-center justify-between text-[11px] text-pink-700 bg-pink-50 px-2.5 py-1 rounded-lg">
+                  <span>Replying to <strong>{replyingToComment.name || `@${replyingToComment.username}`}</strong></span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReplyingToComment(null);
+                      setCommentReplyText('');
+                    }}
+                    className="font-bold hover:underline"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder={replyingToComment ? `Write a reply to ${replyingToComment.username ? `@${replyingToComment.username}` : 'user'}...` : "Write a public comment on this post..."}
+                  value={commentReplyText}
+                  onChange={(e) => setCommentReplyText(e.target.value)}
+                  className="flex-1 text-xs px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-pink-500 bg-white"
+                />
+                <button
+                  type="submit"
+                  disabled={submittingComment || !commentReplyText.trim()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 text-white font-bold text-xs hover:from-pink-700 hover:to-purple-700 transition shadow-sm disabled:opacity-50"
+                >
+                  <Send className={`w-3.5 h-3.5 ${submittingComment ? 'animate-spin' : ''}`} />
+                  {replyingToComment ? 'Reply' : 'Comment'}
                 </button>
               </div>
             </form>

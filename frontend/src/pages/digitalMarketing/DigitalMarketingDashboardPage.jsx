@@ -67,6 +67,14 @@ const DigitalMarketingDashboardPage = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          <Link
+            to="/digital-marketing/instagram"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-pink-600 via-purple-600 to-blue-600 hover:opacity-90 text-white rounded-xl text-xs font-bold transition shadow-sm"
+          >
+            <Sparkles className="w-4 h-4" />
+            Universal Post (IG + FB)
+          </Link>
+
           <button
             onClick={fetchDashboardData}
             disabled={loading}

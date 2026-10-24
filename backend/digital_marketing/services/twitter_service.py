@@ -66,6 +66,8 @@ class TwitterService:
     @staticmethod
     def get_config():
         """Returns Twitter/X app credentials from environment."""
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
         client_id = os.getenv('TWITTER_CLIENT_ID', '').strip()
         client_secret = os.getenv('TWITTER_CLIENT_SECRET', '').strip()
         redirect_uri = os.getenv(
@@ -101,9 +103,11 @@ class TwitterService:
 
         code_verifier, code_challenge = cls.generate_pkce_pair()
 
-        signer = TimestampSigner(salt=cls.STATE_SALT)
-        payload = json.dumps({'user_id': user_id, 'code_verifier': code_verifier})
-        signed_state = signer.sign(payload)
+        from django.core import signing
+        signed_state = signing.dumps(
+            {'user_id': user_id, 'code_verifier': code_verifier},
+            salt=cls.STATE_SALT
+        )
 
         scopes = ['tweet.read', 'tweet.write', 'users.read', 'offline.access']
 
@@ -127,14 +131,23 @@ class TwitterService:
         """
         if not state:
             return False, ''
-        signer = TimestampSigner(salt=cls.STATE_SALT)
+        from django.core import signing
         try:
-            unsigned = signer.unsign(state, max_age=cls.STATE_MAX_AGE)
-            data = json.loads(unsigned)
+            data = signing.loads(state, salt=cls.STATE_SALT, max_age=cls.STATE_MAX_AGE)
             if data.get('user_id') == user_id:
                 return True, data.get('code_verifier', '')
+            logger.warning("Twitter state user mismatch: expected %s, got %s", user_id, data.get('user_id'))
             return False, ''
-        except (BadSignature, SignatureExpired, Exception) as exc:
+        except Exception as exc:
+            # Fallback to TimestampSigner if coming from an older state format
+            try:
+                signer = TimestampSigner(salt=cls.STATE_SALT)
+                unsigned = signer.unsign(state, max_age=cls.STATE_MAX_AGE)
+                data = json.loads(unsigned)
+                if data.get('user_id') == user_id:
+                    return True, data.get('code_verifier', '')
+            except Exception:
+                pass
             logger.warning("Twitter OAuth state verification failed: %s", exc)
             return False, ''
 
@@ -213,6 +226,12 @@ class TwitterService:
             if res.get('status_code') == 429:
                 raise ValueError("X API rate limit reached. Monthly or daily post quota may have been exceeded on this tier.")
             detail = res.get('detail') or res.get('title') or 'Failed to post tweet to X.'
+            if 'credits depleted' in str(detail).lower():
+                detail = (
+                    "Your X Developer account has 0 API credits remaining. "
+                    "Under X's credit system, you must add credits in your X Developer Portal (Billing > Credits) to publish live tweets, "
+                    "or uncheck 'Publish live' to save to your workspace."
+                )
             raise ValueError(detail)
 
         return res.get('data', {})

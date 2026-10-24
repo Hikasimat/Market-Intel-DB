@@ -75,6 +75,8 @@ class MetaService:
     @classmethod
     def get_config(cls, platform: str = 'INSTAGRAM'):
         """Returns configured Meta credentials or None if missing."""
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
         app_id = os.getenv('META_APP_ID', '').strip()
         app_secret = os.getenv('META_APP_SECRET', '').strip()
         redirect_uri = cls.get_redirect_uri(platform)
@@ -105,6 +107,8 @@ class MetaService:
             default_scopes = [
                 'instagram_basic',
                 'instagram_content_publish',
+                'instagram_manage_messages',
+                'instagram_manage_comments',
                 'pages_show_list',
                 'pages_read_engagement',
                 'business_management',
@@ -115,6 +119,8 @@ class MetaService:
             default_scopes = [
                 'pages_show_list',
                 'pages_read_engagement',
+                'pages_manage_posts',
+                'pages_messaging',
                 'business_management',
             ]
             env_scopes = os.getenv('META_FACEBOOK_SCOPES', '')
@@ -519,29 +525,49 @@ class MetaService:
         return pages
 
     @staticmethod
-    def publish_facebook_page_post(page_access_token: str, page_id: str, message: str, link: str = '') -> dict:
-        """Publishes post to authorized Facebook Page."""
-        url = f"{GRAPH_BASE_URL}/{page_id}/feed"
-        payload = {
-            'message': message,
-            'access_token': page_access_token,
-        }
-        if link:
-            payload['link'] = link
+    def publish_facebook_page_post(page_access_token: str, page_id: str, message: str, link: str = '', image_url: str = '') -> dict:
+        """Publishes post or photo to authorized Facebook Page."""
+        if image_url:
+            url = f"{GRAPH_BASE_URL}/{page_id}/photos"
+            payload = {
+                'url': image_url,
+                'caption': message,
+                'access_token': page_access_token,
+            }
+        else:
+            url = f"{GRAPH_BASE_URL}/{page_id}/feed"
+            payload = {
+                'message': message,
+                'access_token': page_access_token,
+            }
+            if link:
+                payload['link'] = link
 
         res = _http_request(url, method='POST', data=payload)
         if res.get('status_code', 200) != 200:
             err = res.get('error', {})
-            raise ValueError(err.get('message', 'Failed to publish post to Facebook Page.'))
+            error_message = err.get('message', 'Failed to publish post to Facebook Page.')
+            if 'Error validating access token' in error_message or err.get('code') == 190:
+                error_message = (
+                    "Your Facebook session has expired or was invalidated when permissions changed. "
+                    "Please click 'Disconnect Account' on this page and reconnect to renew your authorization."
+                )
+            elif 'pages_manage_posts' in error_message:
+                error_message = (
+                    "Meta requires 'pages_manage_posts' permission to publish posts to your Facebook Page. "
+                    "In developers.facebook.com under your app, add 'pages_manage_posts' to Use Cases / Permissions, "
+                    "then Disconnect and Reconnect Facebook."
+                )
+            raise ValueError(error_message)
         return res
 
     @staticmethod
     def fetch_facebook_page_posts(page_access_token: str, page_id: str) -> list:
-        """Fetches recent posts and reaction counts for authorized Facebook Page."""
-        url = f"{GRAPH_BASE_URL}/{page_id}/feed"
+        """Fetches recent posts, attachments, and reaction counts for authorized Facebook Page."""
+        url = f"{GRAPH_BASE_URL}/{page_id}/published_posts"
         params = {
-            'fields': 'id,message,created_time,permalink_url,shares,reactions.summary(true),comments.summary(true)',
-            'limit': 15,
+            'fields': 'id,message,created_time,permalink_url,shares,attachments{media,target,title,type,url}',
+            'limit': 25,
             'access_token': page_access_token,
         }
         res = _http_request(url, method='GET', params=params)
@@ -553,11 +579,16 @@ class MetaService:
             reactions_count = p.get('reactions', {}).get('summary', {}).get('total_count', 0)
             comments_count = p.get('comments', {}).get('summary', {}).get('total_count', 0)
             shares_count = p.get('shares', {}).get('count', 0)
+            attachments_data = p.get('attachments', {}).get('data', [])
+            image_url = ''
+            if attachments_data:
+                image_url = attachments_data[0].get('media', {}).get('image', {}).get('src', '')
             formatted.append({
                 'id': p.get('id'),
                 'message': p.get('message', ''),
                 'created_time': p.get('created_time'),
                 'permalink_url': p.get('permalink_url', ''),
+                'media_url': image_url,
                 'reactions_count': reactions_count,
                 'comments_count': comments_count,
                 'shares_count': shares_count,
@@ -607,3 +638,235 @@ class MetaService:
                 'ctr': insights.get('ctr', '0.000'),
             })
         return results
+
+    @staticmethod
+    def send_direct_message(page_access_token: str, recipient_id: str, text: str, media_url: str = '') -> dict:
+        """
+        Sends an outbound direct message or image to a customer via Meta Send API.
+        Works for both Facebook Messenger PSID and Instagram IGSID.
+        """
+        url = f"{GRAPH_BASE_URL}/me/messages"
+        params = {'access_token': page_access_token}
+
+        message_payload = {}
+        if text:
+            message_payload['text'] = text
+        if media_url:
+            message_payload['attachment'] = {
+                'type': 'image',
+                'payload': {'url': media_url, 'is_reusable': True}
+            }
+
+        body = {
+            'recipient': {'id': recipient_id},
+            'message': message_payload,
+            'messaging_type': 'RESPONSE',
+        }
+        headers = {'Content-Type': 'application/json'}
+        res = _http_request(url, method='POST', headers=headers, data=body, params=params)
+        if res.get('status_code', 200) != 200:
+            err = res.get('error', {})
+            error_message = err.get('message', 'Failed to send message.')
+            code = err.get('code')
+            subcode = err.get('error_subcode')
+            if code == 10 or subcode == 2018001 or '24' in error_message:
+                error_message = (
+                    "Meta standard 24-hour customer window has closed. "
+                    "You can only reply to a user within 24 hours of their last incoming message."
+                )
+            elif 'permission' in error_message.lower():
+                error_message = (
+                    "Missing messaging permission (pages_messaging or instagram_manage_messages). "
+                    "Please ensure messaging permissions are enabled in your Meta App."
+                )
+            raise ValueError(error_message)
+        return res
+
+    @staticmethod
+    def fetch_page_conversations(access_token: str, page_id: str, platform: str = 'FACEBOOK') -> list:
+        """
+        Fetches active conversation threads from Facebook Page or Instagram Business Account.
+        """
+        url = f"{GRAPH_BASE_URL}/{page_id}/conversations"
+        params = {
+            'fields': 'id,updated_time,participants,senders,unread_count,snippet,messages{id,message,created_time,from,attachments}',
+            'limit': 25,
+            'access_token': access_token,
+        }
+        if platform == 'INSTAGRAM':
+            params['platform'] = 'instagram'
+
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) != 200:
+            err = res.get('error', {})
+            msg = err.get('message', '')
+            logger.warning("Failed to fetch conversations for page %s: %s", page_id, err)
+            if 'instagram_manage_messages' in msg:
+                raise ValueError("Missing 'instagram_manage_messages' permission. Please disconnect and reconnect Instagram.")
+            elif 'pages_messaging' in msg:
+                raise ValueError("Missing 'pages_messaging' permission. Please disconnect and reconnect Facebook.")
+            return []
+        return res.get('data', [])
+
+    @staticmethod
+    def fetch_thread_messages(access_token: str, thread_id: str) -> list:
+        """
+        Fetches message history within a conversation thread.
+        """
+        url = f"{GRAPH_BASE_URL}/{thread_id}/messages"
+        params = {
+            'fields': 'id,created_time,from,to,message,attachments',
+            'limit': 50,
+            'access_token': access_token,
+        }
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) != 200:
+            logger.warning("Failed to fetch thread messages %s: %s", thread_id, res.get('error'))
+            return []
+        return res.get('data', [])
+
+    @staticmethod
+    def fetch_participant_info(access_token: str, participant_id: str, platform: str = 'FACEBOOK') -> dict:
+        """
+        Fetches participant name and avatar from Meta Graph API.
+        """
+        url = f"{GRAPH_BASE_URL}/{participant_id}"
+        fields = 'first_name,last_name,name,profile_pic' if platform == 'FACEBOOK' else 'name,username,profile_pic'
+        params = {
+            'fields': fields,
+            'access_token': access_token,
+        }
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) == 200:
+            name = res.get('name') or f"{res.get('first_name', '')} {res.get('last_name', '')}".strip() or res.get('username') or 'Customer'
+            return {
+                'name': name,
+                'username': res.get('username', ''),
+                'avatar_url': res.get('profile_pic', ''),
+            }
+        return {'name': 'Customer', 'username': '', 'avatar_url': ''}
+
+    @staticmethod
+    def fetch_instagram_profile_info(access_token: str, ig_user_id: str) -> dict:
+        """Fetches live follower count, following count, and media count."""
+        url = f"{GRAPH_BASE_URL}/{ig_user_id}"
+        params = {
+            'fields': 'id,username,name,followers_count,follows_count,media_count,profile_picture_url',
+            'access_token': access_token,
+        }
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) == 200:
+            return res
+        return {}
+
+    @staticmethod
+    def fetch_facebook_page_info(access_token: str, page_id: str) -> dict:
+        """Fetches live page followers and fan count."""
+        url = f"{GRAPH_BASE_URL}/{page_id}"
+        params = {
+            'fields': 'id,name,fan_count,followers_count,picture{url}',
+            'access_token': access_token,
+        }
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) == 200:
+            return res
+        return {}
+
+    @staticmethod
+    def fetch_media_comments(access_token: str, media_id: str, platform: str = 'INSTAGRAM') -> list:
+        """Fetches comments and replies for an Instagram or Facebook post."""
+        url = f"{GRAPH_BASE_URL}/{media_id}/comments"
+        if platform == 'INSTAGRAM':
+            params = {
+                'fields': 'id,text,timestamp,username,from,like_count,replies{id,text,timestamp,username,from,like_count}',
+                'limit': 50,
+                'access_token': access_token,
+            }
+        else:
+            params = {
+                'fields': 'id,message,created_time,from,like_count,comment_count',
+                'limit': 50,
+                'access_token': access_token,
+            }
+
+        res = _http_request(url, method='GET', params=params)
+        if res.get('status_code', 200) != 200:
+            err = res.get('error', {})
+            logger.warning("Failed to fetch comments for media %s: %s", media_id, err)
+            code = err.get('code')
+            msg = err.get('message', '')
+            if platform == 'INSTAGRAM' and (code in [10, 200] or 'permission' in msg.lower()):
+                raise ValueError(
+                    "Meta requires 'instagram_manage_comments' permission to view comments. "
+                    "Please click 'Disconnect' and 'Connect Live Instagram' to grant permissions."
+                )
+            return []
+
+        raw_comments = res.get('data', [])
+        formatted = []
+        for c in raw_comments:
+            replies_data = []
+            if 'replies' in c and isinstance(c['replies'], dict):
+                replies_data = c['replies'].get('data', [])
+
+            from_obj = c.get('from', {}) if isinstance(c.get('from'), dict) else {}
+            username = c.get('username') or from_obj.get('username') or from_obj.get('name') or ''
+            name = from_obj.get('name') or username or ('Instagram User' if platform == 'INSTAGRAM' else 'Facebook User')
+
+            formatted_replies = []
+            for r in replies_data:
+                r_from = r.get('from', {}) if isinstance(r.get('from'), dict) else {}
+                r_username = r.get('username') or r_from.get('username') or r_from.get('name') or ''
+                r_name = r_from.get('name') or r_username or ('Instagram User' if platform == 'INSTAGRAM' else 'Facebook User')
+                formatted_replies.append({
+                    'id': r.get('id'),
+                    'text': r.get('text') or r.get('message', ''),
+                    'username': r_username or r_name,
+                    'name': r_name,
+                    'timestamp': r.get('timestamp') or r.get('created_time'),
+                    'like_count': r.get('like_count', 0),
+                })
+
+            formatted.append({
+                'id': c.get('id'),
+                'text': c.get('text') or c.get('message', ''),
+                'username': username or name,
+                'name': name,
+                'has_username': bool(c.get('username') or from_obj.get('username')),
+                'timestamp': c.get('timestamp') or c.get('created_time'),
+                'like_count': c.get('like_count', 0),
+                'replies': formatted_replies,
+            })
+        return formatted
+
+    @staticmethod
+    def reply_to_comment(access_token: str, target_id: str, message: str, platform: str = 'INSTAGRAM', is_media: bool = False) -> dict:
+        """Publishes a public reply to a comment or a top-level comment to a post on Instagram or Facebook."""
+        if platform == 'INSTAGRAM':
+            endpoint = 'comments' if is_media else 'replies'
+        else:
+            endpoint = 'comments'
+
+        url = f"{GRAPH_BASE_URL}/{target_id}/{endpoint}"
+        params = {'access_token': access_token}
+        data = {'message': message}
+        res = _http_request(url, method='POST', data=data, params=params)
+        if res.get('status_code', 200) != 200:
+            err = res.get('error', {})
+            error_message = err.get('message', 'Failed to publish comment reply.')
+            code = err.get('code')
+            if 'Missing Permission' in error_message or code in [10, 100, 200] or 'permission' in error_message.lower():
+                if platform == 'INSTAGRAM':
+                    error_message = (
+                        "Meta requires 'instagram_manage_comments' permission to see commenter names and post replies. "
+                        "Please click 'Disconnect Account' on the Instagram page, then click 'Connect Live Instagram' "
+                        "to grant the updated comment permissions."
+                    )
+                else:
+                    error_message = (
+                        "Meta Graph API requires App Review approval to publish comments to Facebook Page posts via API. "
+                        "Please use 'View on Facebook' to reply directly on Facebook."
+                    )
+            raise ValueError(error_message)
+        return res
+

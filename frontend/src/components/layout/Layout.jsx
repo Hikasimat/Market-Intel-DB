@@ -3,7 +3,7 @@ import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { toast } from 'react-toastify';
 import SearchableSelect from '../common/SearchableSelect';
-import { LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, Building2 } from 'lucide-react';
+import { LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, MessageSquare, Building2 } from 'lucide-react';
 import { logout, loginSuccess } from '../../features/auth/authSlice';
 import api from '../../services/api';
 import { store } from '../../app/store';
@@ -134,6 +134,7 @@ const Layout = () => {
   } else if (user?.role === 'DM') {
     navItems.push(
       { path: '/digital-marketing', label: 'Dashboard', icon: LayoutDashboard },
+      { path: '/digital-marketing/messages', label: 'Messages', icon: MessageSquare },
       { path: '/digital-marketing/instagram', label: 'Instagram', icon: InstagramIcon },
       { path: '/digital-marketing/facebook', label: 'Facebook', icon: FacebookIcon },
       { path: '/digital-marketing/twitter', label: 'Twitter / X', icon: TwitterXIcon },

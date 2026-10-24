@@ -171,3 +171,88 @@ class AdCampaign(models.Model):
 
     def __str__(self):
         return f"{self.get_platform_display()} - {self.name} ({self.status})"
+
+
+class ConversationThread(models.Model):
+    """
+    Represents an ongoing Direct Message conversation with a customer / follower
+    across Instagram Direct or Facebook Messenger.
+    """
+    PLATFORM_CHOICES = (
+        ('INSTAGRAM', 'Instagram'),
+        ('FACEBOOK', 'Facebook'),
+    )
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='dm_conversations')
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    account_connection = models.ForeignKey(
+        SocialAccountConnection,
+        on_delete=models.CASCADE,
+        related_name='conversations'
+    )
+    # The external conversation/thread ID from Meta or the recipient ID (PSID/IGSID)
+    external_thread_id = models.CharField(max_length=255)
+    participant_id = models.CharField(max_length=255)  # Customer PSID or IGSID
+    participant_name = models.CharField(max_length=255, blank=True, default='Customer')
+    participant_username = models.CharField(max_length=255, blank=True, default='')
+    participant_avatar_url = models.URLField(max_length=1000, blank=True, default='')
+
+    last_message_text = models.TextField(blank=True, default='')
+    last_message_at = models.DateTimeField(null=True, blank=True)
+    unread_count = models.PositiveIntegerField(default=0)
+    is_archived = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-last_message_at', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'platform', 'external_thread_id'],
+                name='uniq_user_platform_thread'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.get_platform_display()} Thread - {self.participant_name or self.participant_id}"
+
+
+class DirectMessage(models.Model):
+    """
+    Individual message sent or received within a ConversationThread.
+    """
+    SENDER_CHOICES = (
+        ('CUSTOMER', 'Customer'),
+        ('BUSINESS', 'Business'),
+    )
+    DELIVERY_STATUS_CHOICES = (
+        ('SENT', 'Sent'),
+        ('DELIVERED', 'Delivered'),
+        ('READ', 'Read'),
+        ('FAILED', 'Failed'),
+    )
+
+    thread = models.ForeignKey(ConversationThread, on_delete=models.CASCADE, related_name='messages')
+    external_message_id = models.CharField(max_length=255, blank=True, default='')
+    sender_type = models.CharField(max_length=20, choices=SENDER_CHOICES)
+    sender_id = models.CharField(max_length=255, blank=True, default='')
+    sender_name = models.CharField(max_length=255, blank=True, default='')
+
+    text = models.TextField(blank=True, default='')
+    media_url = models.URLField(max_length=1000, blank=True, default='')
+    media_type = models.CharField(max_length=50, blank=True, default='text')
+
+    timestamp = models.DateTimeField()
+    is_read = models.BooleanField(default=False)
+    delivery_status = models.CharField(max_length=20, choices=DELIVERY_STATUS_CHOICES, default='SENT')
+    error_message = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['timestamp', 'created_at']
+
+    def __str__(self):
+        return f"[{self.sender_type}] {self.text[:30]}"
+

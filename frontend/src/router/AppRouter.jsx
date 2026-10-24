@@ -32,6 +32,7 @@ import InstagramPage from '../pages/digitalMarketing/InstagramPage';
 import FacebookPage from '../pages/digitalMarketing/FacebookPage';
 import TwitterPage from '../pages/digitalMarketing/TwitterPage';
 import AdsInsightsPage from '../pages/digitalMarketing/AdsInsightsPage';
+import SocialMessagesPage from '../pages/digitalMarketing/SocialMessagesPage';
 
 import Layout from '../components/layout/Layout';
 
@@ -151,6 +152,7 @@ const AppRouter = () => {
 
           {/* ── Digital Marketing Workspace ────────────────────────────── */}
           <Route path="digital-marketing" element={<RoleRoute allowedRoles={['DM']}><DigitalMarketingDashboardPage /></RoleRoute>} />
+          <Route path="digital-marketing/messages" element={<RoleRoute allowedRoles={['DM']}><SocialMessagesPage /></RoleRoute>} />
           <Route path="digital-marketing/instagram" element={<RoleRoute allowedRoles={['DM']}><InstagramPage /></RoleRoute>} />
           <Route path="digital-marketing/facebook" element={<RoleRoute allowedRoles={['DM']}><FacebookPage /></RoleRoute>} />
           <Route path="digital-marketing/twitter" element={<RoleRoute allowedRoles={['DM']}><TwitterPage /></RoleRoute>} />

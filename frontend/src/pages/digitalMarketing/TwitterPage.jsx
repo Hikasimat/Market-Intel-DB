@@ -27,6 +27,7 @@ const TwitterPage = () => {
   const [isTweetModalOpen, setIsTweetModalOpen] = useState(false);
   const [tweeting, setTweeting] = useState(false);
   const [tweetText, setTweetText] = useState('');
+  const [publishLive, setPublishLive] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
 
   const location = useLocation();
@@ -123,8 +124,11 @@ const TwitterPage = () => {
 
     setTweeting(true);
     try {
-      await api.post('/digital-marketing/twitter/tweets/', { text: tweetText });
-      toast.success('Tweet posted successfully to X!');
+      const res = await api.post('/digital-marketing/twitter/tweets/', { 
+        text: tweetText,
+        publish_live: publishLive 
+      });
+      toast.success(res.data.detail || 'Tweet saved successfully!');
       setIsTweetModalOpen(false);
       setTweetText('');
       fetchTweets();
@@ -390,6 +394,24 @@ const TwitterPage = () => {
                     {280 - tweetText.length} left
                   </span>
                 </div>
+              </div>
+
+              <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <input
+                  type="checkbox"
+                  id="publishLiveTwitter"
+                  checked={publishLive}
+                  onChange={(e) => setPublishLive(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 text-slate-900 rounded border-slate-300 focus:ring-slate-900 cursor-pointer"
+                />
+                <label htmlFor="publishLiveTwitter" className="text-xs text-slate-700 cursor-pointer">
+                  <span className="font-bold text-slate-900">
+                    Publish live to connected X account {account?.account_username ? `(@${account.account_username})` : ''}
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Requires API credits on X Developer Portal. Uncheck to save directly to your workspace feed.
+                  </p>
+                </label>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-3">
