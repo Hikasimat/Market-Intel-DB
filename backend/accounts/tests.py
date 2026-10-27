@@ -61,7 +61,7 @@ class AccountsTestCase(APITestCase):
     def test_user_me_get(self):
         """Test retrieving current user's profile details."""
         self.client.force_authenticate(user=self.lq_user)
-        url = '/api/accounts/users/me/'
+        url = '/api/auth/me/'
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['email'], 'lq@example.com')
@@ -71,7 +71,7 @@ class AccountsTestCase(APITestCase):
     def test_user_me_patch_timezone(self):
         """Test updating user's timezone."""
         self.client.force_authenticate(user=self.pre_user)
-        url = '/api/accounts/users/me/'
+        url = '/api/auth/me/'
         response = self.client.patch(url, {'timezone': 'Europe/London'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['timezone'], 'Europe/London')
@@ -81,14 +81,14 @@ class AccountsTestCase(APITestCase):
     def test_user_me_patch_invalid_timezone(self):
         """Test updating user's timezone with invalid timezone."""
         self.client.force_authenticate(user=self.pre_user)
-        url = '/api/accounts/users/me/'
+        url = '/api/auth/me/'
         response = self.client.patch(url, {'timezone': 'Invalid/Timezone'})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_manager_cannot_create_superuser(self):
         """Test that a Manager cannot create a superuser."""
         self.client.force_authenticate(user=self.manager_user)
-        url = '/api/accounts/users/'
+        url = '/api/auth/users/'
         data = {
             'username': 'newsuper@example.com',
             'email': 'newsuper@example.com',
@@ -103,7 +103,7 @@ class AccountsTestCase(APITestCase):
     def test_manager_create_normal_user(self):
         """Test that a Manager can create a normal user."""
         self.client.force_authenticate(user=self.manager_user)
-        url = '/api/accounts/users/'
+        url = '/api/auth/users/'
         data = {
             'email': 'newlq@example.com',
             'password': 'password123',
@@ -118,14 +118,14 @@ class AccountsTestCase(APITestCase):
     def test_manager_cannot_delete_user(self):
         """Test that a Manager cannot delete users."""
         self.client.force_authenticate(user=self.manager_user)
-        url = f'/api/accounts/users/{self.pre_user.id}/'
+        url = f'/api/auth/users/{self.pre_user.id}/'
         response = self.client.delete(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_mail_account_creation(self):
         """Test creating a MailAccount encrypts passwords."""
         self.client.force_authenticate(user=self.lq_user)
-        url = '/api/accounts/mail-accounts/'
+        url = '/api/auth/mail-account/'
         data = {
             'name': 'Support',
             'email_address': 'support@example.com',
@@ -146,17 +146,25 @@ class AccountsTestCase(APITestCase):
     def test_pre_user_cannot_access_users_api(self):
         """Test that a PRE user gets 403 on the users endpoint."""
         self.client.force_authenticate(user=self.pre_user)
-        url = '/api/accounts/users/'
+        url = '/api/auth/users/'
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_send_email_action_with_template_and_attachments(self):
         """Test send-email endpoint with template, Cc, Bcc, and file attachments."""
         from django.core.files.uploadedfile import SimpleUploadedFile
-        from accounts.models import EmailTemplate
+        from accounts.models import EmailTemplate, GoogleMailCredentials
+        import utils.encryption as encryption
         from unittest.mock import patch
 
         self.client.force_authenticate(user=self.lq_user)
+        GoogleMailCredentials.objects.create(
+            user=self.lq_user,
+            email=self.lq_user.email,
+            access_token_encrypted=encryption.encrypt_password('dummy_access_token'),
+            refresh_token_encrypted=encryption.encrypt_password('dummy_refresh_token'),
+            is_active=True
+        )
         tpl = EmailTemplate.objects.create(
             name='Inbox Test Template',
             subject='Welcome to our company',

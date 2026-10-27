@@ -21,8 +21,10 @@ IMPORTANT:
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -78,6 +80,42 @@ def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
         _logging.getLogger(__name__).error('Failed to save media URL for message %s: %s', wa_message.waha_message_id, e)
 
 
+def _is_ssrf_safe_url(url: str, allowed_base: str) -> bool:
+    """
+    Returns True only if *url* is safe to fetch:
+    - Scheme must be http or https.
+    - Hostname must resolve to a public, non-RFC-1918 IP address.
+    - Allows any URL whose hostname matches the configured WHATSAPP_SERVICE_URL host.
+    """
+    _PRIVATE_NETWORKS = [
+        ipaddress.ip_network('10.0.0.0/8'),
+        ipaddress.ip_network('172.16.0.0/12'),
+        ipaddress.ip_network('192.168.0.0/16'),
+        ipaddress.ip_network('127.0.0.0/8'),
+        ipaddress.ip_network('169.254.0.0/16'),  # link-local / cloud metadata
+        ipaddress.ip_network('::1/128'),
+        ipaddress.ip_network('fc00::/7'),
+    ]
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        hostname = parsed.hostname or ''
+        # Always allow the configured WAHA server
+        allowed_host = urllib.parse.urlparse(allowed_base).hostname or ''
+        if hostname == allowed_host:
+            return True
+        # Resolve hostname and check against private ranges
+        ip_str = socket.gethostbyname(hostname)
+        ip_obj = ipaddress.ip_address(ip_str)
+        for net in _PRIVATE_NETWORKS:
+            if ip_obj in net:
+                return False
+        return True
+    except Exception:
+        return False  # if we cannot resolve, block it
+
+
 def _download_and_save_media_bg(message_id, session_name: str, media_url: str = None, mime_type: str = None):
     """Download media from WAHA and store it locally in Django media directory."""
     from whatsapp.models import WhatsAppMessage
@@ -107,6 +145,20 @@ def _download_and_save_media_bg(message_id, session_name: str, media_url: str = 
         urls_to_try.append(f'{waha_url}/api/messages/{urllib.parse.quote(wa_message.waha_message_id)}/download?session={urllib.parse.quote(session_name)}')
 
     for url in urls_to_try:
+        # SSRF guard: block any URL that resolves to a private/internal IP address
+        if not _is_ssrf_safe_url(url, waha_url):
+            _logging.getLogger(__name__).warning(
+                'SSRF guard blocked media fetch from disallowed URL: %s (message %s)',
+                url, wa_message.waha_message_id,
+            )
+            try:
+                WhatsAppSafetyEvent.objects.create(
+                    event_type='SSRF_BLOCKED',
+                    details=f'Blocked outbound media fetch to: {url}',
+                )
+            except Exception:
+                pass
+            continue
         try:
             req = urllib.request.Request(url)
             if api_key:
@@ -583,28 +635,38 @@ def _handle_incoming_message(
         # If conversation exists but is unmatched, attempt to match against ProspectContact
         if not is_matched and search_digits and len(search_digits) >= 8:
             from prospects.models import ProspectContact
-            for contact in ProspectContact.objects.filter(
-                phone_number__isnull=False
-            ).select_related("prospect"):
-                stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                if stored_digits and (
-                    stored_digits == search_digits
-                    or (len(search_digits) >= 10 and stored_digits.endswith(search_digits[-10:]))
-                    or (len(stored_digits) >= 10 and search_digits.endswith(stored_digits[-10:]))
-                ):
-                    conversation.prospect_contact = contact
-                    conversation.prospect = contact.prospect
-                    conversation.is_matched = True
-                    is_matched = True
-                    prospect_contact = contact
-                    if not conversation.phone_number and contact.phone_number:
-                        conversation.phone_number = contact.phone_number
-                        conv_updates.append("phone_number")
-                    if not conversation.whatsapp_name:
-                        conversation.whatsapp_name = contact.contact_name
-                        conv_updates.append("whatsapp_name")
-                    conv_updates.extend(["prospect_contact", "prospect", "is_matched"])
-                    break
+            suffix = search_digits[-10:] if len(search_digits) >= 10 else search_digits[-8:]
+            matched_c = (
+                ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                .select_related("prospect")
+                .first()
+            )
+            if not matched_c:
+                for contact in ProspectContact.objects.filter(
+                    phone_number__icontains=suffix
+                ).select_related("prospect"):
+                    stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
+                    if stored_digits and (
+                        stored_digits == search_digits
+                        or (len(search_digits) >= 10 and stored_digits.endswith(search_digits[-10:]))
+                        or (len(stored_digits) >= 10 and search_digits.endswith(stored_digits[-10:]))
+                    ):
+                        matched_c = contact
+                        break
+            if matched_c:
+                contact = matched_c
+                conversation.prospect_contact = contact
+                conversation.prospect = contact.prospect
+                conversation.is_matched = True
+                is_matched = True
+                prospect_contact = contact
+                if not conversation.phone_number and contact.phone_number:
+                    conversation.phone_number = contact.phone_number
+                    conv_updates.append("phone_number")
+                if not conversation.whatsapp_name:
+                    conversation.whatsapp_name = contact.contact_name
+                    conv_updates.append("whatsapp_name")
+                conv_updates.extend(["prospect_contact", "prospect", "is_matched"])
 
         if conv_updates:
             conversation.save(update_fields=list(set(conv_updates)))
@@ -615,13 +677,20 @@ def _handle_incoming_message(
 
         matched_contact = None
         if search_digits and len(search_digits) >= 8:
-            for contact in ProspectContact.objects.filter(
-                phone_number__isnull=False
-            ).select_related("prospect"):
-                stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                if stored_digits and (stored_digits == search_digits or stored_digits.endswith(search_digits[-10:])):
-                    matched_contact = contact
-                    break
+            suffix = search_digits[-10:] if len(search_digits) >= 10 else search_digits[-8:]
+            matched_contact = (
+                ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                .select_related("prospect")
+                .first()
+            )
+            if not matched_contact:
+                for contact in ProspectContact.objects.filter(
+                    phone_number__icontains=suffix
+                ).select_related("prospect"):
+                    stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
+                    if stored_digits and (stored_digits == search_digits or stored_digits.endswith(search_digits[-10:])):
+                        matched_contact = contact
+                        break
 
         with transaction.atomic():
             session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)

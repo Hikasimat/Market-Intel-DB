@@ -15,8 +15,12 @@ def make_user(username, role=None, is_superuser=False):
         is_staff=is_superuser,
     )
     if role:
-        UserProfile.objects.create(user=user, role=role)
+        # The post_save signal on User already created a UserProfile.
+        # Update the existing profile instead of creating a duplicate.
+        user.profile.role = role
+        user.profile.save()
     return user
+
 
 
 def make_event(title='Test Event', country='US'):

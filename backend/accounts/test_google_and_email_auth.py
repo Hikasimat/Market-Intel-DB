@@ -456,11 +456,24 @@ class GoogleAndEmailAuthTests(TestCase):
             is_active=True
         )
 
-        # Authenticate as pre_user
-        self.client.force_authenticate(user=self.pre_user)
+        # Another LQ user cannot see lq_user's Gmail credentials
+        other_lq = User.objects.create_user(
+            username='other_lq@marketintel.com',
+            email='other_lq@marketintel.com',
+            password='Password123!'
+        )
+        other_lq.profile.role = 'LQ'
+        other_lq.profile.save()
+
+        self.client.force_authenticate(user=other_lq)
         res = self.client.get('/api/auth/google/gmail/status/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertFalse(res.data['is_connected'])
+
+        # PRE user is denied completely
+        self.client.force_authenticate(user=self.pre_user)
+        res_pre = self.client.get('/api/auth/google/gmail/status/')
+        self.assertEqual(res_pre.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_login_throttling_is_enforced(self):
         """Verify login endpoint rate throttle (5 requests/minute)."""

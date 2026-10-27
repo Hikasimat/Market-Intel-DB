@@ -93,10 +93,19 @@ class ProspectContact(models.Model):
     designation = models.CharField(max_length=255, blank=True, null=True)
     official_email = models.EmailField(blank=True, null=True)
     phone_number = models.CharField(max_length=255, blank=True, null=True)
+    phone_digits = models.CharField(max_length=50, blank=True, null=True, db_index=True)
     linkedin_profile = models.URLField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if self.phone_number:
+            import re
+            self.phone_digits = re.sub(r"\D+", "", str(self.phone_number))
+        else:
+            self.phone_digits = None
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.contact_name} ({self.prospect.company_name})"

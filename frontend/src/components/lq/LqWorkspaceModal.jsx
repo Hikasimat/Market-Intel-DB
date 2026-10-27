@@ -18,7 +18,8 @@ import {
   Activity,
   RefreshCw,
   Send,
-  AlertCircle
+  AlertCircle,
+  Zap
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';

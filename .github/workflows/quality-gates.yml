@@ -1,0 +1,416 @@
+name: Quality Gates
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - fix-architecture-security
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'fix/**'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'qa_reports/**'
+  pull_request:
+    branches:
+      - main
+      - master
+      - fix-architecture-security
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'qa_reports/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # 1. Backend Test Job (Django test suite against disposable PostgreSQL CI DB)
+  # ============================================================================
+  backend-tests:
+    name: Backend Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: marketintel_test
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          check-latest: false
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run Django System Checks
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_test
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+        run: |
+          python manage.py check
+
+      - name: Check Migration Consistency (No Drift)
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_test
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+        run: |
+          python manage.py makemigrations --check --dry-run
+
+      - name: Run Complete Django Test Suite
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_test
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+        run: |
+          python manage.py test --verbosity 2
+
+  # ============================================================================
+  # 2. Frontend Quality Job (Static analysis, lint, and production bundle build)
+  # ============================================================================
+  frontend-quality:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+
+      - name: Static Analysis & Lint (oxlint)
+        working-directory: frontend
+        run: |
+          npm run lint
+
+      - name: Production Bundle Build (Vite)
+        working-directory: frontend
+        run: |
+          npm run build
+
+      - name: Verify Build Output
+        working-directory: frontend
+        run: |
+          test -d dist
+          test -f dist/index.html
+          echo "Frontend build successfully generated in dist/"
+
+  # ============================================================================
+  # 3. Smoke Test Job (Startup, routing, health, auth security, and synthetic CRUD)
+  # ============================================================================
+  smoke-tests:
+    name: Backend Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: marketintel_smoke
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          check-latest: false
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Apply Database Migrations
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_smoke
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+        run: |
+          python manage.py migrate --noinput
+
+      - name: Run Backend Smoke Tests
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_smoke
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+        run: |
+          python smoke_test.py
+
+  # ============================================================================
+  # 4. Database Integrity Job (Migration execution & drift detection)
+  # ============================================================================
+  database-integrity:
+    name: Database & Migration Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: marketintel_migration_check
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          check-latest: false
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Check for Uncommitted Model Changes (Drift)
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_migration_check
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+        run: |
+          python manage.py makemigrations --check --dry-run
+
+      - name: Verify Clean Migration Execution
+        working-directory: backend
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_migration_check
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'false'
+          DATABASE_URL: ''
+        run: |
+          python manage.py migrate --noinput
+
+  # ============================================================================
+  # 5. Security Job (pip-audit, npm audit, bandit AST, gitleaks, deploy check)
+  # ============================================================================
+  security-scans:
+    name: Security & Vulnerability Audits
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository (full history for secret scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          check-latest: false
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+
+      - name: Install Security Tools & Dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit bandit -r backend/requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+
+      - name: Frontend Dependency Vulnerability Audit
+        working-directory: frontend
+        run: |
+          npm audit --audit-level=high
+
+      - name: Python Dependency Vulnerability Audit (pip-audit)
+        run: |
+          pip-audit -r backend/requirements.txt --desc
+
+      - name: Python Static Security Analysis (Bandit)
+        run: |
+          bandit -r backend/ -ll -x backend/settings_sqlite_test.py,backend/accounts/tests.py,backend/whatsapp/tests.py,backend/market_events/tests.py,backend/digital_marketing/tests.py,backend/prospects/tests.py,backend/prospects/test_*.py,backend/accounts/test_*.py
+
+      - name: Secret Scanning (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false
+
+      - name: Django Production Deployment Security Check
+        working-directory: backend
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings
+          SECRET_KEY: 'ci-synthetic-production-deployment-check-secret-key-32-chars!'
+          DEBUG: 'false'
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: marketintel_test
+          DB_USER: runner
+          DB_PASSWORD: runner_test_password
+          DB_SSL_REQUIRE: 'true'
+          DATABASE_URL: ''
+          ALLOWED_HOSTS: 'api.marketintel.com,localhost,127.0.0.1'
+          SECURE_HSTS_SECONDS: '31536000'
+          SECURE_SSL_REDIRECT: 'true'
+          SESSION_COOKIE_SECURE: 'true'
+          CSRF_COOKIE_SECURE: 'true'
+        run: |
+          python manage.py check --deploy
+
+  # ============================================================================
+  # 6. Quality Gate Summary (Branch Protection Aggregate Status Check)
+  # ============================================================================
+  quality-gate:
+    name: Quality Gate Summary
+    needs:
+      - backend-tests
+      - frontend-quality
+      - smoke-tests
+      - database-integrity
+      - security-scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify All Quality Gates Passed
+        run: |
+          echo "============================================================"
+          echo "MarketIntel CI Quality Gates: ALL GATES PASSED"
+          echo "  - Backend Test Suite: PASSED"
+          echo "  - Frontend Lint & Build: PASSED"
+          echo "  - Backend Smoke Tests: PASSED"
+          echo "  - Database & Migration Integrity: PASSED"
+          echo "  - Security & Vulnerability Audits: PASSED"
+          echo "============================================================"

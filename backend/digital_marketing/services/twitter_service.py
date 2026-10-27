@@ -102,8 +102,6 @@ class TwitterService:
             if origin:
                 return f"{origin.rstrip('/')}/digital-marketing/twitter"
 
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
         env_uri = os.getenv('TWITTER_REDIRECT_URI', '').strip()
         if env_uri:
             return env_uri
@@ -114,8 +112,6 @@ class TwitterService:
     @classmethod
     def get_config(cls, request=None, custom_redirect_uri: str = None):
         """Returns Twitter/X app credentials from environment."""
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
         client_id = os.getenv('TWITTER_CLIENT_ID', '').strip()
         client_secret = os.getenv('TWITTER_CLIENT_SECRET', '').strip()
         redirect_uri = cls.get_redirect_uri(request=request, custom_redirect_uri=custom_redirect_uri)

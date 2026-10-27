@@ -3,6 +3,7 @@ from django.urls import path, include
 from django.shortcuts import redirect
 from django.conf import settings
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from rest_framework.permissions import IsAdminUser
 
 
 def redirect_to_frontend(request, route_path=''):
@@ -26,10 +27,30 @@ urlpatterns = [
     path('digital-marketing/<path:route_path>', redirect_to_frontend),
     path('auth/<path:route_path>', redirect_to_frontend),
 
-    # API Documentation
-    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
-    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
-    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
+    # API Documentation (Restricted to admin users in production)
+    path(
+        'api/schema/',
+        SpectacularAPIView.as_view(
+            permission_classes=[IsAdminUser] if not getattr(settings, 'DEBUG', False) else []
+        ),
+        name='schema',
+    ),
+    path(
+        'api/docs/',
+        SpectacularSwaggerView.as_view(
+            url_name='schema',
+            permission_classes=[IsAdminUser] if not getattr(settings, 'DEBUG', False) else []
+        ),
+        name='swagger-ui',
+    ),
+    path(
+        'api/redoc/',
+        SpectacularRedocView.as_view(
+            url_name='schema',
+            permission_classes=[IsAdminUser] if not getattr(settings, 'DEBUG', False) else []
+        ),
+        name='redoc',
+    ),
 ]
 
 from django.conf.urls.static import static

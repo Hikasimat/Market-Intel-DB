@@ -585,6 +585,7 @@ class WhatsAppSafetyEvent(models.Model):
         SESSION_FAILURE = "SESSION_FAILURE", "Session Failure"
         CONSECUTIVE_FAILURES = "CONSECUTIVE_FAILURES", "Consecutive Failures"
         ADMIN_EMERGENCY_STOP = "ADMIN_EMERGENCY_STOP", "Admin Emergency Stop"
+        SSRF_BLOCKED = "SSRF_BLOCKED", "SSRF Blocked Media Fetch"
 
     event_type = models.CharField(max_length=30, choices=EventType.choices)
 

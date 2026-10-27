@@ -1,38 +1,45 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { loginSuccess, logout } from '../features/auth/authSlice';
 import api from '../services/api';
-import LoginPage from '../pages/LoginPage';
-import PreDashboardPage from '../pages/PreDashboardPage';
-import ProspectsPage from '../pages/ProspectsPage';
-import MarketEventsPage from '../pages/MarketEventsPage';
-import MarketEventDetailPage from '../pages/MarketEventDetailPage';
-import InboxPage from '../pages/InboxPage';
-import ProspectDetailPage from '../pages/ProspectDetailPage';
-import GovernmentEntitiesPage from '../pages/GovernmentEntitiesPage';
-import ImportPreviewPage from '../pages/ImportPreviewPage';
-import LqPipelinePage from '../pages/LqPipelinePage';
-import LqPipelineDetailPage from '../pages/LqPipelineDetailPage';
-import KeyPeoplePage from '../pages/KeyPeoplePage';
-import KeyPersonDetailPage from '../pages/KeyPersonDetailPage';
-import UserManagementPage from '../pages/UserManagementPage';
-import PreTasksPage from '../pages/PreTasksPage';
-import OutreachActivityDetailPage from '../pages/OutreachActivityDetailPage';
-import LqCalendarPage from '../pages/LqCalendarPage';
-import ManagerDashboardPage from '../pages/ManagerDashboardPage';
-import ManagerAuditPage from '../pages/ManagerAuditPage';
-import WhatsappPage from '../pages/WhatsappPage';
-import SettingsPage from '../pages/SettingsPage';
-import GmailCallbackPage from '../pages/GmailCallbackPage';
-import CalendarCallbackPage from '../pages/CalendarCallbackPage';
 
-import DigitalMarketingDashboardPage from '../pages/digitalMarketing/DigitalMarketingDashboardPage';
-import InstagramPage from '../pages/digitalMarketing/InstagramPage';
-import FacebookPage from '../pages/digitalMarketing/FacebookPage';
-import TwitterPage from '../pages/digitalMarketing/TwitterPage';
-import AdsInsightsPage from '../pages/digitalMarketing/AdsInsightsPage';
-import SocialMessagesPage from '../pages/digitalMarketing/SocialMessagesPage';
+const LoginPage = lazy(() => import('../pages/LoginPage'));
+const PreDashboardPage = lazy(() => import('../pages/PreDashboardPage'));
+const ProspectsPage = lazy(() => import('../pages/ProspectsPage'));
+const MarketEventsPage = lazy(() => import('../pages/MarketEventsPage'));
+const MarketEventDetailPage = lazy(() => import('../pages/MarketEventDetailPage'));
+const InboxPage = lazy(() => import('../pages/InboxPage'));
+const ProspectDetailPage = lazy(() => import('../pages/ProspectDetailPage'));
+const GovernmentEntitiesPage = lazy(() => import('../pages/GovernmentEntitiesPage'));
+const ImportPreviewPage = lazy(() => import('../pages/ImportPreviewPage'));
+const LqPipelinePage = lazy(() => import('../pages/LqPipelinePage'));
+const LqPipelineDetailPage = lazy(() => import('../pages/LqPipelineDetailPage'));
+const KeyPeoplePage = lazy(() => import('../pages/KeyPeoplePage'));
+const KeyPersonDetailPage = lazy(() => import('../pages/KeyPersonDetailPage'));
+const UserManagementPage = lazy(() => import('../pages/UserManagementPage'));
+const PreTasksPage = lazy(() => import('../pages/PreTasksPage'));
+const OutreachActivityDetailPage = lazy(() => import('../pages/OutreachActivityDetailPage'));
+const LqCalendarPage = lazy(() => import('../pages/LqCalendarPage'));
+const ManagerDashboardPage = lazy(() => import('../pages/ManagerDashboardPage'));
+const ManagerAuditPage = lazy(() => import('../pages/ManagerAuditPage'));
+const WhatsappPage = lazy(() => import('../pages/WhatsappPage'));
+const SettingsPage = lazy(() => import('../pages/SettingsPage'));
+const GmailCallbackPage = lazy(() => import('../pages/GmailCallbackPage'));
+const CalendarCallbackPage = lazy(() => import('../pages/CalendarCallbackPage'));
+
+const DigitalMarketingDashboardPage = lazy(() => import('../pages/digitalMarketing/DigitalMarketingDashboardPage'));
+const InstagramPage = lazy(() => import('../pages/digitalMarketing/InstagramPage'));
+const FacebookPage = lazy(() => import('../pages/digitalMarketing/FacebookPage'));
+const TwitterPage = lazy(() => import('../pages/digitalMarketing/TwitterPage'));
+const AdsInsightsPage = lazy(() => import('../pages/digitalMarketing/AdsInsightsPage'));
+const SocialMessagesPage = lazy(() => import('../pages/digitalMarketing/SocialMessagesPage'));
+
+const PageSpinner = () => (
+  <div className="min-h-[50vh] flex items-center justify-center">
+    <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+  </div>
+);
 
 import Layout from '../components/layout/Layout';
 
@@ -83,83 +90,85 @@ const AppRouter = () => {
 
   return (
     <Router>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/auth/google/callback" element={<LoginPage />} />
-        <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
-        <Route path="/auth/calendar/callback" element={<CalendarCallbackPage />} />
-        
-        {/* ── Manager routes ────────────────────────────────── */}
-        <Route path="/manager-dashboard" element={
-          <RoleRoute allowedRoles={['MANAGER']}><Layout /></RoleRoute>
-        }>
-          <Route index element={<ManagerDashboardPage />} />
-        </Route>
-
-        {/* ── PRE / LQ / Manager / DM shared routes ─────────────── */}
-        <Route path="/" element={
-          <RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER', 'DM']}><Layout /></RoleRoute>
-        }>
-          {/* Default redirect by role */}
-          <Route index element={
-            user?.role === 'LQ'
-              ? <Navigate to="/lq-pipeline" replace />
-              : user?.role === 'MANAGER'
-              ? <Navigate to="/manager-dashboard" replace />
-              : user?.role === 'DM'
-              ? <Navigate to="/digital-marketing" replace />
-              : <Navigate to="/dashboard" replace />
-          } />
+      <Suspense fallback={<PageSpinner />}>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/auth/google/callback" element={<LoginPage />} />
+          <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
+          <Route path="/auth/calendar/callback" element={<CalendarCallbackPage />} />
           
-          <Route path="dashboard" element={<RoleRoute allowedRoles={['PRE']}><PreDashboardPage /></RoleRoute>} />
-          
-          {/* Prospects — PRE full, MANAGER read-only, LQ can view detail of assigned prospects */}
-          <Route path="prospects" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectsPage /></RoleRoute>} />
-          <Route path="prospects/import-preview" element={<RoleRoute allowedRoles={['PRE']}><ImportPreviewPage /></RoleRoute>} />
-          <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
+          {/* ── Manager routes ────────────────────────────────── */}
+          <Route path="/manager-dashboard" element={
+            <RoleRoute allowedRoles={['MANAGER']}><Layout /></RoleRoute>
+          }>
+            <Route index element={<ManagerDashboardPage />} />
+          </Route>
 
-          <Route path="government-entities" element={<RoleRoute allowedRoles={['PRE']}><GovernmentEntitiesPage /></RoleRoute>} />
+          {/* ── PRE / LQ / Manager / DM shared routes ─────────────── */}
+          <Route path="/" element={
+            <RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER', 'DM']}><Layout /></RoleRoute>
+          }>
+            {/* Default redirect by role */}
+            <Route index element={
+              user?.role === 'LQ'
+                ? <Navigate to="/lq-pipeline" replace />
+                : user?.role === 'MANAGER'
+                ? <Navigate to="/manager-dashboard" replace />
+                : user?.role === 'DM'
+                ? <Navigate to="/digital-marketing" replace />
+                : <Navigate to="/dashboard" replace />
+            } />
+            
+            <Route path="dashboard" element={<RoleRoute allowedRoles={['PRE']}><PreDashboardPage /></RoleRoute>} />
+            
+            {/* Prospects — PRE full, MANAGER read-only, LQ can view detail of assigned prospects */}
+            <Route path="prospects" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectsPage /></RoleRoute>} />
+            <Route path="prospects/import-preview" element={<RoleRoute allowedRoles={['PRE']}><ImportPreviewPage /></RoleRoute>} />
+            <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
 
-          {/* Market Events — PRE full, LQ + MANAGER read-only */}
-          <Route path="market-events" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventsPage /></RoleRoute>} />
-          <Route path="market-events/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventDetailPage /></RoleRoute>} />
+            <Route path="government-entities" element={<RoleRoute allowedRoles={['PRE']}><GovernmentEntitiesPage /></RoleRoute>} />
 
-          {/* PRE tasks — PRE full, MANAGER read-only */}
-          <Route path="pre-tasks" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><PreTasksPage /></RoleRoute>} />
+            {/* Market Events — PRE full, LQ + MANAGER read-only */}
+            <Route path="market-events" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventsPage /></RoleRoute>} />
+            <Route path="market-events/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventDetailPage /></RoleRoute>} />
 
-          {/* Key People — PRE + LQ full, MANAGER read-only */}
-          <Route path="key-people" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPeoplePage /></RoleRoute>} />
-          <Route path="key-people/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPersonDetailPage /></RoleRoute>} />
+            {/* PRE tasks — PRE full, MANAGER read-only */}
+            <Route path="pre-tasks" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><PreTasksPage /></RoleRoute>} />
 
-          {/* User management — Superuser full, MANAGER create+view */}
-          <Route path="users" element={<RoleRoute requireAdmin={true}><UserManagementPage /></RoleRoute>} />
+            {/* Key People — PRE + LQ full, MANAGER read-only */}
+            <Route path="key-people" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPeoplePage /></RoleRoute>} />
+            <Route path="key-people/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPersonDetailPage /></RoleRoute>} />
 
-          {/* Manager Audit */}
-          <Route path="manager-audit" element={<RoleRoute allowedRoles={['MANAGER']}><ManagerAuditPage /></RoleRoute>} />
+            {/* User management — Superuser full, MANAGER create+view */}
+            <Route path="users" element={<RoleRoute requireAdmin={true}><UserManagementPage /></RoleRoute>} />
 
-          {/* LQ Pipeline — LQ full, MANAGER read-only */}
-          <Route path="lq-pipeline" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="all" /></RoleRoute>} />
-          <Route path="lq-pipeline/pending" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="pending" /></RoleRoute>} />
-          <Route path="lq-pipeline/verified" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="verified" /></RoleRoute>} />
-          <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
-          <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
+            {/* Manager Audit */}
+            <Route path="manager-audit" element={<RoleRoute allowedRoles={['MANAGER']}><ManagerAuditPage /></RoleRoute>} />
 
-          <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
-          <Route path="inbox" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><InboxPage /></RoleRoute>} />
-          <Route path="calendar" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
-          <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
-          <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
+            {/* LQ Pipeline — LQ full, MANAGER read-only */}
+            <Route path="lq-pipeline" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="all" /></RoleRoute>} />
+            <Route path="lq-pipeline/pending" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="pending" /></RoleRoute>} />
+            <Route path="lq-pipeline/verified" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="verified" /></RoleRoute>} />
+            <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
+            <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
 
-          {/* ── Digital Marketing Workspace ────────────────────────────── */}
-          <Route path="digital-marketing" element={<RoleRoute allowedRoles={['DM']}><DigitalMarketingDashboardPage /></RoleRoute>} />
-          <Route path="digital-marketing/messages" element={<RoleRoute allowedRoles={['DM']}><SocialMessagesPage /></RoleRoute>} />
-          <Route path="digital-marketing/instagram" element={<RoleRoute allowedRoles={['DM']}><InstagramPage /></RoleRoute>} />
-          <Route path="digital-marketing/facebook" element={<RoleRoute allowedRoles={['DM']}><FacebookPage /></RoleRoute>} />
-          <Route path="digital-marketing/twitter" element={<RoleRoute allowedRoles={['DM']}><TwitterPage /></RoleRoute>} />
-          <Route path="digital-marketing/ads-insights" element={<RoleRoute allowedRoles={['DM']}><AdsInsightsPage /></RoleRoute>} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+            <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
+            <Route path="inbox" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><InboxPage /></RoleRoute>} />
+            <Route path="calendar" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
+            <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
+            <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
+
+            {/* ── Digital Marketing Workspace ────────────────────────────── */}
+            <Route path="digital-marketing" element={<RoleRoute allowedRoles={['DM']}><DigitalMarketingDashboardPage /></RoleRoute>} />
+            <Route path="digital-marketing/messages" element={<RoleRoute allowedRoles={['DM']}><SocialMessagesPage /></RoleRoute>} />
+            <Route path="digital-marketing/instagram" element={<RoleRoute allowedRoles={['DM']}><InstagramPage /></RoleRoute>} />
+            <Route path="digital-marketing/facebook" element={<RoleRoute allowedRoles={['DM']}><FacebookPage /></RoleRoute>} />
+            <Route path="digital-marketing/twitter" element={<RoleRoute allowedRoles={['DM']}><TwitterPage /></RoleRoute>} />
+            <Route path="digital-marketing/ads-insights" element={<RoleRoute allowedRoles={['DM']}><AdsInsightsPage /></RoleRoute>} />
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </Router>
   );
 };

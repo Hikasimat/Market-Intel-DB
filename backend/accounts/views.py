@@ -530,6 +530,7 @@ class UserMeView(APIView):
             'last_name': user.last_name,
             'role': profile.role if profile else 'PRE',
             'timezone': profile.timezone if profile else 'UTC',
+            'mail_account_id': profile.mail_account_id if profile else None,
             'is_superuser': user.is_superuser,
             'whatsapp_sessions': whatsapp_sessions,
         })
@@ -1271,6 +1272,13 @@ class GmailMailboxViewSet(viewsets.ViewSet):
                 'default_signature': '',
             })
         return Response(data)
+
+    def create(self, request):
+        from .serializers import MailAccountSerializer
+        serializer = MailAccountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 # Backward-compatible alias for the Gmail Mailbox ViewSet
 MailAccountViewSet = GmailMailboxViewSet

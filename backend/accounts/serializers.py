@@ -15,6 +15,17 @@ class UserSerializer(serializers.ModelSerializer):
             'username': {'required': False} # In case email is used as username
         }
 
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        if isinstance(data, dict) and 'profile' in data and isinstance(data['profile'], dict):
+            if 'profile' not in ret:
+                ret['profile'] = {}
+            if 'role' in data['profile'] and 'role' not in ret['profile']:
+                ret['profile']['role'] = data['profile']['role']
+            if 'timezone' in data['profile'] and 'timezone' not in ret['profile']:
+                ret['profile']['timezone'] = data['profile']['timezone']
+        return ret
+
     def create(self, validated_data):
         profile_data = validated_data.pop('profile', {})
         password = validated_data.pop('password', None)

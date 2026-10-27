@@ -724,11 +724,18 @@ class WhatsAppSendMessageView(APIView):
                     matched_contact = existing_any.prospect_contact if existing_any else None
                     if not matched_contact and digits and len(digits) >= 8:
                         from prospects.models import ProspectContact
-                        for c in ProspectContact.objects.filter(phone_number__isnull=False).select_related("prospect"):
-                            s_digits = re.sub(r"\D+", "", c.phone_number or "")
-                            if s_digits and (s_digits == digits or s_digits.endswith(digits[-10:]) or digits.endswith(s_digits[-10:])):
-                                matched_contact = c
-                                break
+                        suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+                        matched_contact = (
+                            ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                            .select_related("prospect")
+                            .first()
+                        )
+                        if not matched_contact:
+                            for c in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                                s_digits = re.sub(r"\D+", "", c.phone_number or "")
+                                if s_digits and (s_digits == digits or s_digits.endswith(digits[-10:]) or digits.endswith(s_digits[-10:])):
+                                    matched_contact = c
+                                    break
 
                     phone_formatted = f"+{digits}" if digits else None
                     target_conv = WhatsAppConversation.objects.create(
@@ -857,33 +864,36 @@ class WhatsAppConversationsView(APIView):
         # Opportunistic auto-matching for unmatched conversations
         import re
         from prospects.models import ProspectContact
-        contacts_cache = None
 
         for c in final_list:
             if not c.is_matched or not c.prospect_contact:
-                if contacts_cache is None:
-                    contacts_cache = list(
-                        ProspectContact.objects.filter(phone_number__isnull=False).select_related("prospect")
-                    )
-
                 c_phone = c.chat_id.split("@")[0].split(":")[0]
                 c_digits = re.sub(r"\D+", "", c_phone)
 
                 if len(c_digits) >= 8:
-                    for contact in contacts_cache:
-                        stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                        if stored_digits and (
-                            stored_digits == c_digits
-                            or (len(c_digits) >= 10 and stored_digits.endswith(c_digits[-10:]))
-                            or (len(stored_digits) >= 10 and c_digits.endswith(stored_digits[-10:]))
-                        ):
-                            c.prospect_contact = contact
-                            c.prospect = contact.prospect
-                            c.is_matched = True
-                            if not c.whatsapp_name or c.whatsapp_name.startswith("+"):
-                                c.whatsapp_name = contact.contact_name
-                            c.save(update_fields=["prospect_contact", "prospect", "is_matched", "whatsapp_name"])
-                            break
+                    suffix = c_digits[-10:] if len(c_digits) >= 10 else c_digits[-8:]
+                    matched_c = (
+                        ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                        .select_related("prospect")
+                        .first()
+                    )
+                    if not matched_c:
+                        for contact in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                            stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
+                            if stored_digits and (
+                                stored_digits == c_digits
+                                or (len(c_digits) >= 10 and stored_digits.endswith(c_digits[-10:]))
+                                or (len(stored_digits) >= 10 and c_digits.endswith(stored_digits[-10:]))
+                            ):
+                                matched_c = contact
+                                break
+                    if matched_c:
+                        c.prospect_contact = matched_c
+                        c.prospect = matched_c.prospect
+                        c.is_matched = True
+                        if not c.whatsapp_name or c.whatsapp_name.startswith("+"):
+                            c.whatsapp_name = matched_c.contact_name
+                        c.save(update_fields=["prospect_contact", "prospect", "is_matched", "whatsapp_name"])
 
         final_list.sort(key=lambda x: x.last_message_at or x.created_at, reverse=True)
 
@@ -1063,19 +1073,27 @@ class WhatsAppConversationDeleteView(APIView):
             digits = re.sub(r"\D+", "", clean_phone)
             if digits and len(digits) >= 8:
                 from prospects.models import ProspectContact
-                match = ProspectContact.objects.filter(phone_number__isnull=False).select_related("prospect")
-                for c in match:
-                    stored = re.sub(r"\D+", "", c.phone_number or "")
-                    if stored and (stored == digits or stored.endswith(digits[-10:]) or digits.endswith(stored[-10:])):
-                        conv.prospect_contact = c
-                        conv.prospect = c.prospect
-                        conv.is_matched = True
-                        if not conv.whatsapp_name:
-                            conv.whatsapp_name = c.contact_name
-                            if "whatsapp_name" not in update_fields:
-                                update_fields.append("whatsapp_name")
-                        update_fields.extend(["prospect_contact", "prospect", "is_matched"])
-                        break
+                suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+                matched_c = (
+                    ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                    .select_related("prospect")
+                    .first()
+                )
+                if not matched_c:
+                    for c in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                        stored = re.sub(r"\D+", "", c.phone_number or "")
+                        if stored and (stored == digits or stored.endswith(digits[-10:]) or digits.endswith(stored[-10:])):
+                            matched_c = c
+                            break
+                if matched_c:
+                    conv.prospect_contact = matched_c
+                    conv.prospect = matched_c.prospect
+                    conv.is_matched = True
+                    if not conv.whatsapp_name:
+                        conv.whatsapp_name = matched_c.contact_name
+                        if "whatsapp_name" not in update_fields:
+                            update_fields.append("whatsapp_name")
+                    update_fields.extend(["prospect_contact", "prospect", "is_matched"])
 
         if update_fields:
             conv.save(update_fields=list(set(update_fields)))
@@ -1696,17 +1714,24 @@ class WhatsAppContactInfoView(APIView):
             }
             return Response(data)
 
-        # Fallback: search ProspectContact by phone digits
+        # Fallback: search ProspectContact by indexed phone digits
         from prospects.models import ProspectContact
         import re
         digits = re.sub(r"\D+", "", clean_phone)
         matched = None
         if len(digits) >= 8:
-            for pc in ProspectContact.objects.filter(phone_number__isnull=False).select_related("prospect"):
-                stored = re.sub(r"\D+", "", pc.phone_number or "")
-                if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
-                    matched = pc
-                    break
+            suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+            matched = (
+                ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                .select_related("prospect")
+                .first()
+            )
+            if not matched:
+                for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                    stored = re.sub(r"\D+", "", pc.phone_number or "")
+                    if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
+                        matched = pc
+                        break
 
         if matched:
             return Response({
@@ -1865,21 +1890,15 @@ class WhatsAppConversationAvatarView(APIView):
             import os
             import time
             from django.conf import settings
-
-            upload_dir = os.path.join(settings.MEDIA_ROOT, "whatsapp_avatars")
-            os.makedirs(upload_dir, exist_ok=True)
+            from django.core.files.storage import default_storage
 
             ext = os.path.splitext(uploaded_file.name)[1].lower() or ".jpg"
             if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
                 ext = ".jpg"
             filename = f"avatar_{conv.id}_{int(time.time())}{ext}"
-            file_path = os.path.join(upload_dir, filename)
+            saved_path = default_storage.save(f"whatsapp_avatars/{filename}", uploaded_file)
 
-            with open(file_path, "wb+") as destination:
-                for chunk in uploaded_file.chunks():
-                    destination.write(chunk)
-
-            rel_url = f"{settings.MEDIA_URL.rstrip('/')}/whatsapp_avatars/{filename}"
+            rel_url = f"{settings.MEDIA_URL.rstrip('/')}/{saved_path.lstrip('/')}"
             conv.custom_avatar_url = rel_url
             conv.save(update_fields=["custom_avatar_url"])
             return Response({"custom_avatar_url": conv.custom_avatar_url}, status=status.HTTP_200_OK)

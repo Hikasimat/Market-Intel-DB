@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 # Cached JWKS client for signature verification
 _jwks_client = None
@@ -353,8 +354,57 @@ class GmailOAuthService:
 
         return creds
 
+    @classmethod
+    def revoke_tokens(cls, credentials):
+        """
+        Revokes the Google OAuth tokens for a given GoogleMailCredentials instance.
+        Calls Google's token revocation endpoint with the stored refresh token.
+        If the refresh token is unavailable or the revocation call fails, the
+        failure is logged but does NOT raise — the caller must still delete the
+        DB record so the user is cleanly disconnected.
+        """
+        token_to_revoke = None
+        try:
+            if credentials.refresh_token_encrypted:
+                token_to_revoke = encryption.decrypt_password(credentials.refresh_token_encrypted)
+            elif credentials.access_token_encrypted:
+                token_to_revoke = encryption.decrypt_password(credentials.access_token_encrypted)
+        except Exception as dec_err:
+            logger.warning("revoke_tokens: could not decrypt token for user %s: %s", credentials.user_id, dec_err)
+
+        if token_to_revoke:
+            try:
+                payload = urllib.parse.urlencode({'token': token_to_revoke}).encode('utf-8')
+                req = urllib.request.Request(
+                    GOOGLE_REVOKE_URL,
+                    data=payload,
+                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                    method='POST',
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    logger.info(
+                        "revoke_tokens: Google token revocation succeeded for user %s (HTTP %s)",
+                        credentials.user_id, resp.status,
+                    )
+            except urllib.error.HTTPError as http_err:
+                # 400 means token was already revoked / expired — treat as success
+                if http_err.code == 400:
+                    logger.info(
+                        "revoke_tokens: token already invalid/revoked for user %s", credentials.user_id
+                    )
+                else:
+                    logger.warning(
+                        "revoke_tokens: HTTP %s from Google for user %s: %s",
+                        http_err.code, credentials.user_id, http_err.read().decode('utf-8', errors='ignore'),
+                    )
+            except Exception as exc:
+                logger.warning("revoke_tokens: network error revoking token for user %s: %s", credentials.user_id, exc)
+        else:
+            logger.info("revoke_tokens: no token to revoke for user %s", credentials.user_id)
+
     @staticmethod
     def _get_or_create_creds(user):
+
         from .models import GoogleMailCredentials
         return GoogleMailCredentials.objects.get_or_create(user=user)
 

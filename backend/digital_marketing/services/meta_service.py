@@ -112,8 +112,6 @@ class MetaService:
                     return f"{clean_origin}/digital-marketing/ads"
 
         # 3. Explicit environment variable overrides
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
         if platform == 'FACEBOOK':
             env_uri = os.getenv('META_FACEBOOK_REDIRECT_URI', '').strip()
             if env_uri:
@@ -134,8 +132,6 @@ class MetaService:
     @classmethod
     def get_config(cls, platform: str = 'INSTAGRAM', request=None, custom_redirect_uri: str = None):
         """Returns configured Meta credentials or None if missing."""
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
         app_id = os.getenv('META_APP_ID', '').strip()
         app_secret = os.getenv('META_APP_SECRET', '').strip()
         redirect_uri = cls.get_redirect_uri(platform, request=request, custom_redirect_uri=custom_redirect_uri)
