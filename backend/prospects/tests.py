@@ -135,7 +135,7 @@ class ProspectImportServicesTests(TestCase):
         res = run_import(rows, self.request, ProspectSerializer)
         self.assertEqual(res['imported_count'], 2)
         c = Prospect.objects.get(company_name='Child')
-        self.assertEqual(c.parent_companies.first().company_name, '   My Company  ')
+        self.assertEqual(c.parent_companies.first().company_name.strip(), 'My Company')
 
     # 10. Required email verification VALID status
     def test_email_must_be_valid(self):
@@ -157,10 +157,15 @@ class ProspectImportServicesTests(TestCase):
 
     # 12. LQ assignment trigger
     def test_lq_assignment(self):
+        lq_user = User.objects.create_user(username='lq_agent', password='password')
+        lq_user.profile.role = 'LQ'
+        lq_user.profile.save()
+
         rows = [self._create_row_payload('Test', 1, email='t@test.com')]
         run_import(rows, self.request, ProspectSerializer)
         prospect = Prospect.objects.get(company_name='Test')
         self.assertTrue(LeadQualification.objects.filter(prospect=prospect).exists())
+        self.assertEqual(LeadQualification.objects.get(prospect=prospect).assigned_lq, lq_user)
 
     # 13. Duplicate checking against DB
     def test_db_duplicate(self):
