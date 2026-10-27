@@ -31,6 +31,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+  DEBUG: 'True'
+  MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+  WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+
 jobs:
   # ============================================================================
   # 1. Backend Test Job (Django test suite against disposable PostgreSQL CI DB)
@@ -89,8 +95,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
-          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
-          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py check
 
@@ -104,6 +110,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py makemigrations --check --dry-run
 
@@ -117,8 +125,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
-          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
-          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py test --verbosity 2
 
@@ -218,6 +226,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py migrate --noinput
 
@@ -231,8 +241,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
-          MAIL_CREDENTIALS_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
-          WHATSAPP_WEBHOOK_SECRET: 'ci_test_webhook_secret_key_32_bytes_min!'
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python smoke_test.py
 
@@ -291,6 +301,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py makemigrations --check --dry-run
 
@@ -304,6 +316,8 @@ jobs:
           DB_PASSWORD: runner_test_password
           DB_SSL_REQUIRE: 'false'
           DATABASE_URL: ''
+          SECRET_KEY: 'ci-testing-synthetic-secret-key-32-chars-min-for-security-check!'
+          DEBUG: 'True'
         run: |
           python manage.py migrate --noinput
 

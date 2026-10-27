@@ -17,7 +17,13 @@ backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-# Ensure encryption key for Fernet is available in CI environment if not set
+# Ensure essential settings are present in CI or standalone test environments
+if not os.environ.get("SECRET_KEY"):
+    os.environ["SECRET_KEY"] = "ci-synthetic-smoke-test-secret-key-32-chars-minimum!"
+
+if not os.environ.get("DEBUG"):
+    os.environ["DEBUG"] = "True"
+
 if not os.environ.get("MAIL_CREDENTIALS_ENCRYPTION_KEY"):
     from cryptography.fernet import Fernet
     os.environ["MAIL_CREDENTIALS_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
