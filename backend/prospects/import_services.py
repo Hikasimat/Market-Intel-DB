@@ -476,10 +476,12 @@ def _sanitize_source_rows(row_payload, fallback):
 def _email_check(item, client_emails):
     """Every email present in the row data must be verified VALID (existing rule)."""
     statuses = {}
+    print(f"DEBUG _email_check: client_emails={client_emails}")
     for ev in client_emails or []:
         if isinstance(ev, dict) and ev.get('email'):
             statuses[clean_value(ev['email']).casefold()] = ev.get('status')
     required = build_emails_to_verify(item.data)
+    print(f"DEBUG _email_check: required={required}, statuses={statuses}")
     for ev in required:
         status = statuses.get(ev['email'].casefold()) or 'UNVERIFIED'
         if status != 'VALID':
@@ -657,7 +659,7 @@ def import_single_row(item, parent_ids, emails, serializer_class, request):
     return prospect
 
 
-def run_import(rows, request, serializer_class, file_name='', client_limit_reached=False, max_workers=None):
+def run_import(rows, request, serializer_class, file_name='', client_limit_reached=False):
     user = request.user
     items, client_emails, overflow = [], {}, []
     processed_source_rows = 0
@@ -703,14 +705,7 @@ def run_import(rows, request, serializer_class, file_name='', client_limit_reach
             levels.append([])
         levels[level].append(i)
 
-    import os
-    import sys
-    from django.conf import settings
-
-    is_test = getattr(settings, 'IS_TESTING', False) or ('test' in sys.argv)
-    effective_workers = max_workers if max_workers is not None else (1 if is_test else int(os.getenv('IMPORT_MAX_WORKERS', '10')))
-
-    def process_item(i, in_thread=False):
+    def process_item(i):
         from django.db import connection
         try:
             it = items[i]
@@ -741,27 +736,22 @@ def run_import(rows, request, serializer_class, file_name='', client_limit_reach
             logger.exception('Unexpected error importing prospect row %s', items[i].source_row_numbers)
             return (i, False, 'An unexpected error occurred while importing this row.', None)
         finally:
-            if in_thread:
-                connection.close() # Vital to prevent connection pool exhaustion in worker threads
+            connection.close() # Vital to prevent connection pool exhaustion in threads
 
     from concurrent.futures import ThreadPoolExecutor
 
     for lvl_items in levels:
-        if effective_workers <= 1 or len(lvl_items) <= 1:
-            results = [process_item(i, in_thread=False) for i in lvl_items]
-        else:
-            with ThreadPoolExecutor(max_workers=min(effective_workers, len(lvl_items))) as executor:
-                results = list(executor.map(lambda idx: process_item(idx, in_thread=True), lvl_items))
-
-        for i, success, reason, pid in results:
-            it = items[i]
-            if success:
-                created[i] = pid
-                parent_cache[it.key] = pid
-                imported_rows.append({'source_row_numbers': it.source_row_numbers,
-                                      'company_name': it.company_name, 'prospect_id': str(pid)})
-            else:
-                fail(it, reason)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(process_item, lvl_items))
+            for i, success, reason, pid in results:
+                it = items[i]
+                if success:
+                    created[i] = pid
+                    parent_cache[it.key] = pid
+                    imported_rows.append({'source_row_numbers': it.source_row_numbers,
+                                          'company_name': it.company_name, 'prospect_id': str(pid)})
+                else:
+                    fail(it, reason)
 
     referenced_file_parents = {p for it in items for _, _, status, p in it.parent_refs
                                if status == STATUS_FOUND_IN_FILE}
