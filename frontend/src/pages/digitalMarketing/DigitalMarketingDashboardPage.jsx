@@ -13,7 +13,8 @@ import {
   Layers,
   Sparkles,
   ExternalLink,
-  RefreshCw
+  RefreshCw,
+  Globe
 } from 'lucide-react';
 import api from '../../services/api';
 import { InstagramIcon, FacebookIcon, TwitterXIcon } from '../../components/common/SocialIcons';
@@ -94,7 +95,7 @@ const DigitalMarketingDashboardPage = () => {
       )}
 
       {/* Platform Status Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5">
         {/* Instagram Card */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm hover:border-slate-300 transition-all flex flex-col justify-between">
           <div>
@@ -233,6 +234,37 @@ const DigitalMarketingDashboardPage = () => {
             className="mt-4 inline-flex items-center justify-between w-full text-xs font-bold text-indigo-600 hover:text-indigo-700 pt-2 border-t border-slate-50"
           >
             <span>Open Ads & Insights</span>
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
+
+        {/* Headless CMS Card */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm hover:border-slate-300 transition-all flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center shadow-xs">
+                <Globe className="w-5 h-5" />
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                Live Gateway
+              </span>
+            </div>
+            <h3 className="text-base font-bold text-slate-900">Headless CMS</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Multi-Tenant Blogs & SEO Suite
+            </p>
+            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <span>Cloudflare Tunnel</span>
+              <span className="font-bold text-emerald-600">
+                Active 🟢
+              </span>
+            </div>
+          </div>
+          <Link
+            to="/digital-marketing/cms"
+            className="mt-4 inline-flex items-center justify-between w-full text-xs font-bold text-blue-600 hover:text-blue-700 pt-2 border-t border-slate-50"
+          >
+            <span>Open CMS Suite</span>
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>

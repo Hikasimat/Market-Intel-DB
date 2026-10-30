@@ -169,6 +169,12 @@ test_*.py
 .cursor/
 .windsurf/
 
+# Large evidence bundles & REA analysis dumps (>100MB blocked by GitHub)
+rea_evidence_bundle.json
+**/rea_evidence_bundle.json
+docs/**/rea-analysis/*.json
+docs/**/rea-analysis/*.bundle
+
 # Operating System files
 .DS_Store
 .AppleDouble

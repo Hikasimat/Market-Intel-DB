@@ -34,6 +34,7 @@ const FacebookPage = lazy(() => import('../pages/digitalMarketing/FacebookPage')
 const TwitterPage = lazy(() => import('../pages/digitalMarketing/TwitterPage'));
 const AdsInsightsPage = lazy(() => import('../pages/digitalMarketing/AdsInsightsPage'));
 const SocialMessagesPage = lazy(() => import('../pages/digitalMarketing/SocialMessagesPage'));
+const CmsPage = lazy(() => import('../pages/digitalMarketing/CmsPage'));
 
 const PageSpinner = () => (
   <div className="min-h-[50vh] flex items-center justify-center">
@@ -165,6 +166,7 @@ const AppRouter = () => {
             <Route path="digital-marketing/facebook" element={<RoleRoute allowedRoles={['DM']}><FacebookPage /></RoleRoute>} />
             <Route path="digital-marketing/twitter" element={<RoleRoute allowedRoles={['DM']}><TwitterPage /></RoleRoute>} />
             <Route path="digital-marketing/ads-insights" element={<RoleRoute allowedRoles={['DM']}><AdsInsightsPage /></RoleRoute>} />
+            <Route path="digital-marketing/cms" element={<RoleRoute allowedRoles={['DM']}><CmsPage /></RoleRoute>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
