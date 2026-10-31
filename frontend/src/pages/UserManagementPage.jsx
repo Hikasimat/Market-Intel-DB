@@ -132,8 +132,6 @@ const UserManagementPage = () => {
                           ? 'bg-slate-700'
                           : user.role === 'PRE'
                           ? 'bg-indigo-600'
-                          : user.role === 'LQ'
-                          ? 'bg-emerald-600'
                           : user.role === 'MANAGER'
                           ? 'bg-amber-600'
                           : user.role === 'DM'
@@ -146,8 +144,6 @@ const UserManagementPage = () => {
                           ? 'Digital Marketing'
                           : user.role === 'PRE'
                           ? 'Prospect Research Engineer'
-                          : user.role === 'LQ'
-                          ? 'Lead Qualifier'
                           : user.role === 'MANAGER'
                           ? 'Manager'
                           : user.role}

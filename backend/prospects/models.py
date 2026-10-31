@@ -174,29 +174,22 @@ class LeadQualification(models.Model):
 
 def assign_lq_to_prospect(prospect):
     """
-    Assigns (or re-assigns if NULL) the correct LQ user to a prospect's
-    LeadQualification record using round-robin batches of 5.
-    Always guaranteed to assign when LQ users exist.
-    Returns the assigned User or None.
+    Assigns the creator PRE user to the prospect's LeadQualification record.
     """
     from django.contrib.auth import get_user_model
     User = get_user_model()
-    lq_users = list(User.objects.filter(profile__role='LQ', is_superuser=False).order_by('id'))
-    if not lq_users:
-        return None
-    N = len(lq_users)
-    # Use total prospects excluding this one to get a stable index
-    count = Prospect.objects.exclude(id=prospect.id).count()
-    current_index = (count // 5) % N
-    assigned = lq_users[current_index]
+    creator = None
+    if prospect.created_by:
+        creator = User.objects.filter(username=prospect.created_by).first()
     try:
         lq, created_now = LeadQualification.objects.get_or_create(prospect=prospect)
-        lq.assigned_lq = assigned
-        lq.save(update_fields=['assigned_lq'])
+        if creator:
+            lq.assigned_lq = creator
+            lq.save(update_fields=['assigned_lq'])
+        return creator
     except Exception as e:
         print(f"[assign_lq_to_prospect] Error: {e}")
         return None
-    return assigned
 
 
 @receiver(post_save, sender=Prospect)

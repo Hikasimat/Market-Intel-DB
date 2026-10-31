@@ -25,13 +25,13 @@ class AccountsTestCase(APITestCase):
         self.manager_user.profile.role = 'MANAGER'
         self.manager_user.profile.save()
 
-        # Sample Data: Create LQ User
+        # Sample Data: Create PRE User 2
         self.lq_user = User.objects.create_user(
             username='lq@example.com',
             email='lq@example.com',
             password='lqpassword'
         )
-        self.lq_user.profile.role = 'LQ'
+        self.lq_user.profile.role = 'PRE'
         self.lq_user.profile.save()
 
         # Sample Data: Create PRE User
@@ -65,7 +65,7 @@ class AccountsTestCase(APITestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['email'], 'lq@example.com')
-        self.assertEqual(response.data['role'], 'LQ')
+        self.assertEqual(response.data['role'], 'PRE')
         self.assertEqual(response.data['mail_account_id'], self.mail_account.id)
 
     def test_user_me_patch_timezone(self):
@@ -107,13 +107,13 @@ class AccountsTestCase(APITestCase):
         data = {
             'email': 'newlq@example.com',
             'password': 'password123',
-            'profile': {'role': 'LQ'}
+            'profile': {'role': 'PRE'}
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         new_user = User.objects.get(email='newlq@example.com')
         self.assertFalse(new_user.is_superuser)
-        self.assertEqual(new_user.profile.role, 'LQ')
+        self.assertEqual(new_user.profile.role, 'PRE')
 
     def test_manager_cannot_delete_user(self):
         """Test that a Manager cannot delete users."""

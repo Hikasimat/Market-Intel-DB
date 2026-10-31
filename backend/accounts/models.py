@@ -6,7 +6,6 @@ from django.dispatch import receiver
 class UserProfile(models.Model):
     ROLE_CHOICES = (
         ('PRE', 'Prospect Research Engineer'),
-        ('LQ', 'Lead Qualifier'),
         ('MANAGER', 'Manager'),
         ('DM', 'Digital Marketing'),
     )

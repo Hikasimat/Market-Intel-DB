@@ -71,10 +71,8 @@ class ProspectMatcher:
         from prospects.views import apply_lq_distribution_filter
 
         qs = Prospect.objects.all()
-        if role == 'PRE':
+        if role in ('PRE', 'LQ'):
             qs = qs.filter(created_by=self.user.username)
-        elif role == 'LQ':
-            qs = apply_lq_distribution_filter(qs, self.user, 'id__')
         else:
             return set()
 

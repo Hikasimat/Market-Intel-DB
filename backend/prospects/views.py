@@ -21,32 +21,27 @@ from .campaign_service import create_campaign, pause_campaign, resume_campaign, 
 
 def apply_lq_distribution_filter(queryset, user, prospect_field_prefix=''):
     """
-    Applies the sequential batch distribution logic for LQ users.
-    Distributes prospects in batches of 5 based on creation order.
+    Applies role-based filtering:
+    For PRE/LQ: restricts queryset strictly to data created by the user.
     """
-    if user.is_superuser or not hasattr(user, 'profile') or user.profile.role != 'LQ':
+    if user.is_superuser or not hasattr(user, 'profile'):
         return queryset
         
-    from django.contrib.auth import get_user_model
-    from django.db.models.expressions import RawSQL
-    User = get_user_model()
-    
-    # Only include non-superusers in the distribution pool
-    lq_users = list(User.objects.filter(profile__role='LQ', is_superuser=False).order_by('id').values_list('id', flat=True))
-    
-    if user.id in lq_users:
+    role = user.profile.role
+    if role in ('PRE', 'LQ'):
         from prospects.models import LeadQualification, Prospect
-        
         if queryset.model == LeadQualification:
-            filter_kwargs = {'assigned_lq': user}
+            return queryset.filter(prospect__created_by=user.username)
         elif queryset.model == Prospect:
-            filter_kwargs = {'lead_qualification__assigned_lq': user}
+            return queryset.filter(created_by=user.username)
+        elif hasattr(queryset.model, 'prospect'):
+            return queryset.filter(prospect__created_by=user.username)
         else:
-            # For Meeting, CallbackReminder, OutreachEmail, etc.
-            # All these have a 'prospect' ForeignKey
-            filter_kwargs = {'prospect__lead_qualification__assigned_lq': user}
+            return queryset.filter(created_by=user.username)
             
-        return queryset.filter(**filter_kwargs)
+    if role == 'MANAGER':
+        return queryset
+        
     return queryset.none()
 
 class GovernmentEntityViewSet(viewsets.ModelViewSet):
@@ -130,10 +125,8 @@ class ProspectViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not user.is_superuser and hasattr(user, 'profile'):
             role = user.profile.role
-            if role == 'PRE':
+            if role in ('PRE', 'LQ'):
                 queryset = queryset.filter(created_by=user.username)
-            elif role == 'LQ':
-                queryset = apply_lq_distribution_filter(queryset, user, 'id__')
             # MANAGER sees all prospects (no filter)
 
         market_event = self.request.query_params.get('market_event')
@@ -464,10 +457,8 @@ class LQPipelineViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not user.is_superuser and hasattr(user, 'profile'):
             role = user.profile.role
-            if role == 'PRE':
+            if role in ('PRE', 'LQ'):
                 queryset = queryset.filter(prospect__created_by=user.username)
-            elif role == 'LQ':
-                queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             # MANAGER sees all records (no filter)
         return queryset
 
@@ -713,7 +704,7 @@ class CallbackReminderViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = CallbackReminder.objects.filter(is_completed=False).order_by('scheduled_datetime')
         user = self.request.user
-        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role == 'LQ':
+        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role in ('PRE', 'LQ'):
             queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
         return queryset
 
@@ -746,14 +737,6 @@ class MeetingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_permissions(self):
-        user = getattr(self.request, 'user', None)
-        is_pre = (
-            user and not user.is_superuser and
-            hasattr(user, 'profile') and
-            getattr(user.profile, 'role', None) == 'PRE'
-        )
-        if is_pre:
-            raise PermissionDenied('PRE users cannot access meetings.')
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -762,28 +745,8 @@ class MeetingViewSet(viewsets.ModelViewSet):
         # Superusers see all meetings
         if user.is_superuser:
             return queryset
-        # LQ users: filter meetings by prospects assigned to them via distribution
-        if hasattr(user, 'profile') and user.profile.role == 'LQ':
-            from django.contrib.auth import get_user_model
-            from django.db.models import Subquery, OuterRef
-            User = get_user_model()
-            lq_users = list(User.objects.filter(
-                profile__role='LQ', is_superuser=False
-            ).order_by('id').values_list('id', flat=True))
-            if user.id in lq_users:
-                N = len(lq_users)
-                current_index = lq_users.index(user.id)
-                # Get all prospect IDs in batches of 5
-                all_prospects = list(
-                    Prospect.objects.order_by('created_at', 'id').values_list('id', flat=True)
-                )
-                my_prospect_ids = [
-                    pid for i, pid in enumerate(all_prospects)
-                    if ((i // 5) % N) == current_index
-                ]
-                return queryset.filter(prospect_id__in=my_prospect_ids)
-            return queryset.none()
-        # PRE or other roles: show all meetings
+        if hasattr(user, 'profile') and user.profile.role in ('PRE', 'LQ'):
+            return apply_lq_distribution_filter(queryset, user, 'prospect_id__')
         return queryset
 
     # ── Google Meet integration ──────────────────────────────────────────────
@@ -811,8 +774,8 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
         user = request.user
         role = getattr(getattr(user, 'profile', None), 'role', None)
-        if not (user.is_superuser or role in ('LQ', 'MANAGER')):
-            raise PermissionDenied('Only Lead Qualifiers and Managers can create Google Meet meetings.')
+        if not (user.is_superuser or role in ('PRE', 'LQ', 'MANAGER')):
+            raise PermissionDenied('Only PRE, Lead Qualifiers and Managers can create Google Meet meetings.')
 
         client_request_id = str(request.data.get('client_request_id') or '').strip()
         if not (8 <= len(client_request_id) <= 64):
@@ -969,10 +932,8 @@ class ProspectContactViewSet(viewsets.ModelViewSet):
         ).order_by('-created_at')
         user = self.request.user
         if not user.is_superuser and hasattr(user, 'profile'):
-            if user.profile.role == 'PRE':
+            if user.profile.role in ('PRE', 'LQ'):
                 queryset = queryset.filter(prospect__created_by=user.username)
-            elif user.profile.role == 'LQ':
-                queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
         return queryset
 
     def perform_create(self, serializer):
@@ -1015,7 +976,7 @@ class CommunicationActivityViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(prospect_contact_id=contact_id)
             
         user = self.request.user
-        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role == 'LQ':
+        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role in ('PRE', 'LQ'):
             queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             
         return queryset
@@ -1047,15 +1008,15 @@ class CallActivityViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(prospect_contact_id=contact_id)
             
         user = self.request.user
-        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role == 'LQ':
+        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role in ('PRE', 'LQ'):
             queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             
         return queryset
 
     def perform_create(self, serializer):
-        if hasattr(self.request.user, 'profile') and self.request.user.profile.role != 'LQ':
+        if hasattr(self.request.user, 'profile') and self.request.user.profile.role not in ['PRE', 'LQ']:
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ users can record calls.")
+            raise PermissionDenied("Only PRE and LQ users can record calls.")
         
         direction = self.request.data.get('direction', 'OUTBOUND')
         started_at_str = self.request.data.get('call_started_at')
@@ -1101,7 +1062,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         if prospect_id:
             queryset = queryset.filter(prospect_id=prospect_id)
             
-        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role == 'LQ':
+        if not user.is_superuser and hasattr(user, 'profile') and user.profile.role in ('PRE', 'LQ'):
             queryset = apply_lq_distribution_filter(queryset, user, 'prospect_id__')
             
         return queryset
@@ -1151,9 +1112,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         user = request.user
         role = getattr(getattr(user, 'profile', None), 'role', None)
-        if not (user.is_superuser or role in ('LQ', 'MANAGER')):
+        if not (user.is_superuser or role in ('PRE', 'LQ', 'MANAGER')):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ and Manager users can send emails.")
+            raise PermissionDenied("Only PRE, LQ and Manager users can send emails.")
         from accounts.oauth_services import get_mail_credentials
         google_creds = get_mail_credentials(user)
 
@@ -1425,9 +1386,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
     def compose_preview(self, request):
         """Render exactly what would be sent for a saved template/signature. Never sends."""
         user_role = getattr(getattr(request.user, 'profile', None), 'role', None)
-        if not (request.user.is_superuser or user_role in ('LQ', 'MANAGER')):
+        if not (request.user.is_superuser or user_role in ('PRE', 'LQ', 'MANAGER')):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ and Manager users can preview emails.")
+            raise PermissionDenied("Only PRE, LQ and Manager users can preview emails.")
         from accounts.template_utils import build_email_content, ComposeError
         user = request.user
         from accounts.oauth_services import get_mail_credentials
@@ -1547,9 +1508,9 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def sync_imap(self, request):
-        if hasattr(request.user, 'profile') and request.user.profile.role != 'LQ':
+        if hasattr(request.user, 'profile') and request.user.profile.role not in ['PRE', 'LQ']:
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only LQ users can sync emails.")
+            raise PermissionDenied("Only PRE and LQ users can sync emails.")
 
         from django.core.management import call_command
 
@@ -2086,10 +2047,8 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
         prospects_qs = Prospect.objects.all().select_related('lead_qualification')
         if not user.is_superuser and hasattr(user, 'profile'):
             role = user.profile.role
-            if role == 'PRE':
+            if role in ('PRE', 'LQ'):
                 prospects_qs = prospects_qs.filter(created_by=user.username)
-            elif role == 'LQ':
-                prospects_qs = apply_lq_distribution_filter(prospects_qs, user, 'id__')
 
         contacts_qs = ProspectContact.objects.filter(
             prospect__in=prospects_qs

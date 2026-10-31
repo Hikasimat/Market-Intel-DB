@@ -524,7 +524,8 @@ def import_single_row(item, parent_ids, emails, serializer_class, request):
                     acq_p = Prospect.objects.create(
                         company_name=c_name,
                         company_structure='Independent',
-                        operational_status='Active'
+                        operational_status='Active',
+                        created_by=user.username
                     )
                 acquiring_companies_data.append({
                     'acquiring_company': str(acq_p.id),

@@ -23,12 +23,8 @@ class MarketEventViewSet(viewsets.ModelViewSet):
         
         if not user.is_superuser and hasattr(user, 'profile'):
             role = user.profile.role
-            if role == 'PRE':
+            if role in ('PRE', 'LQ'):
                 count_filter &= Q(participations__prospect__created_by=user.username)
-            elif role == 'LQ':
-                # LQ sees only prospects assigned to them
-                # apply_lq_distribution_filter uses lead_qualification__assigned_lq
-                count_filter &= Q(participations__prospect__lead_qualification__assigned_lq=user)
 
         # Always annotate with the count of participating companies, filtered by role
         queryset = MarketEvent.objects.annotate(
@@ -40,10 +36,8 @@ class MarketEventViewSet(viewsets.ModelViewSet):
             participations_qs = MarketEventParticipation.objects.select_related('prospect')
             if not user.is_superuser and hasattr(user, 'profile'):
                 role = user.profile.role
-                if role == 'PRE':
+                if role in ('PRE', 'LQ'):
                     participations_qs = participations_qs.filter(prospect__created_by=user.username)
-                elif role == 'LQ':
-                    participations_qs = participations_qs.filter(prospect__lead_qualification__assigned_lq=user)
 
             prefetch = Prefetch(
                 'participations',

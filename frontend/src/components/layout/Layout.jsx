@@ -81,66 +81,79 @@ const Layout = () => {
     };
   }, [user]);
 
-  const navItems = [];
+  const navSections = [];
 
   if (user?.role === 'PRE') {
-    navItems.push(
-      { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-      { path: '/prospects', label: 'Prospects', icon: Users },
-      { path: '/government-entities', label: 'Government Entities', icon: Building2 },
-      { path: '/key-people', label: 'Key People', icon: UserCircle },
-      { path: '/market-events', label: 'Market Events', icon: Calendar },
-      { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList }
-    );
+    navSections.push({
+      title: 'PRE',
+      items: [
+        { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { path: '/prospects', label: 'Prospects', icon: Users },
+        { path: '/government-entities', label: 'Government Entities', icon: Building2 },
+        { path: '/key-people', label: 'Key People', icon: UserCircle },
+        { path: '/market-events', label: 'Market Events', icon: Calendar },
+        { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList }
+      ]
+    });
+
+    navSections.push({
+      title: 'LQ',
+      items: [
+        { 
+          path: '/lq-pipeline', 
+          label: 'Lead Qualifier Pipeline', 
+          icon: Activity,
+          subItems: [
+            { path: '/lq-pipeline', label: 'All Prospects', exact: true },
+            { path: '/lq-pipeline/pending', label: 'Verification Pending', exact: true },
+            { path: '/lq-pipeline/verified', label: 'Outreached', exact: true },
+            { path: '/lq-pipeline/issued', label: 'Issued Task to PRE', exact: true },
+          ]
+        },
+        { path: '/calendar', label: 'Calendar', icon: Calendar },
+        { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+        { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
+        { path: '/settings', label: 'Settings', icon: Settings }
+      ]
+    });
   }
 
   if (user?.is_superuser) {
-    navItems.push(
-      { path: '/users', label: 'User Management', icon: Users }
-    );
-  } else if (user?.role === 'LQ') {
-    navItems.push(
-      { 
-        path: '/lq-pipeline', 
-        label: 'Lead Qualifier Pipeline', 
-        icon: Activity,
-        subItems: [
-          { path: '/lq-pipeline', label: 'All Prospects', exact: true },
-          { path: '/lq-pipeline/pending', label: 'Verification Pending', exact: true },
-          { path: '/lq-pipeline/verified', label: 'Outreached', exact: true },
-          { path: '/lq-pipeline/issued', label: 'Issued Task to PRE', exact: true },
-        ]
-      },
-      { path: '/calendar', label: 'Calendar', icon: Calendar },
-      { path: '/key-people', label: 'Key People', icon: UserCircle },
-      { path: '/market-events', label: 'Market Events', icon: Calendar },
-      { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
-      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
-      { path: '/settings', label: 'Settings', icon: Settings }
-    );
+    navSections.push({
+      title: 'Administration',
+      items: [
+        { path: '/users', label: 'User Management', icon: Users }
+      ]
+    });
   } else if (user?.role === 'MANAGER') {
-    navItems.push(
-      { path: '/manager-dashboard', label: 'Manager Dashboard', icon: Shield },
-      { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
-      { path: '/prospects', label: 'Prospects', icon: Users },
-      { path: '/lq-pipeline', label: 'LQ Pipeline', icon: Activity },
-      { path: '/calendar', label: 'Calendar', icon: Calendar },
-      { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
-      { path: '/key-people', label: 'Key People', icon: UserCircle },
-      { path: '/market-events', label: 'Market Events', icon: Calendar },
-      { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
-      { path: '/users', label: 'User Management', icon: Users },
-    );
+    navSections.push({
+      title: 'Manager',
+      items: [
+        { path: '/manager-dashboard', label: 'Manager Dashboard', icon: Shield },
+        { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
+        { path: '/prospects', label: 'Prospects', icon: Users },
+        { path: '/lq-pipeline', label: 'LQ Pipeline', icon: Activity },
+        { path: '/calendar', label: 'Calendar', icon: Calendar },
+        { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+        { path: '/key-people', label: 'Key People', icon: UserCircle },
+        { path: '/market-events', label: 'Market Events', icon: Calendar },
+        { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
+        { path: '/users', label: 'User Management', icon: Users },
+      ]
+    });
   } else if (user?.role === 'DM') {
-    navItems.push(
-      { path: '/digital-marketing', label: 'Dashboard', icon: LayoutDashboard },
-      { path: '/digital-marketing/messages', label: 'Messages', icon: MessageSquare },
-      { path: '/digital-marketing/instagram', label: 'Instagram', icon: InstagramIcon },
-      { path: '/digital-marketing/facebook', label: 'Facebook', icon: FacebookIcon },
-      { path: '/digital-marketing/twitter', label: 'Twitter / X', icon: TwitterXIcon },
-      { path: '/digital-marketing/ads-insights', label: 'Ads & Insights', icon: BarChart2 },
-      { path: '/digital-marketing/cms', label: 'Headless CMS', icon: Globe },
-    );
+    navSections.push({
+      title: 'Digital Marketing',
+      items: [
+        { path: '/digital-marketing', label: 'Dashboard', icon: LayoutDashboard },
+        { path: '/digital-marketing/messages', label: 'Messages', icon: MessageSquare },
+        { path: '/digital-marketing/instagram', label: 'Instagram', icon: InstagramIcon },
+        { path: '/digital-marketing/facebook', label: 'Facebook', icon: FacebookIcon },
+        { path: '/digital-marketing/twitter', label: 'Twitter / X', icon: TwitterXIcon },
+        { path: '/digital-marketing/ads-insights', label: 'Ads & Insights', icon: BarChart2 },
+        { path: '/digital-marketing/cms', label: 'Headless CMS', icon: Globe },
+      ]
+    });
   }
 
   return (
@@ -153,64 +166,73 @@ const Layout = () => {
           </span>
         </div>
         
-        <nav className="flex-1 overflow-y-auto py-4 pl-4 pr-0 space-y-2">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = location.pathname.startsWith(item.path);
-            
-            return (
-              <div key={item.path} className="group space-y-1">
-                <Link
-                  to={item.path}
-                  className={`flex items-center px-4 py-3.5 text-sm font-bold transition-all ${
-                    isActive
-                      ? 'bg-slate-50 text-blue-600 rounded-l-full'
-                      : 'text-blue-100 hover:bg-blue-500 hover:text-white rounded-l-full'
-                  }`}
-                >
-                  <div className="relative mr-4">
-                    <Icon className={`w-5 h-5 ${isActive ? 'text-blue-600' : 'text-blue-200'}`} />
-                    {item.badge && (
-                      <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 bg-rose-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1 shadow-sm">
-                        {item.badge > 999 ? '999+' : item.badge}
-                      </span>
+        <nav className="flex-1 overflow-y-auto py-4 pl-4 pr-0 space-y-4">
+          {navSections.map((section, sIdx) => (
+            <div key={section.title || sIdx} className="space-y-1">
+              {section.title && (
+                <div className="px-4 pt-2 pb-1 text-[11px] font-extrabold uppercase tracking-wider text-blue-200">
+                  {section.title}
+                </div>
+              )}
+              {section.items.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname.startsWith(item.path);
+                
+                return (
+                  <div key={item.path} className="group space-y-1">
+                    <Link
+                      to={item.path}
+                      className={`flex items-center px-4 py-3 text-sm font-bold transition-all ${
+                        isActive
+                          ? 'bg-slate-50 text-blue-600 rounded-l-full'
+                          : 'text-blue-100 hover:bg-blue-500 hover:text-white rounded-l-full'
+                      }`}
+                    >
+                      <div className="relative mr-4">
+                        <Icon className={`w-5 h-5 ${isActive ? 'text-blue-600' : 'text-blue-200'}`} />
+                        {item.badge && (
+                          <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 bg-rose-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1 shadow-sm">
+                            {item.badge > 999 ? '999+' : item.badge}
+                          </span>
+                        )}
+                      </div>
+                      {item.label}
+                    </Link>
+
+                    {item.subItems && (
+                      <div className="hidden group-hover:block pl-12 pr-4 space-y-1 mt-1 mb-2">
+                        {item.subItems.map(sub => {
+                          const isSubActive = sub.exact 
+                            ? location.pathname === sub.path 
+                            : location.pathname.startsWith(sub.path);
+                          return (
+                            <Link
+                              key={sub.path}
+                              to={sub.path}
+                              className={`block px-4 py-2.5 text-xs font-bold rounded-l-full transition-all ${
+                                isSubActive
+                                  ? 'bg-blue-500 text-white'
+                                  : 'text-blue-200 hover:bg-blue-500 hover:text-white'
+                              }`}
+                            >
+                              {sub.label}
+                            </Link>
+                          );
+                        })}
+                      </div>
                     )}
                   </div>
-                  {item.label}
-                </Link>
-
-                {item.subItems && (
-                  <div className="hidden group-hover:block pl-12 pr-4 space-y-1 mt-1 mb-2">
-                    {item.subItems.map(sub => {
-                      const isSubActive = sub.exact 
-                        ? location.pathname === sub.path 
-                        : location.pathname.startsWith(sub.path);
-                      return (
-                        <Link
-                          key={sub.path}
-                          to={sub.path}
-                          className={`block px-4 py-2.5 text-xs font-bold rounded-l-full transition-all ${
-                            isSubActive
-                              ? 'bg-blue-500 text-white'
-                              : 'text-blue-200 hover:bg-blue-500 hover:text-white'
-                          }`}
-                        >
-                          {sub.label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         {user && (
           <div className="p-4 bg-blue-700/30 shrink-0">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-1">
-                {user.role === 'LQ' && (
+                {(user.role === 'PRE' || user.role === 'LQ') && (
                   <div className="mr-1">
                     <NotificationCenter />
                   </div>
@@ -235,8 +257,6 @@ const Layout = () => {
               <div className="text-xs text-blue-200 mt-1 font-medium">
                 {user.role === 'PRE'
                   ? 'Prospect Research Engineer'
-                  : user.role === 'LQ'
-                  ? 'Lead Qualifier'
                   : user.role === 'MANAGER'
                   ? 'Manager'
                   : user.role === 'DM'

@@ -78,12 +78,12 @@ const ProspectDetailPage = () => {
             if (window.history.length > 1) {
               navigate(-1);
             } else {
-              navigate(user?.role === 'LQ' ? '/key-people' : '/prospects');
+              navigate('/prospects');
             }
           }}
           className="inline-flex items-center text-sm font-medium text-indigo-600 hover:text-indigo-800 mb-4 transition-colors cursor-pointer"
         >
-          <ArrowLeft size={16} className="mr-1" /> {user?.role === 'LQ' ? 'Back' : 'Back to Prospects'}
+          <ArrowLeft size={16} className="mr-1" /> Back to Prospects
         </button>
         
         <div className="flex items-start justify-between">

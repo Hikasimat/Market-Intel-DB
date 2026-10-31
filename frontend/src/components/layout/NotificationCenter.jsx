@@ -250,8 +250,8 @@ export default function NotificationCenter() {
   };
 
   useEffect(() => {
-    // Only start mail polling for authenticated LQ users
-    if (!user || user.role !== 'LQ') return;
+    // Only start mail polling for authenticated PRE / LQ users
+    if (!user || (user.role !== 'PRE' && user.role !== 'LQ')) return;
 
     checkNewMail();
     const intervalId = setInterval(checkNewMail, NEW_MAIL_INTERVAL_MS);

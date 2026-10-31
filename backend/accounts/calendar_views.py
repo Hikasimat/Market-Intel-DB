@@ -17,11 +17,11 @@ from .serializers import GmailOAuthCallbackSerializer  # plain {code, state} ser
 
 
 def _can_use_calendar(user):
-    """LQ and MANAGER users (and superusers) may use Calendar; PRE role cannot."""
+    """PRE, LQ and MANAGER users (and superusers) may use Calendar."""
     if user.is_superuser:
         return True
     profile = getattr(user, 'profile', None)
-    return bool(profile and profile.role in ('LQ', 'MANAGER'))
+    return bool(profile and profile.role in ('PRE', 'LQ', 'MANAGER'))
 
 
 class _CalendarBase(APIView):
@@ -31,7 +31,7 @@ class _CalendarBase(APIView):
         super().initial(request, *args, **kwargs)
         if not _can_use_calendar(request.user):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Only Lead Qualifiers and Managers can use Google Calendar.")
+            raise PermissionDenied("Only PRE, Lead Qualifiers and Managers can use Google Calendar.")
 
 
 class CalendarOAuthURLView(_CalendarBase):

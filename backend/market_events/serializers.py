@@ -43,10 +43,8 @@ class MarketEventSerializer(serializers.ModelSerializer):
                 user = request.user
                 if not user.is_superuser and hasattr(user, 'profile'):
                     role = user.profile.role
-                    if role == 'PRE':
+                    if role in ('PRE', 'LQ'):
                         prospects = prospects.filter(created_by=user.username)
-                    elif role == 'LQ':
-                        prospects = prospects.filter(lead_qualification__assigned_lq=user)
 
         return ParticipatingCompanySerializer(prospects, many=True).data
 

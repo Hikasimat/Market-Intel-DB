@@ -40,8 +40,7 @@ const LoginPage = () => {
   const oauthProcessedRef = useRef(false);
 
   const navigateByRole = (role) => {
-    if (role === 'LQ') navigate('/lq-pipeline');
-    else if (role === 'MANAGER') navigate('/manager-dashboard');
+    if (role === 'MANAGER') navigate('/manager-dashboard');
     else if (role === 'DM') navigate('/digital-marketing');
     else navigate('/prospects');
   };

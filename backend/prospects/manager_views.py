@@ -52,13 +52,14 @@ def _day_bounds(reporting_date):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# LQ distribution helper (Python-side batch-of-5, mirroring apply_lq_distribution_filter)
+# ────────────────────────────────────────────────────────────────────────────
+# LQ distribution helper: prospects mapped directly to their creator PRE user
 # ────────────────────────────────────────────────────────────────────────────
 
 def _get_all_lq_users():
-    """Return ordered list of LQ user IDs (non-superuser, by id)."""
+    """Return ordered list of PRE users handling LQ pipeline (non-superuser, by id)."""
     return list(
-        User.objects.filter(profile__role='LQ', is_superuser=False)
+        User.objects.filter(profile__role__in=['PRE', 'LQ'], is_superuser=False)
         .order_by('id')
         .values_list('id', flat=True)
     )
@@ -66,23 +67,37 @@ def _get_all_lq_users():
 
 def _get_lq_assignment_map():
     """
-    Returns a dict: {lq_user_id: [prospect_id, ...]} for ALL prospects,
-    using the existing batch-of-5 round-robin algorithm.
+    Returns a dict: {user_id: [prospect_id, ...]} for ALL prospects,
+    mapping prospects directly to the creator PRE user (or assigned_lq).
+    Removes the 5-record split and round-robin formula entirely.
     """
-    lq_ids = _get_all_lq_users()
-    if not lq_ids:
-        return {}
+    users = list(
+        User.objects.filter(profile__role__in=['PRE', 'LQ'], is_superuser=False)
+        .order_by('id')
+    )
+    user_by_username = {u.username: u.id for u in users}
+    user_ids_set = {u.id for u in users}
+    assignment = {u.id: [] for u in users}
 
-    N = len(lq_ids)
-    all_prospect_ids = list(
-        Prospect.objects.order_by('created_at', 'id').values_list('id', flat=True)
+    all_prospects = list(
+        Prospect.objects.order_by('created_at', 'id').values(
+            'id', 'created_by', 'lead_qualification__assigned_lq'
+        )
     )
 
-    assignment = {lq_id: [] for lq_id in lq_ids}
-    for i, pid in enumerate(all_prospect_ids):
-        batch_index = i // 5
-        lq_index = batch_index % N
-        assignment[lq_ids[lq_index]].append(pid)
+    for p in all_prospects:
+        pid = p['id']
+        assigned_lq_id = p.get('lead_qualification__assigned_lq')
+        creator_username = p.get('created_by')
+
+        target_uid = None
+        if creator_username and creator_username in user_by_username:
+            target_uid = user_by_username[creator_username]
+        elif assigned_lq_id and assigned_lq_id in user_ids_set:
+            target_uid = assigned_lq_id
+
+        if target_uid and target_uid in assignment:
+            assignment[target_uid].append(pid)
 
     return assignment
 
@@ -401,7 +416,7 @@ def manager_dashboard(request):
     # ── USER ACTIVITY (date-wise) ─────────────────────────────────────────
     user_activity = []
 
-    # PRE activity
+    # PRE activity (including unified LQ tasks)
     for pre_user in pre_users:
         entered = Prospect.objects.filter(
             created_by=pre_user.username,
@@ -414,23 +429,58 @@ def manager_dashboard(request):
             created_at__lt=day_end,
             activity_type='EMAIL_SENT',
         ).count()
-        if entered or email_verifications:
+        calls = CallActivity.objects.filter(
+            created_by=pre_user,
+            created_at__gte=day_start,
+            created_at__lt=day_end,
+        ).count()
+        emails = OutreachEmail.objects.filter(
+            created_by=pre_user,
+            sent_at__gte=day_start,
+            sent_at__lt=day_end,
+        ).count()
+        decisions = LeadQualification.objects.filter(
+            decision_by=pre_user,
+            decision_at__gte=day_start,
+            decision_at__lt=day_end,
+        ).count()
+        attended = LeadQualification.objects.filter(
+            attended_at__gte=day_start,
+            attended_at__lt=day_end,
+            decision_by=pre_user,
+        ).count()
+        lq_decisions = LeadQualification.objects.filter(
+            decision_by=pre_user,
+            decision_at__gte=day_start,
+            decision_at__lt=day_end,
+            qualification_status='Lead Qualified',
+        ).count()
+        not_lq_decisions = LeadQualification.objects.filter(
+            decision_by=pre_user,
+            decision_at__gte=day_start,
+            decision_at__lt=day_end,
+        ).exclude(qualification_status__in=['Lead Qualified', 'Unqualified']).count()
+
+        if any([entered, email_verifications, calls, emails, decisions, attended]):
             user_activity.append({
                 'user_id': pre_user.id,
                 'name': pre_user.get_full_name() or pre_user.username,
                 'role': 'PRE',
                 'prospects_entered': entered,
                 'email_verifications': email_verifications,
-                'calls': 0,
-                'emails_sent': 0,
-                'qualification_decisions': 0,
-                'attended': 0,
-                'lead_qualified': 0,
-                'not_lead_qualified': 0,
+                'calls': calls,
+                'emails_sent': emails,
+                'qualification_decisions': decisions,
+                'attended': attended,
+                'lead_qualified': lq_decisions,
+                'not_lead_qualified': not_lq_decisions,
             })
 
-    # LQ activity
+    # Legacy LQ users if any distinct from pre_users
+    pre_user_ids = {u.id for u in pre_users}
     for lq_user in lq_users:
+        if lq_user.id in pre_user_ids:
+            continue
         calls = CallActivity.objects.filter(
             created_by=lq_user,
             created_at__gte=day_start,

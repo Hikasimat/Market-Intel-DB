@@ -261,9 +261,6 @@ const ProspectsPage = () => {
                             </button>
                           </>
                         )}
-                        {user?.role === 'LQ' && (
-                          <span className="text-xs text-slate-400 italic">No actions available</span>
-                        )}
                         </div>
                     </td>
                   </tr>

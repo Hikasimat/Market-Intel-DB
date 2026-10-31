@@ -731,7 +731,7 @@ const ProspectForm = ({ isOpen, onClose, prospect = null, highlightFields = [], 
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="block text-sm font-bold text-slate-700 mb-1.5">Official Email Address</label>
-                    {(user?.role === 'PRE' || user?.role === 'LQ') && formData.official_email_address && (
+                    {user?.role === 'PRE' && formData.official_email_address && (
                       <div className="flex items-center gap-2">
                         {instantVerificationStatus ? (
                           <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
@@ -1103,7 +1103,7 @@ const ProspectForm = ({ isOpen, onClose, prospect = null, highlightFields = [], 
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider">Official Email</label>
-                        {(user?.role === 'PRE' || user?.role === 'LQ') && contact.official_email && (
+                        {user?.role === 'PRE' && contact.official_email && (
                           <div className="flex items-center gap-2">
                             {contactVerificationStatuses[index] ? (
                               <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${

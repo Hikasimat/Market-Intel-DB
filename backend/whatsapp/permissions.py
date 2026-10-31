@@ -26,10 +26,9 @@ class IsSuperAdmin(BasePermission):
 
 class CanSendWhatsApp(BasePermission):
     """
-    Only LQ users and Super Admin can initiate WhatsApp sends.
+    PRE, LQ users and Super Admin can initiate WhatsApp sends.
 
     MANAGER cannot send messages — they can only view/audit.
-    PRE cannot send — they have no WhatsApp role.
     """
 
     def has_permission(self, request, view):
@@ -38,14 +37,12 @@ class CanSendWhatsApp(BasePermission):
         if request.user.is_superuser:
             return True
         profile = getattr(request.user, "profile", None)
-        return bool(profile and profile.role == "LQ")
+        return bool(profile and profile.role in ("PRE", "LQ"))
 
 
 class CanViewWhatsApp(BasePermission):
     """
-    LQ, Manager, and Super Admin can view WhatsApp conversations and messages.
-
-    PRE cannot view WhatsApp data.
+    PRE, LQ, Manager, and Super Admin can view WhatsApp conversations and messages.
     """
 
     def has_permission(self, request, view):
@@ -54,14 +51,14 @@ class CanViewWhatsApp(BasePermission):
         if request.user.is_superuser:
             return True
         profile = getattr(request.user, "profile", None)
-        return bool(profile and profile.role in ("LQ", "MANAGER"))
+        return bool(profile and profile.role in ("PRE", "LQ", "MANAGER"))
 
 
 class CanManageOwnWhatsAppSession(BasePermission):
     """
-    LQ users and Super Admin can manage their own WhatsApp sessions.
+    PRE, LQ users and Super Admin can manage their own WhatsApp sessions.
 
-    Normal LQ users:
+    PRE / LQ users:
       - Register new session names (owned by them).
       - Start/stop their own sessions.
       - View their own sessions.
@@ -69,8 +66,6 @@ class CanManageOwnWhatsAppSession(BasePermission):
 
     Super Admin:
       - Can manage any session.
-
-    MANAGER and PRE cannot manage sessions.
     """
 
     def has_permission(self, request, view):
@@ -79,7 +74,7 @@ class CanManageOwnWhatsAppSession(BasePermission):
         if request.user.is_superuser:
             return True
         profile = getattr(request.user, "profile", None)
-        return bool(profile and profile.role == "LQ")
+        return bool(profile and profile.role in ("PRE", "LQ"))
 
 
 class CanManageWhatsAppSession(BasePermission):
@@ -97,11 +92,10 @@ class CanManageWhatsAppSession(BasePermission):
         if not (request.user and request.user.is_authenticated):
             return False
         if request.method in SAFE_METHODS:
-            # Viewing session status is allowed for MANAGER and LQ.
             profile = getattr(request.user, "profile", None)
             return bool(
                 request.user.is_superuser or
-                (profile and profile.role in ("LQ", "MANAGER"))
+                (profile and profile.role in ("PRE", "LQ", "MANAGER"))
             )
         # Write operations (WAHA-level logout) require Super Admin.
         return request.user.is_superuser
@@ -122,7 +116,7 @@ class CanManageWhatsAppConfig(BasePermission):
         if not profile:
             return False
         if request.method in SAFE_METHODS:
-            return profile.role in ("LQ", "MANAGER")
+            return profile.role in ("PRE", "LQ", "MANAGER")
         return profile.role == "MANAGER"
 
 

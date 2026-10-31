@@ -57,7 +57,6 @@ const RoleRoute = ({ children, allowedRoles, requireAdmin }) => {
   
   if (allowedRoles && user && !allowedRoles.includes(user.role) && !user.is_superuser) {
     // Redirect based on role
-    if (user.role === 'LQ') return <Navigate to="/lq-pipeline" replace />;
     if (user.role === 'MANAGER') return <Navigate to="/manager-dashboard" replace />;
     if (user.role === 'DM') return <Navigate to="/digital-marketing" replace />;
     return <Navigate to="/dashboard" replace />;
@@ -105,15 +104,13 @@ const AppRouter = () => {
             <Route index element={<ManagerDashboardPage />} />
           </Route>
 
-          {/* ── PRE / LQ / Manager / DM shared routes ─────────────── */}
+          {/* ── PRE / Manager / DM shared routes ─────────────── */}
           <Route path="/" element={
-            <RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER', 'DM']}><Layout /></RoleRoute>
+            <RoleRoute allowedRoles={['PRE', 'MANAGER', 'DM']}><Layout /></RoleRoute>
           }>
             {/* Default redirect by role */}
             <Route index element={
-              user?.role === 'LQ'
-                ? <Navigate to="/lq-pipeline" replace />
-                : user?.role === 'MANAGER'
+              user?.role === 'MANAGER'
                 ? <Navigate to="/manager-dashboard" replace />
                 : user?.role === 'DM'
                 ? <Navigate to="/digital-marketing" replace />
@@ -122,23 +119,23 @@ const AppRouter = () => {
             
             <Route path="dashboard" element={<RoleRoute allowedRoles={['PRE']}><PreDashboardPage /></RoleRoute>} />
             
-            {/* Prospects — PRE full, MANAGER read-only, LQ can view detail of assigned prospects */}
+            {/* Prospects — PRE full, MANAGER read-only */}
             <Route path="prospects" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectsPage /></RoleRoute>} />
             <Route path="prospects/import-preview" element={<RoleRoute allowedRoles={['PRE']}><ImportPreviewPage /></RoleRoute>} />
-            <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
+            <Route path="prospects/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><ProspectDetailPage /></RoleRoute>} />
 
             <Route path="government-entities" element={<RoleRoute allowedRoles={['PRE']}><GovernmentEntitiesPage /></RoleRoute>} />
 
-            {/* Market Events — PRE full, LQ + MANAGER read-only */}
-            <Route path="market-events" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventsPage /></RoleRoute>} />
-            <Route path="market-events/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><MarketEventDetailPage /></RoleRoute>} />
+            {/* Market Events — PRE full, MANAGER read-only */}
+            <Route path="market-events" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><MarketEventsPage /></RoleRoute>} />
+            <Route path="market-events/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><MarketEventDetailPage /></RoleRoute>} />
 
             {/* PRE tasks — PRE full, MANAGER read-only */}
             <Route path="pre-tasks" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><PreTasksPage /></RoleRoute>} />
 
-            {/* Key People — PRE + LQ full, MANAGER read-only */}
-            <Route path="key-people" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPeoplePage /></RoleRoute>} />
-            <Route path="key-people/:id" element={<RoleRoute allowedRoles={['PRE', 'LQ', 'MANAGER']}><KeyPersonDetailPage /></RoleRoute>} />
+            {/* Key People — PRE full, MANAGER read-only */}
+            <Route path="key-people" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><KeyPeoplePage /></RoleRoute>} />
+            <Route path="key-people/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><KeyPersonDetailPage /></RoleRoute>} />
 
             {/* User management — Superuser full, MANAGER create+view */}
             <Route path="users" element={<RoleRoute requireAdmin={true}><UserManagementPage /></RoleRoute>} />
@@ -146,18 +143,18 @@ const AppRouter = () => {
             {/* Manager Audit */}
             <Route path="manager-audit" element={<RoleRoute allowedRoles={['MANAGER']}><ManagerAuditPage /></RoleRoute>} />
 
-            {/* LQ Pipeline — LQ full, MANAGER read-only */}
-            <Route path="lq-pipeline" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="all" /></RoleRoute>} />
-            <Route path="lq-pipeline/pending" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="pending" /></RoleRoute>} />
-            <Route path="lq-pipeline/verified" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="verified" /></RoleRoute>} />
-            <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
-            <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
+            {/* LQ Pipeline — PRE full, MANAGER read-only */}
+            <Route path="lq-pipeline" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="all" /></RoleRoute>} />
+            <Route path="lq-pipeline/pending" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="pending" /></RoleRoute>} />
+            <Route path="lq-pipeline/verified" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="verified" /></RoleRoute>} />
+            <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
+            <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
 
-            <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
-            <Route path="inbox" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><InboxPage /></RoleRoute>} />
-            <Route path="calendar" element={<RoleRoute allowedRoles={['LQ', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
-            <Route path="whatsapp" element={<RoleRoute allowedRoles={['LQ']}><WhatsappPage /></RoleRoute>} />
-            <Route path="settings" element={<RoleRoute allowedRoles={['LQ']}><SettingsPage /></RoleRoute>} />
+            <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
+            <Route path="inbox" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><InboxPage /></RoleRoute>} />
+            <Route path="calendar" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
+            <Route path="whatsapp" element={<RoleRoute allowedRoles={['PRE']}><WhatsappPage /></RoleRoute>} />
+            <Route path="settings" element={<RoleRoute allowedRoles={['PRE']}><SettingsPage /></RoleRoute>} />
 
             {/* ── Digital Marketing Workspace ────────────────────────────── */}
             <Route path="digital-marketing" element={<RoleRoute allowedRoles={['DM']}><DigitalMarketingDashboardPage /></RoleRoute>} />
