@@ -73,8 +73,15 @@ const AppRouter = () => {
     const fetchUser = async () => {
       if (isAuthenticated && !user) {
         try {
+          let token = accessToken;
+          if (!token) {
+            try {
+              const refreshRes = await api.post('/auth/refresh/', {});
+              token = refreshRes.data?.access || null;
+            } catch {}
+          }
           const response = await api.get('/auth/me/');
-          dispatch(loginSuccess({ access: accessToken, refresh: refreshToken, user: response.data }));
+          dispatch(loginSuccess({ access: token, refresh: refreshToken, user: response.data }));
         } catch (error) {
           dispatch(logout());
         }

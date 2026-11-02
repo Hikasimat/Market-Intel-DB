@@ -4,9 +4,15 @@ import { tokenRefreshed, logout } from '../features/auth/authSlice';
 
 const getBaseUrl = () => {
   const envUrl = import.meta.env.VITE_API_BASE_URL;
-  if (!envUrl) return '/api';
-  const clean = envUrl.trim().replace(/\/+$/, '');
-  return clean.endsWith('/api') ? clean : `${clean}/api`;
+  if (envUrl && envUrl.trim() && envUrl.trim() !== '/api') {
+    const clean = envUrl.trim().replace(/\/+$/, '');
+    return clean.endsWith('/api') ? clean : `${clean}/api`;
+  }
+  // Production CloudFront frontend domain connects to EC2 backend API domain
+  if (typeof window !== 'undefined' && window.location.hostname.includes('marketinteldbapp.hikasimat.com')) {
+    return 'https://marketintel.hikasimat.com/api';
+  }
+  return '/api';
 };
 
 const api = axios.create({

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSelector } from 'react-redux';
 import { toast } from 'react-toastify';
 import {
   Globe,
@@ -51,6 +52,8 @@ import {
 } from '../../services/cmsService';
 
 const CmsPage = () => {
+  const authUser = useSelector((state) => state.auth?.user);
+
   // Navigation & Active View
   const [activeTab, setActiveTab] = useState('articles'); // 'articles' | 'inspector' | 'seo' | 'analytics' | 'consent'
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
@@ -63,7 +66,13 @@ const CmsPage = () => {
   const [gatewayTesting, setGatewayTesting] = useState(false);
   const [gatewayTestResult, setGatewayTestResult] = useState(null);
   const [backendHealth, setBackendHealth] = useState({ live: false, ready: false, checking: true });
-  const [userEmail, setUserEmail] = useState('meynix.official@gmail.com');
+  const [userEmail, setUserEmail] = useState(authUser?.email || 'Authenticating...');
+
+  useEffect(() => {
+    if (authUser?.email) {
+      setUserEmail(authUser.email);
+    }
+  }, [authUser]);
 
   // Tenancy Data
   const [workspaces, setWorkspaces] = useState([]);
@@ -228,23 +237,37 @@ const CmsPage = () => {
   const initTenancy = async () => {
     setLoadingTenancy(true);
     try {
-      // Verify or refresh current user session
-      const meRes = await cmsService.getCurrentUser();
+      // 1. Verify or refresh current user session
+      let meRes = await cmsService.getCurrentUser();
+      if (!meRes.ok) {
+        await cmsService.autoLoginCms();
+        meRes = await cmsService.getCurrentUser();
+      }
       if (meRes.ok && meRes.data?.email) {
         setUserEmail(meRes.data.email);
+      } else if (authUser?.email) {
+        setUserEmail(authUser.email);
       }
 
-      // Load workspaces
-      const wsRes = await cmsService.getWorkspaces();
+      // 2. Load workspaces
+      let wsRes = await cmsService.getWorkspaces();
+      if (!wsRes.ok) {
+        await cmsService.autoLoginCms();
+        wsRes = await cmsService.getWorkspaces();
+      }
+
       let wsList = Array.isArray(wsRes.data)
         ? wsRes.data
         : wsRes.data?.results || [];
 
+      // Auto-provision Default Workspace if none exists
       if (wsList.length === 0 && wsRes.ok) {
-        const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
-        if (createWsRes.ok && createWsRes.data?.id) {
-          wsList = [createWsRes.data];
-        }
+        try {
+          const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
+          if (createWsRes.ok && createWsRes.data?.id) {
+            wsList = [createWsRes.data];
+          }
+        } catch {}
       }
 
       setWorkspaces(wsList);
@@ -252,9 +275,11 @@ const CmsPage = () => {
         const initialWsId = wsList[0].id;
         setSelectedWorkspaceId(initialWsId);
         await loadSitesForWorkspace(initialWsId);
+      } else {
+        setSelectedWorkspaceId('');
       }
     } catch (err) {
-      toast.error('Could not initialize CMS tenant workspace: ' + err.message);
+      console.warn('Could not initialize CMS tenant workspace:', err);
     } finally {
       setLoadingTenancy(false);
     }
@@ -345,14 +370,26 @@ const CmsPage = () => {
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
 
-    if (!selectedWorkspaceId) {
-      toast.error('No tenant workspace selected. Please ensure your workspace is active.');
+    let targetWsId = selectedWorkspaceId || workspaces[0]?.id;
+    if (!targetWsId) {
+      try {
+        const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
+        if (createWsRes.ok && createWsRes.data?.id) {
+          targetWsId = createWsRes.data.id;
+          setWorkspaces([createWsRes.data]);
+          setSelectedWorkspaceId(targetWsId);
+        }
+      } catch {}
+    }
+
+    if (!targetWsId) {
+      toast.error('No tenant workspace active. Please reconnect to CMS.');
       return;
     }
 
     setCreatingSite(true);
     try {
-      const res = await cmsService.createSite(selectedWorkspaceId, {
+      const res = await cmsService.createSite(targetWsId, {
         name: newSiteName.trim(),
         slug: cleanSlug,
         default_locale: newSiteLocale || 'en-US',
@@ -363,7 +400,11 @@ const CmsPage = () => {
         setIsCreateSiteOpen(false);
         setNewSiteName('');
         setNewSiteSlug('');
-        await loadSitesForWorkspace(selectedWorkspaceId);
+        setSelectedWorkspaceId(targetWsId);
+        await loadSitesForWorkspace(targetWsId);
+        if (res.data?.id) {
+          setSelectedSiteId(res.data.id);
+        }
       } else {
         toast.error('Failed to create site: ' + (res.error || 'Server error'));
       }
@@ -377,6 +418,18 @@ const CmsPage = () => {
   // Create Article
   const handleCreateArticle = async (e) => {
     e.preventDefault();
+    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
+    if (!targetWsId) {
+      toast.error('No tenant workspace active. Please ensure a workspace is connected.');
+      return;
+    }
+    const targetSiteId = selectedSiteId || sites[0]?.id;
+    if (!targetSiteId) {
+      toast.error('No active publication site selected. Please register a site first using "+ New Site".');
+      setIsCreateArticleOpen(false);
+      setIsCreateSiteOpen(true);
+      return;
+    }
     if (!newArtTitle.trim()) {
       toast.error('Article title is required.');
       return;
@@ -390,7 +443,7 @@ const CmsPage = () => {
 
     setCreatingArticle(true);
     try {
-      const res = await cmsService.createArticle(selectedWorkspaceId, selectedSiteId, {
+      const res = await cmsService.createArticle(targetWsId, targetSiteId, {
         title: newArtTitle.trim(),
         slug: cleanSlug,
         body: newArtBody,
@@ -404,7 +457,7 @@ const CmsPage = () => {
         setNewArtTitle('');
         setNewArtSlug('');
         setNewArtExcerpt('');
-        await loadArticlesForSite(selectedWorkspaceId, selectedSiteId);
+        await loadArticlesForSite(targetWsId, targetSiteId);
         // Automatically open pipeline inspector on new article
         if (res.data?.id) {
           inspectPipeline(res.data);
@@ -950,8 +1003,13 @@ const CmsPage = () => {
   };
 
   const handleAuthorizeGoogleAds = async () => {
+    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
+    if (!targetWsId) {
+      toast.error('Please connect or select a workspace before authorizing Google Ads.');
+      return;
+    }
     try {
-      const res = await cmsService.authorizeGoogleAds(selectedWorkspaceId);
+      const res = await cmsService.authorizeGoogleAds(targetWsId);
       if (res.ok && res.data?.authorization_url) {
         window.location.href = res.data.authorization_url;
       } else {
@@ -1107,11 +1165,15 @@ const CmsPage = () => {
               disabled={loadingTenancy || workspaces.length === 0}
               className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              {workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  🏢 {w.name}
-                </option>
-              ))}
+              {workspaces.length === 0 ? (
+                <option value="">🏢 No Workspace</option>
+              ) : (
+                workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    🏢 {w.name}
+                  </option>
+                ))
+              )}
             </select>
 
             {/* Site Switcher */}
@@ -1121,11 +1183,15 @@ const CmsPage = () => {
               disabled={loadingTenancy || sites.length === 0}
               className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 max-w-[200px]"
             >
-              {sites.map((s) => (
-                <option key={s.id} value={s.id}>
-                  🌐 {s.name} ({s.slug})
-                </option>
-              ))}
+              {sites.length === 0 ? (
+                <option value="">🌐 No Site Active</option>
+              ) : (
+                sites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    🌐 {s.name} ({s.slug})
+                  </option>
+                ))
+              )}
             </select>
 
             {/* New Site Button */}
@@ -1581,7 +1647,14 @@ const CmsPage = () => {
                 Compare Public Delivery API
               </button>
               <button
-                onClick={() => setIsCreateArticleOpen(!isCreateArticleOpen)}
+                onClick={() => {
+                  if (sites.length === 0) {
+                    toast.info('Please register a publication site first before creating an article.');
+                    setIsCreateSiteOpen(true);
+                  } else {
+                    setIsCreateArticleOpen(!isCreateArticleOpen);
+                  }
+                }}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -1589,6 +1662,25 @@ const CmsPage = () => {
               </button>
             </div>
           </div>
+
+          {/* Prompt Banner if No Publication Sites Exist */}
+          {sites.length === 0 && !loadingTenancy && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-center text-amber-950 shadow-xs space-y-2">
+              <Globe className="w-10 h-10 text-amber-600 mx-auto" />
+              <h3 className="text-sm font-bold text-amber-950">No Publication Site Active</h3>
+              <p className="text-xs text-amber-800 max-w-md mx-auto">
+                Articles are published to specific publication sites. Click below to register your publication site (e.g. <code>blogpage-hikasimat-com</code>) before authoring articles.
+              </p>
+              <button
+                type="button"
+                onClick={() => setIsCreateSiteOpen(true)}
+                className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-xs inline-flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Register Publication Site
+              </button>
+            </div>
+          )}
 
           {/* Collapsible: Create Article Card */}
           {isCreateArticleOpen && (
@@ -2837,7 +2929,12 @@ const CmsPage = () => {
                     type="button"
                     onClick={async () => {
                       try {
-                        const res = await cmsService.exchangeGoogleAdsCode(selectedWorkspaceId, 'mock-demo-token');
+                        const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
+                        if (!targetWsId) {
+                          toast.error('Please connect or select a workspace first.');
+                          return;
+                        }
+                        const res = await cmsService.exchangeGoogleAdsCode(targetWsId, 'mock-demo-token');
                         if (res.ok) {
                           toast.success('Connected in demo mode with sample campaigns!');
                           await loadGoogleAdsData();

@@ -5,6 +5,8 @@
  */
 
 import { store } from '../app/store';
+import api from './api';
+import { tokenRefreshed } from '../features/auth/authSlice';
 
 const CMS_GATEWAY_STORAGE_KEY = 'cms_dynamic_gateway_url';
 const DEFAULT_CMS_FALLBACK = 'https://cms.hikasimat.com';
@@ -229,10 +231,43 @@ export async function cmsFetch(endpoint, options = {}, requireAuth = true) {
 /**
  * Auto-authenticate using Market Intel DB DM credentials or federated token
  */
+let autoLoginPromise = null;
+
 export async function autoLoginCms(email = null, password = null) {
+  if (autoLoginPromise) return autoLoginPromise;
+  autoLoginPromise = _executeAutoLogin(email, password).finally(() => {
+    autoLoginPromise = null;
+  });
+  return autoLoginPromise;
+}
+
+async function _executeAutoLogin(email = null, password = null) {
   const base = getCmsBaseUrl();
   try {
-    // 1. If user is authenticated in Market Intel DB, use active access token
+    // 0. Rotate CMS access token if refresh token exists in localStorage
+    if (typeof localStorage !== 'undefined') {
+      const storedRefresh = localStorage.getItem(CMS_REFRESH_KEY);
+      if (storedRefresh) {
+        try {
+          const refRes = await fetch(`${base}/api/v1/auth/refresh/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh: storedRefresh }),
+          });
+          if (refRes.ok) {
+            const refTokens = await refRes.json();
+            if (refTokens.access) {
+              setStoredCmsTokens(refTokens.access, refTokens.refresh || storedRefresh);
+              return true;
+            }
+          }
+        } catch (refErr) {
+          console.warn('CMS refresh token rotation failed:', refErr);
+        }
+      }
+    }
+
+    // 1. Obtain active Market Intel DB token (from Redux or by refreshing active session cookie)
     let activeToken = null;
     try {
       activeToken = store?.getState?.()?.auth?.accessToken;
@@ -240,8 +275,38 @@ export async function autoLoginCms(email = null, password = null) {
       // Ignore store error
     }
 
+    // If Redux has no access token, refresh it via Market Intel DB axios api instance
+    if (!activeToken) {
+      try {
+        const miRefRes = await api.post('/auth/refresh/', {});
+        if (miRefRes.data?.access) {
+          activeToken = miRefRes.data.access;
+          try {
+            store.dispatch(tokenRefreshed({ access: activeToken }));
+          } catch {}
+        }
+      } catch (miErr) {
+        // If refresh failed, fallback to direct fetch
+        try {
+          const miFetch = await fetch('/api/auth/refresh/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({}),
+          });
+          if (miFetch.ok) {
+            const data = await miFetch.json();
+            if (data.access) {
+              activeToken = data.access;
+              try { store.dispatch(tokenRefreshed({ access: activeToken })); } catch {}
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // 2. If active Market Intel token is available, exchange it with CMS
     if (activeToken) {
-      // Try Market Intel token exchange endpoint first
       try {
         const exRes = await fetch(`${base}/api/v1/auth/marketintel/exchange/`, {
           method: 'POST',
@@ -278,22 +343,22 @@ export async function autoLoginCms(email = null, password = null) {
       }
     }
 
-    // 2. Fallback to credentials login if provided or system fallback
-    const userEmail = email || 'mohan.dev.v22@gmail.com';
-    const userPassword = password || 'AdminPassword123!';
-    const res = await fetch(`${base}/api/v1/auth/login/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: userEmail, password: userPassword }),
-    });
-
-    if (res.ok) {
-      const tokens = await res.json();
-      if (tokens.access) {
-        setStoredCmsTokens(tokens.access, tokens.refresh);
-        return true;
+    // 3. Optional fallback for explicit credentials (when provided by caller)
+    if (email && password) {
+      const res = await fetch(`${base}/api/v1/auth/login/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (res.ok) {
+        const tokens = await res.json();
+        if (tokens.access) {
+          setStoredCmsTokens(tokens.access, tokens.refresh);
+          return true;
+        }
       }
     }
+
     return false;
   } catch (e) {
     console.warn('Auto-login to CMS failed:', e);

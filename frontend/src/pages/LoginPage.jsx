@@ -70,8 +70,13 @@ const LoginPage = () => {
       const fetchSessionUser = async () => {
         dispatch(loginStart());
         try {
+          let token = null;
+          try {
+            const refRes = await api.post('/auth/refresh/', {});
+            token = refRes.data?.access || null;
+          } catch {}
           const meRes = await api.get('/auth/me/');
-          dispatch(loginSuccess({ access: null, user: meRes.data }));
+          dispatch(loginSuccess({ access: token, user: meRes.data }));
           navigateByRole(meRes.data.role);
         } catch (err) {
           dispatch(loginFailure(err.response?.data?.detail || 'Session restoration failed.'));
