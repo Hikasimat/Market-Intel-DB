@@ -762,12 +762,22 @@ const CmsPage = () => {
 
         // Fetch accessible customer accounts
         const custRes = await cmsService.getGoogleAdsCustomers(selectedWorkspaceId);
+        let accessibleCustomers = [];
         if (custRes.ok && Array.isArray(custRes.data?.customers)) {
-          setGoogleAdsCustomers(custRes.data.customers);
+          accessibleCustomers = custRes.data.customers;
+          setGoogleAdsCustomers(accessibleCustomers);
+        }
+
+        // If customer ID is not yet selected but accessible accounts exist, auto-select first CID
+        let customerId = connRes.data?.connection?.customer_id;
+        if (!customerId && accessibleCustomers.length > 0) {
+          const firstCid = accessibleCustomers[0];
+          await cmsService.selectGoogleAdsCustomer(selectedWorkspaceId, firstCid);
+          customerId = firstCid;
+          setGoogleAdsConnection((prev) => ({ ...prev, customer_id: firstCid }));
         }
 
         // If customer ID is selected, load campaigns, ad groups, keywords, and audit logs
-        const customerId = connRes.data?.connection?.customer_id;
         if (customerId) {
           const [campRes, adgRes, kwRes, auditRes] = await Promise.all([
             cmsService.getGoogleAdsCampaigns(selectedWorkspaceId, adsDateRange),
@@ -805,6 +815,29 @@ const CmsPage = () => {
       setLoadingGoogleAds(false);
     }
   };
+
+  // Auto-exchange Google OAuth code on redirect return
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    if (code && selectedWorkspaceId) {
+      (async () => {
+        try {
+          const res = await cmsService.exchangeGoogleAdsCode(selectedWorkspaceId, code);
+          if (res.ok) {
+            toast.success('Google Ads authorization completed successfully!');
+            window.history.replaceState({}, document.title, window.location.pathname);
+            await loadGoogleAdsData();
+          } else {
+            toast.error('Google Ads OAuth exchange failed: ' + (res.error || 'Server error'));
+          }
+        } catch (err) {
+          toast.error('OAuth exchange error: ' + err.message);
+        }
+      })();
+    }
+  }, [selectedWorkspaceId]);
 
   const handleSelectGoogleAdsCustomer = async (cid) => {
     if (!selectedWorkspaceId || !cid) return;
@@ -859,11 +892,11 @@ const CmsPage = () => {
 
   const handleOpenBudgetModal = (campaign) => {
     setSelectedCampaignForBudget(campaign);
-    setNewBudgetAmount(
-      campaign.budget_micros
-        ? (Number(campaign.budget_micros) / 1000000).toFixed(2)
-        : '50.00'
-    );
+    const existingBudget =
+      campaign.budget_amount ||
+      campaign.budget ||
+      (campaign.budget_micros ? (Number(campaign.budget_micros) / 1000000).toFixed(2) : '50.00');
+    setNewBudgetAmount(String(existingBudget));
     setBudgetModalOpen(true);
   };
 
@@ -872,10 +905,15 @@ const CmsPage = () => {
     if (!selectedCampaignForBudget || !newBudgetAmount) return;
     setUpdatingBudget(true);
     try {
+      const campId = selectedCampaignForBudget.campaign_id || selectedCampaignForBudget.id;
+      const campName = selectedCampaignForBudget.campaign_name || selectedCampaignForBudget.name || '';
+      const customerId = googleAdsConnection?.customer_id || '';
       const res = await cmsService.updateGoogleAdsBudget(
         selectedWorkspaceId,
-        selectedCampaignForBudget.id,
-        parseFloat(newBudgetAmount)
+        campId,
+        parseFloat(newBudgetAmount),
+        customerId,
+        campName
       );
       if (res.ok) {
         toast.success(`Campaign daily budget updated to $${newBudgetAmount}`);
@@ -915,10 +953,9 @@ const CmsPage = () => {
     try {
       const res = await cmsService.authorizeGoogleAds(selectedWorkspaceId);
       if (res.ok && res.data?.authorization_url) {
-        window.open(res.data.authorization_url, '_blank', 'width=600,height=700');
-        toast.info('Google authorization window opened. Complete consent to connect.');
+        window.location.href = res.data.authorization_url;
       } else {
-        toast.error('Failed to initialize Google Ads authorization.');
+        toast.error('Failed to initialize Google Ads authorization: ' + (res.error || 'Server error'));
       }
     } catch (err) {
       toast.error('Authorization error: ' + err.message);
@@ -2880,8 +2917,8 @@ const CmsPage = () => {
               <div className="text-2xl font-black text-slate-900">
                 ${(
                   googleAdsCampaigns.reduce((sum, c) => {
-                    const micros = Number(c.cost_micros || c.spend_micros || 0);
-                    return sum + (micros > 0 ? micros / 1000000 : Number(c.cost || c.spend || 0));
+                    const costVal = Number(c.cost ?? (c.cost_micros ? c.cost_micros / 1000000 : (c.spend_micros ? c.spend_micros / 1000000 : c.spend ?? 0)));
+                    return sum + costVal;
                   }, 0)
                 ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
@@ -2903,8 +2940,8 @@ const CmsPage = () => {
                 {(() => {
                   const convs = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.conversions || 0), 0);
                   const cost = googleAdsCampaigns.reduce((sum, c) => {
-                    const micros = Number(c.cost_micros || c.spend_micros || 0);
-                    return sum + (micros > 0 ? micros / 1000000 : Number(c.cost || c.spend || 0));
+                    const costVal = Number(c.cost ?? (c.cost_micros ? c.cost_micros / 1000000 : (c.spend_micros ? c.spend_micros / 1000000 : c.spend ?? 0)));
+                    return sum + costVal;
                   }, 0);
                   return convs > 0 ? '$' + (cost / convs).toFixed(2) + ' CPA' : 'No conversions';
                 })()}
@@ -2983,20 +3020,26 @@ const CmsPage = () => {
                         </thead>
                         <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
                           {googleAdsCampaigns.map((camp) => {
+                            const campId = camp.campaign_id || camp.id;
+                            const campName = camp.campaign_name || camp.name || 'Campaign';
                             const isEnabled = camp.status === 'ENABLED';
-                            const isMutating = mutatingCampaignId === camp.id;
-                            const dailyBudgetUsd = camp.budget_micros
+                            const isMutating = mutatingCampaignId === campId;
+                            const dailyBudgetUsd = camp.budget_amount != null
+                              ? Number(camp.budget_amount).toFixed(2)
+                              : camp.budget_micros != null
                               ? (Number(camp.budget_micros) / 1000000).toFixed(2)
                               : Number(camp.budget || 0).toFixed(2);
-                            const spendUsd = camp.cost_micros
+                            const spendUsd = camp.cost != null
+                              ? Number(camp.cost).toFixed(2)
+                              : camp.cost_micros != null
                               ? (Number(camp.cost_micros) / 1000000).toFixed(2)
-                              : Number(camp.spend || camp.cost || 0).toFixed(2);
+                              : Number(camp.spend || 0).toFixed(2);
 
                             return (
-                              <tr key={camp.id} className="hover:bg-slate-50/70 transition">
+                              <tr key={campId} className="hover:bg-slate-50/70 transition">
                                 <td className="py-3 px-4">
-                                  <div className="font-bold text-slate-900">{camp.name}</div>
-                                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {camp.id}</div>
+                                  <div className="font-bold text-slate-900">{campName}</div>
+                                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {campId}</div>
                                 </td>
                                 <td className="py-3 px-3">
                                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -3031,7 +3074,7 @@ const CmsPage = () => {
                                     {isEnabled ? (
                                       <button
                                         type="button"
-                                        onClick={() => handlePauseCampaign(camp.id)}
+                                        onClick={() => handlePauseCampaign(campId)}
                                         disabled={isMutating}
                                         title="Pause Campaign"
                                         className="flex items-center gap-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
@@ -3042,7 +3085,7 @@ const CmsPage = () => {
                                     ) : (
                                       <button
                                         type="button"
-                                        onClick={() => handleResumeCampaign(camp.id)}
+                                        onClick={() => handleResumeCampaign(campId)}
                                         disabled={isMutating}
                                         title="Resume / Activate Campaign"
                                         className="flex items-center gap-1 px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
@@ -3054,7 +3097,7 @@ const CmsPage = () => {
 
                                     <button
                                       type="button"
-                                      onClick={() => handleOpenBudgetModal(camp)}
+                                      onClick={() => handleOpenBudgetModal({ ...camp, id: campId, name: campName })}
                                       title="Update Daily Budget"
                                       className="flex items-center gap-1 px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
                                     >

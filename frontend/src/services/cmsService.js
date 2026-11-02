@@ -111,13 +111,9 @@ const CMS_TOKEN_KEY = 'cms_jwt_access_token';
 const CMS_REFRESH_KEY = 'cms_jwt_refresh_token';
 
 export const getStoredCmsToken = () => {
-  const localToken = localStorage.getItem(CMS_TOKEN_KEY);
-  if (localToken) return localToken;
-  try {
-    const miToken = store?.getState?.()?.auth?.accessToken;
-    if (miToken) return miToken;
-  } catch {
-    // Ignore store access error
+  if (typeof localStorage !== 'undefined') {
+    const localToken = localStorage.getItem(CMS_TOKEN_KEY);
+    if (localToken && localToken.trim()) return localToken.trim();
   }
   return '';
 };
@@ -280,13 +276,10 @@ export async function autoLoginCms(email = null, password = null) {
       } catch (ltErr) {
         console.warn('Direct token login error:', ltErr);
       }
-
-      setStoredCmsTokens(activeToken, null);
-      return true;
     }
 
-    // 2. Fallback to credentials login if provided
-    const userEmail = email || 'meynix.official@gmail.com';
+    // 2. Fallback to credentials login if provided or system fallback
+    const userEmail = email || 'mohan.dev.v22@gmail.com';
     const userPassword = password || 'AdminPassword123!';
     const res = await fetch(`${base}/api/v1/auth/login/`, {
       method: 'POST',
@@ -472,9 +465,27 @@ export const cmsService = {
     return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/connection/`, { method: 'GET' }, true);
   },
   async authorizeGoogleAds(workspaceId, redirectUri = '') {
-    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/authorize/`, {
+    const defaultUri = typeof window !== 'undefined'
+      ? `${window.location.origin}/digital-marketing/cms/`
+      : 'https://marketinteldbapp.hikasimat.com/digital-marketing/cms/';
+    const targetUri = redirectUri || defaultUri;
+    const qs = `?redirect_uri=${encodeURIComponent(targetUri)}`;
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/authorize/${qs}`, {
+      method: 'GET',
+    }, true);
+  },
+  async exchangeGoogleAdsCode(workspaceId, code, redirectUri = '', developerToken = '') {
+    const defaultUri = typeof window !== 'undefined'
+      ? `${window.location.origin}/digital-marketing/cms/`
+      : 'https://marketinteldbapp.hikasimat.com/digital-marketing/cms/';
+    const targetUri = redirectUri || defaultUri;
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/callback/`, {
       method: 'POST',
-      body: redirectUri ? { redirect_uri: redirectUri } : {},
+      body: {
+        code,
+        redirect_uri: targetUri,
+        developer_token: developerToken || '',
+      },
     }, true);
   },
   async disconnectGoogleAds(workspaceId) {
@@ -483,10 +494,15 @@ export const cmsService = {
   async getGoogleAdsCustomers(workspaceId) {
     return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/customers/`, { method: 'GET' }, true);
   },
-  async selectGoogleAdsCustomer(workspaceId, { customer_id, manager_customer_id = '', developer_token = '' }) {
+  async selectGoogleAdsCustomer(workspaceId, payload) {
+    const data = typeof payload === 'string' ? { customer_id: payload } : (payload || {});
     return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/customers/select/`, {
       method: 'POST',
-      body: { customer_id, manager_customer_id, developer_token },
+      body: {
+        customer_id: data.customer_id,
+        manager_customer_id: data.manager_customer_id || '',
+        developer_token: data.developer_token || '',
+      },
     }, true);
   },
   async getGoogleAdsCampaigns(workspaceId, { start_date, end_date } = {}) {
@@ -508,14 +524,34 @@ export const cmsService = {
       body: { confirm: true, campaign_name: campaignName },
     }, true);
   },
-  async updateGoogleAdsBudget(workspaceId, campaignId, { budget_resource_name, amount_micros, campaign_name = '' }) {
+  async updateGoogleAdsBudget(workspaceId, campaignId, budgetArg, customerId = '', campaignName = '') {
+    let budget_resource_name = '';
+    let amount_micros = 0;
+    let name = campaignName;
+
+    if (typeof budgetArg === 'object' && budgetArg !== null) {
+      budget_resource_name =
+        budgetArg.budget_resource_name ||
+        (customerId ? `customers/${customerId}/campaignBudgets/${campaignId}` : `customers/default/campaignBudgets/${campaignId}`);
+      amount_micros =
+        budgetArg.amount_micros ||
+        Math.round(Number(budgetArg.amount || budgetArg.amount_dollars || 0) * 1000000);
+      name = budgetArg.campaign_name || name;
+    } else {
+      const dollars = parseFloat(budgetArg) || 0;
+      amount_micros = Math.round(dollars * 1000000);
+      budget_resource_name = customerId
+        ? `customers/${customerId}/campaignBudgets/${campaignId}`
+        : `customers/default/campaignBudgets/${campaignId}`;
+    }
+
     return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/campaigns/${campaignId}/budget/`, {
       method: 'POST',
       body: {
         budget_resource_name,
         amount_micros,
         campaign_id: campaignId,
-        campaign_name,
+        campaign_name: name,
         confirm: true,
       },
     }, true);
