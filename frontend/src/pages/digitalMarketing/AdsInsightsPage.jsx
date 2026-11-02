@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { 
   BarChart2, 
@@ -103,6 +104,32 @@ const AdsInsightsPage = () => {
             Refresh
           </button>
         </div>
+      </div>
+
+      {/* Headless CMS Google Ads Callout Banner */}
+      <div className="bg-gradient-to-r from-blue-900 to-indigo-900 text-white rounded-2xl p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 border border-blue-700/50">
+        <div className="flex items-center gap-3.5">
+          <div className="w-10 h-10 rounded-xl bg-blue-500/20 border border-blue-400/30 flex items-center justify-center text-blue-300 shrink-0">
+            <TrendingUp className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold tracking-tight text-white">Google Ads Manager Live in Headless CMS Suite</span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-blue-400/20 text-blue-200 border border-blue-400/30 uppercase">
+                New Integration
+              </span>
+            </div>
+            <p className="text-xs text-blue-200/90 mt-0.5">
+              Sync GAQL queries, pause/resume search campaigns, calibrate daily budgets, and track keyword performance.
+            </p>
+          </div>
+        </div>
+        <Link
+          to="/digital-marketing/cms"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-white hover:bg-blue-50 text-blue-900 rounded-xl text-xs font-bold transition shadow-xs shrink-0 self-start md:self-auto"
+        >
+          Open Google Ads Manager &rarr;
+        </Link>
       </div>
 
       {/* Strict Security Policy Notice */}

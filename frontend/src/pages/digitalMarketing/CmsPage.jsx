@@ -29,7 +29,14 @@ import {
   Users,
   Eye,
   Sliders,
-  X
+  X,
+  TrendingUp,
+  DollarSign,
+  Play,
+  Pause,
+  Tag,
+  Target,
+  History
 } from 'lucide-react';
 import {
   cmsService,
@@ -118,6 +125,23 @@ const CmsPage = () => {
   const [consentJurisdiction, setConsentJurisdiction] = useState('EU_GDPR');
   const [consentResult, setConsentResult] = useState(null);
   const [recordingConsent, setRecordingConsent] = useState(false);
+
+  // Tab 6: Google Ads Workspace Integration
+  const [googleAdsConnection, setGoogleAdsConnection] = useState(null);
+  const [loadingGoogleAds, setLoadingGoogleAds] = useState(false);
+  const [googleAdsCustomers, setGoogleAdsCustomers] = useState([]);
+  const [googleAdsCampaigns, setGoogleAdsCampaigns] = useState([]);
+  const [loadingCampaigns, setLoadingCampaigns] = useState(false);
+  const [googleAdsAdGroups, setGoogleAdsAdGroups] = useState([]);
+  const [googleAdsKeywords, setGoogleAdsKeywords] = useState([]);
+  const [googleAdsAuditLogs, setGoogleAdsAuditLogs] = useState([]);
+  const [adsDateRange, setAdsDateRange] = useState('30d');
+  const [adsSubTab, setAdsSubTab] = useState('campaigns'); // 'campaigns' | 'adgroups' | 'keywords' | 'audit'
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
+  const [selectedCampaignForBudget, setSelectedCampaignForBudget] = useState(null);
+  const [newBudgetAmount, setNewBudgetAmount] = useState('');
+  const [updatingBudget, setUpdatingBudget] = useState(false);
+  const [mutatingCampaignId, setMutatingCampaignId] = useState(null);
 
   // Subscribe to realtime Activity Inspector logs
   useEffect(() => {
@@ -212,9 +236,16 @@ const CmsPage = () => {
 
       // Load workspaces
       const wsRes = await cmsService.getWorkspaces();
-      const wsList = Array.isArray(wsRes.data)
+      let wsList = Array.isArray(wsRes.data)
         ? wsRes.data
         : wsRes.data?.results || [];
+
+      if (wsList.length === 0 && wsRes.ok) {
+        const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
+        if (createWsRes.ok && createWsRes.data?.id) {
+          wsList = [createWsRes.data];
+        }
+      }
 
       setWorkspaces(wsList);
       if (wsList.length > 0) {
@@ -313,6 +344,11 @@ const CmsPage = () => {
         .replace(/^https?:\/\//i, '')
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
+
+    if (!selectedWorkspaceId) {
+      toast.error('No tenant workspace selected. Please ensure your workspace is active.');
+      return;
+    }
 
     setCreatingSite(true);
     try {
@@ -715,6 +751,180 @@ const CmsPage = () => {
     }
   };
 
+  // Google Ads Management Handlers
+  const loadGoogleAdsData = async () => {
+    if (!selectedWorkspaceId) return;
+    setLoadingGoogleAds(true);
+    try {
+      const connRes = await cmsService.getGoogleAdsConnection(selectedWorkspaceId);
+      if (connRes.ok && connRes.data?.connected) {
+        setGoogleAdsConnection(connRes.data.connection || connRes.data);
+
+        // Fetch accessible customer accounts
+        const custRes = await cmsService.getGoogleAdsCustomers(selectedWorkspaceId);
+        if (custRes.ok && Array.isArray(custRes.data?.customers)) {
+          setGoogleAdsCustomers(custRes.data.customers);
+        }
+
+        // If customer ID is selected, load campaigns, ad groups, keywords, and audit logs
+        const customerId = connRes.data?.connection?.customer_id;
+        if (customerId) {
+          const [campRes, adgRes, kwRes, auditRes] = await Promise.all([
+            cmsService.getGoogleAdsCampaigns(selectedWorkspaceId, adsDateRange),
+            cmsService.getGoogleAdsAdGroups(selectedWorkspaceId, adsDateRange),
+            cmsService.getGoogleAdsKeywords(selectedWorkspaceId, adsDateRange),
+            cmsService.getGoogleAdsAuditLogs(selectedWorkspaceId),
+          ]);
+
+          if (campRes.ok) {
+            setGoogleAdsCampaigns(campRes.data?.campaigns || []);
+          }
+          if (adgRes.ok) {
+            setGoogleAdsAdGroups(adgRes.data?.ad_groups || []);
+          }
+          if (kwRes.ok) {
+            setGoogleAdsKeywords(kwRes.data?.keywords || []);
+          }
+          if (auditRes.ok) {
+            const logsList = Array.isArray(auditRes.data)
+              ? auditRes.data
+              : auditRes.data?.results || [];
+            setGoogleAdsAuditLogs(logsList);
+          }
+        }
+      } else {
+        setGoogleAdsConnection(null);
+        setGoogleAdsCampaigns([]);
+        setGoogleAdsAdGroups([]);
+        setGoogleAdsKeywords([]);
+        setGoogleAdsAuditLogs([]);
+      }
+    } catch (err) {
+      console.warn('Error loading Google Ads data:', err);
+    } finally {
+      setLoadingGoogleAds(false);
+    }
+  };
+
+  const handleSelectGoogleAdsCustomer = async (cid) => {
+    if (!selectedWorkspaceId || !cid) return;
+    try {
+      const res = await cmsService.selectGoogleAdsCustomer(selectedWorkspaceId, cid);
+      if (res.ok) {
+        toast.success(`Google Ads Account ${cid} selected!`);
+        await loadGoogleAdsData();
+      } else {
+        toast.error('Failed to select customer ID: ' + (res.error || 'Server error'));
+      }
+    } catch (err) {
+      toast.error('Error selecting customer ID: ' + err.message);
+    }
+  };
+
+  const handlePauseCampaign = async (campaignId) => {
+    if (!selectedWorkspaceId || !campaignId) return;
+    setMutatingCampaignId(campaignId);
+    try {
+      const res = await cmsService.pauseGoogleAdsCampaign(selectedWorkspaceId, campaignId);
+      if (res.ok) {
+        toast.success(`Campaign ${campaignId} paused successfully.`);
+        await loadGoogleAdsData();
+      } else {
+        toast.error('Failed to pause campaign: ' + (res.error || 'Server error'));
+      }
+    } catch (err) {
+      toast.error('Error pausing campaign: ' + err.message);
+    } finally {
+      setMutatingCampaignId(null);
+    }
+  };
+
+  const handleResumeCampaign = async (campaignId) => {
+    if (!selectedWorkspaceId || !campaignId) return;
+    setMutatingCampaignId(campaignId);
+    try {
+      const res = await cmsService.resumeGoogleAdsCampaign(selectedWorkspaceId, campaignId);
+      if (res.ok) {
+        toast.success(`Campaign ${campaignId} activated/resumed successfully.`);
+        await loadGoogleAdsData();
+      } else {
+        toast.error('Failed to resume campaign: ' + (res.error || 'Server error'));
+      }
+    } catch (err) {
+      toast.error('Error resuming campaign: ' + err.message);
+    } finally {
+      setMutatingCampaignId(null);
+    }
+  };
+
+  const handleOpenBudgetModal = (campaign) => {
+    setSelectedCampaignForBudget(campaign);
+    setNewBudgetAmount(
+      campaign.budget_micros
+        ? (Number(campaign.budget_micros) / 1000000).toFixed(2)
+        : '50.00'
+    );
+    setBudgetModalOpen(true);
+  };
+
+  const handleUpdateBudgetSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedCampaignForBudget || !newBudgetAmount) return;
+    setUpdatingBudget(true);
+    try {
+      const res = await cmsService.updateGoogleAdsBudget(
+        selectedWorkspaceId,
+        selectedCampaignForBudget.id,
+        parseFloat(newBudgetAmount)
+      );
+      if (res.ok) {
+        toast.success(`Campaign daily budget updated to $${newBudgetAmount}`);
+        setBudgetModalOpen(false);
+        setSelectedCampaignForBudget(null);
+        await loadGoogleAdsData();
+      } else {
+        toast.error('Failed to update budget: ' + (res.error || 'Server error'));
+      }
+    } catch (err) {
+      toast.error('Error updating budget: ' + err.message);
+    } finally {
+      setUpdatingBudget(false);
+    }
+  };
+
+  const handleDisconnectGoogleAds = async () => {
+    if (!window.confirm('Are you sure you want to disconnect Google Ads from this workspace?')) return;
+    try {
+      const res = await cmsService.disconnectGoogleAds(selectedWorkspaceId);
+      if (res.ok) {
+        toast.success('Google Ads disconnected.');
+        setGoogleAdsConnection(null);
+        setGoogleAdsCampaigns([]);
+        setGoogleAdsAdGroups([]);
+        setGoogleAdsKeywords([]);
+        setGoogleAdsAuditLogs([]);
+      } else {
+        toast.error('Failed to disconnect: ' + (res.error || 'Server error'));
+      }
+    } catch (err) {
+      toast.error('Error disconnecting Google Ads: ' + err.message);
+    }
+  };
+
+  const handleAuthorizeGoogleAds = async () => {
+    try {
+      const res = await cmsService.authorizeGoogleAds(selectedWorkspaceId);
+      if (res.ok && res.data?.authorization_url) {
+        window.open(res.data.authorization_url, '_blank', 'width=600,height=700');
+        toast.info('Google authorization window opened. Complete consent to connect.');
+      } else {
+        toast.error('Failed to initialize Google Ads authorization.');
+      }
+    } catch (err) {
+      toast.error('Authorization error: ' + err.message);
+    }
+  };
+
   // Switch tabs handler
   const handleTabSwitch = (tab) => {
     setActiveTab(tab);
@@ -723,6 +933,8 @@ const CmsPage = () => {
       loadIndexingLogs();
     } else if (tab === 'analytics') {
       loadAnalytics();
+    } else if (tab === 'google_ads') {
+      loadGoogleAdsData();
     }
   };
 
@@ -1254,6 +1466,7 @@ const CmsPage = () => {
             },
             { id: 'seo', label: 'Technical SEO & Indexing', icon: Search },
             { id: 'analytics', label: 'Privacy Analytics & GA4', icon: BarChart3 },
+            { id: 'google_ads', label: 'Google Ads Manager', icon: TrendingUp, badge: 'New' },
             { id: 'consent', label: 'Consent Manager (GDPR)', icon: ShieldCheck },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -1277,6 +1490,11 @@ const CmsPage = () => {
                     }`}
                   >
                     {tab.count}
+                  </span>
+                )}
+                {tab.badge && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-2xs">
+                    {tab.badge}
                   </span>
                 )}
                 {tab.highlight && (
@@ -2421,6 +2639,729 @@ const CmsPage = () => {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────── */}
+      {/* TAB 5: GOOGLE ADS CAMPAIGN MANAGER */}
+      {/* ─────────────────────────────────────────────────────────────── */}
+      {activeTab === 'google_ads' && (
+        <div className="space-y-6">
+          {/* Section Toolbar */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center text-white shadow-xs">
+                  <TrendingUp className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    Google Ads Manager
+                    <span className="px-2 py-0.5 text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200 rounded-full uppercase">
+                      Workspace Integration
+                    </span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    GAQL query sync, live campaign control, budget adjustments & mutation audit logs
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Date Range Selector & Actions */}
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700">
+                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                <span className="text-slate-400 text-[11px] font-medium">From:</span>
+                <input
+                  type="date"
+                  value={adsDateRange.start_date}
+                  onChange={(e) => setAdsDateRange((prev) => ({ ...prev, start_date: e.target.value }))}
+                  className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none"
+                />
+                <span className="text-slate-400 text-[11px] font-medium">To:</span>
+                <input
+                  type="date"
+                  value={adsDateRange.end_date}
+                  onChange={(e) => setAdsDateRange((prev) => ({ ...prev, end_date: e.target.value }))}
+                  className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={loadGoogleAdsData}
+                disabled={loadingGoogleAds}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold transition shadow-2xs"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingGoogleAds ? 'animate-spin text-blue-600' : 'text-slate-500'}`} />
+                Sync GAQL
+              </button>
+
+              {googleAdsConnection?.is_active ? (
+                <button
+                  type="button"
+                  onClick={handleDisconnectGoogleAds}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition shadow-2xs"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleAuthorizeGoogleAds}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs"
+                >
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  Connect Google Ads
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Connection Status Card */}
+          {googleAdsConnection?.is_active ? (
+            <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-2xl p-5 text-white shadow-md">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                    <CheckCircle2 className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold tracking-tight">Active Google Ads Connection</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        {googleAdsConnection.status || 'CONNECTED'}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300 mt-1">
+                      <span>
+                        Customer ID: <strong className="text-white font-mono">{googleAdsConnection.customer_id || 'Not selected'}</strong>
+                      </span>
+                      {googleAdsConnection.manager_customer_id && (
+                        <span>
+                          MCC: <strong className="text-white font-mono">{googleAdsConnection.manager_customer_id}</strong>
+                        </span>
+                      )}
+                      {googleAdsConnection.last_synced_at && (
+                        <span className="text-slate-400">
+                          Last Synced: {new Date(googleAdsConnection.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Account Switcher if multiple accessible accounts */}
+                {googleAdsCustomers.length > 0 && (
+                  <div className="flex items-center gap-2 bg-slate-800/80 p-2 rounded-xl border border-slate-700">
+                    <span className="text-xs text-slate-300 font-medium">Switch Account:</span>
+                    <select
+                      value={googleAdsConnection.customer_id || ''}
+                      onChange={(e) => handleSelectGoogleAdsCustomer(e.target.value)}
+                      className="bg-slate-900 text-white text-xs font-semibold px-2.5 py-1 rounded-lg border border-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    >
+                      <option value="" disabled>Select CID</option>
+                      {googleAdsCustomers.map((cid) => (
+                        <option key={cid} value={cid}>
+                          CID: {cid}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-6 text-slate-800">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-12 h-12 rounded-2xl bg-amber-100 flex items-center justify-center text-amber-700 shrink-0">
+                    <TrendingUp className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Google Ads Not Connected for this Workspace</h3>
+                    <p className="text-xs text-slate-600 mt-1 max-w-xl">
+                      Link your Google Ads account to query real-time campaign performance via GAQL, pause/resume search & display campaigns, and calibrate daily budgets directly from Market Intel DB.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleAuthorizeGoogleAds}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Authorize with Google
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await cmsService.exchangeGoogleAdsCode(selectedWorkspaceId, 'mock-demo-token');
+                        if (res.ok) {
+                          toast.success('Connected in demo mode with sample campaigns!');
+                          await loadGoogleAdsData();
+                        } else {
+                          toast.error('Demo connection failed: ' + (res.error || ''));
+                        }
+                      } catch (err) {
+                        toast.error('Error: ' + err.message);
+                      }
+                    }}
+                    className="px-3.5 py-2 bg-white hover:bg-amber-100/60 border border-amber-300 text-amber-900 rounded-xl text-xs font-bold transition shadow-2xs"
+                  >
+                    ⚡ Test with Demo CIDs
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Aggregate KPI Metric Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+            {/* Total Campaigns */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <div className="flex items-center justify-between text-slate-500 mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider">Campaigns</span>
+                <Target className="w-4 h-4 text-blue-600" />
+              </div>
+              <div className="text-2xl font-black text-slate-900">
+                {googleAdsCampaigns.length}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                {googleAdsCampaigns.filter((c) => c.status === 'ENABLED').length} active
+              </p>
+            </div>
+
+            {/* Total Impressions */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <div className="flex items-center justify-between text-slate-500 mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider">Impressions</span>
+                <Eye className="w-4 h-4 text-indigo-600" />
+              </div>
+              <div className="text-2xl font-black text-slate-900">
+                {googleAdsCampaigns
+                  .reduce((sum, c) => sum + Number(c.impressions || 0), 0)
+                  .toLocaleString()}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">Total views across search & display</p>
+            </div>
+
+            {/* Clicks & CTR */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <div className="flex items-center justify-between text-slate-500 mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider">Clicks & CTR</span>
+                <MousePointerClick className="w-4 h-4 text-emerald-600" />
+              </div>
+              <div className="text-2xl font-black text-slate-900">
+                {googleAdsCampaigns
+                  .reduce((sum, c) => sum + Number(c.clicks || 0), 0)
+                  .toLocaleString()}
+              </div>
+              <p className="text-[11px] text-emerald-600 font-bold mt-1">
+                {(() => {
+                  const imps = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.impressions || 0), 0);
+                  const clks = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.clicks || 0), 0);
+                  return imps > 0 ? ((clks / imps) * 100).toFixed(2) + '% CTR' : '0.00% CTR';
+                })()}
+              </p>
+            </div>
+
+            {/* Total Spend */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <div className="flex items-center justify-between text-slate-500 mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider">Total Spend</span>
+                <DollarSign className="w-4 h-4 text-amber-600" />
+              </div>
+              <div className="text-2xl font-black text-slate-900">
+                ${(
+                  googleAdsCampaigns.reduce((sum, c) => {
+                    const micros = Number(c.cost_micros || c.spend_micros || 0);
+                    return sum + (micros > 0 ? micros / 1000000 : Number(c.cost || c.spend || 0));
+                  }, 0)
+                ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">Accrued cost for period</p>
+            </div>
+
+            {/* Conversions */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <div className="flex items-center justify-between text-slate-500 mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider">Conversions</span>
+                <Sparkles className="w-4 h-4 text-purple-600" />
+              </div>
+              <div className="text-2xl font-black text-slate-900">
+                {googleAdsCampaigns
+                  .reduce((sum, c) => sum + Number(c.conversions || 0), 0)
+                  .toLocaleString()}
+              </div>
+              <p className="text-[11px] text-purple-600 font-bold mt-1">
+                {(() => {
+                  const convs = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.conversions || 0), 0);
+                  const cost = googleAdsCampaigns.reduce((sum, c) => {
+                    const micros = Number(c.cost_micros || c.spend_micros || 0);
+                    return sum + (micros > 0 ? micros / 1000000 : Number(c.cost || c.spend || 0));
+                  }, 0);
+                  return convs > 0 ? '$' + (cost / convs).toFixed(2) + ' CPA' : 'No conversions';
+                })()}
+              </p>
+            </div>
+          </div>
+
+          {/* Sub-Tab Navigation for Google Ads */}
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+            <div className="border-b border-slate-200 px-4 pt-3 flex items-center justify-between bg-slate-50/50">
+              <div className="flex space-x-2">
+                {[
+                  { id: 'campaigns', label: 'Campaigns & Budgets', icon: Target, count: googleAdsCampaigns.length },
+                  { id: 'ad_groups', label: 'Ad Groups', icon: Layers, count: googleAdsAdGroups.length },
+                  { id: 'keywords', label: 'Keywords Performance', icon: Tag, count: googleAdsKeywords.length },
+                  { id: 'audit', label: 'Mutation Audit Logs', icon: History, count: googleAdsAuditLogs.length },
+                ].map((st) => {
+                  const Icon = st.icon;
+                  const isCurrent = adsSubTab === st.id;
+                  return (
+                    <button
+                      key={st.id}
+                      type="button"
+                      onClick={() => setAdsSubTab(st.id)}
+                      className={`flex items-center gap-1.5 py-2.5 px-3.5 rounded-t-xl text-xs font-bold border-b-2 transition ${
+                        isCurrent
+                          ? 'border-blue-600 text-blue-600 bg-white shadow-2xs'
+                          : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/60'
+                      }`}
+                    >
+                      <Icon className={`w-3.5 h-3.5 ${isCurrent ? 'text-blue-600' : 'text-slate-400'}`} />
+                      {st.label}
+                      <span className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                        isCurrent ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-700'
+                      }`}>
+                        {st.count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="p-5">
+              {/* SUBTAB 1: CAMPAIGNS */}
+              {adsSubTab === 'campaigns' && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Campaign Roster & Budget Control</h3>
+                      <p className="text-xs text-slate-500">Live campaign status, daily spend limits & mutation controls</p>
+                    </div>
+                  </div>
+
+                  {googleAdsCampaigns.length === 0 ? (
+                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      <Target className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                      <p className="text-sm font-bold text-slate-700">No campaigns found for selected CID and date range.</p>
+                      <p className="text-xs text-slate-500 mt-1">Make sure Google Ads is connected and an active CID is selected.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="py-3 px-4">Campaign Name / ID</th>
+                            <th className="py-3 px-3">Status</th>
+                            <th className="py-3 px-3">Channel</th>
+                            <th className="py-3 px-3 text-right">Daily Budget</th>
+                            <th className="py-3 px-3 text-right">Impressions</th>
+                            <th className="py-3 px-3 text-right">Clicks</th>
+                            <th className="py-3 px-3 text-right">Spend</th>
+                            <th className="py-3 px-3 text-right">Conv.</th>
+                            <th className="py-3 px-4 text-center">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                          {googleAdsCampaigns.map((camp) => {
+                            const isEnabled = camp.status === 'ENABLED';
+                            const isMutating = mutatingCampaignId === camp.id;
+                            const dailyBudgetUsd = camp.budget_micros
+                              ? (Number(camp.budget_micros) / 1000000).toFixed(2)
+                              : Number(camp.budget || 0).toFixed(2);
+                            const spendUsd = camp.cost_micros
+                              ? (Number(camp.cost_micros) / 1000000).toFixed(2)
+                              : Number(camp.spend || camp.cost || 0).toFixed(2);
+
+                            return (
+                              <tr key={camp.id} className="hover:bg-slate-50/70 transition">
+                                <td className="py-3 px-4">
+                                  <div className="font-bold text-slate-900">{camp.name}</div>
+                                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {camp.id}</div>
+                                </td>
+                                <td className="py-3 px-3">
+                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    isEnabled
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : 'bg-amber-50 text-amber-700 border border-amber-200'
+                                  }`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${isEnabled ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                                    {camp.status}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-slate-600 font-semibold uppercase text-[11px]">
+                                  {camp.advertising_channel_type || camp.channel_type || 'SEARCH'}
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
+                                  ${dailyBudgetUsd}/d
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono">
+                                  {Number(camp.impressions || 0).toLocaleString()}
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono">
+                                  {Number(camp.clicks || 0).toLocaleString()}
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
+                                  ${spendUsd}
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono text-purple-700 font-bold">
+                                  {Number(camp.conversions || 0).toLocaleString()}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    {isEnabled ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePauseCampaign(camp.id)}
+                                        disabled={isMutating}
+                                        title="Pause Campaign"
+                                        className="flex items-center gap-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
+                                      >
+                                        {isMutating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Pause className="w-3 h-3" />}
+                                        Pause
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleResumeCampaign(camp.id)}
+                                        disabled={isMutating}
+                                        title="Resume / Activate Campaign"
+                                        className="flex items-center gap-1 px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
+                                      >
+                                        {isMutating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                                        Resume
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenBudgetModal(camp)}
+                                      title="Update Daily Budget"
+                                      className="flex items-center gap-1 px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
+                                    >
+                                      <DollarSign className="w-3 h-3" />
+                                      Budget
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SUBTAB 2: AD GROUPS */}
+              {adsSubTab === 'ad_groups' && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Ad Group Segments</h3>
+                    <p className="text-xs text-slate-500">Targeting groups, click-through rates & ad distribution</p>
+                  </div>
+
+                  {googleAdsAdGroups.length === 0 ? (
+                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      <Layers className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                      <p className="text-sm font-bold text-slate-700">No ad groups reported for this date range.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="py-3 px-4">Ad Group Name</th>
+                            <th className="py-3 px-3">Campaign</th>
+                            <th className="py-3 px-3">Status</th>
+                            <th className="py-3 px-3 text-right">Impressions</th>
+                            <th className="py-3 px-3 text-right">Clicks</th>
+                            <th className="py-3 px-3 text-right">CTR</th>
+                            <th className="py-3 px-3 text-right">Spend</th>
+                            <th className="py-3 px-4 text-right">Conv.</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                          {googleAdsAdGroups.map((adg) => {
+                            const imps = Number(adg.impressions || 0);
+                            const clks = Number(adg.clicks || 0);
+                            const ctr = imps > 0 ? ((clks / imps) * 100).toFixed(2) + '%' : '0.00%';
+                            const spend = adg.cost_micros
+                              ? (Number(adg.cost_micros) / 1000000).toFixed(2)
+                              : Number(adg.cost || adg.spend || 0).toFixed(2);
+
+                            return (
+                              <tr key={adg.id} className="hover:bg-slate-50/70 transition">
+                                <td className="py-3 px-4 font-bold text-slate-900">
+                                  {adg.name}
+                                  <div className="text-[10px] font-mono text-slate-400">ID: {adg.id}</div>
+                                </td>
+                                <td className="py-3 px-3 text-slate-600 font-semibold">{adg.campaign_name || adg.campaign_id}</td>
+                                <td className="py-3 px-3">
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                                    {adg.status}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono">{imps.toLocaleString()}</td>
+                                <td className="py-3 px-3 text-right font-mono">{clks.toLocaleString()}</td>
+                                <td className="py-3 px-3 text-right font-mono text-emerald-600 font-bold">{ctr}</td>
+                                <td className="py-3 px-3 text-right font-mono font-bold">${spend}</td>
+                                <td className="py-3 px-4 text-right font-mono text-purple-700 font-bold">
+                                  {Number(adg.conversions || 0).toLocaleString()}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SUBTAB 3: KEYWORDS */}
+              {adsSubTab === 'keywords' && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Keyword Performance Analysis</h3>
+                    <p className="text-xs text-slate-500">Search query tokens, match types & quality diagnostics</p>
+                  </div>
+
+                  {googleAdsKeywords.length === 0 ? (
+                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      <Tag className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                      <p className="text-sm font-bold text-slate-700">No keyword records available for this query window.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="py-3 px-4">Keyword Text</th>
+                            <th className="py-3 px-3">Match Type</th>
+                            <th className="py-3 px-3">Ad Group</th>
+                            <th className="py-3 px-3">Status</th>
+                            <th className="py-3 px-3 text-right">Impressions</th>
+                            <th className="py-3 px-3 text-right">Clicks</th>
+                            <th className="py-3 px-3 text-right">Spend</th>
+                            <th className="py-3 px-4 text-right">Conv.</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                          {googleAdsKeywords.map((kw, i) => {
+                            const spend = kw.cost_micros
+                              ? (Number(kw.cost_micros) / 1000000).toFixed(2)
+                              : Number(kw.cost || kw.spend || 0).toFixed(2);
+
+                            return (
+                              <tr key={kw.id || i} className="hover:bg-slate-50/70 transition">
+                                <td className="py-3 px-4 font-bold text-slate-900 font-mono">
+                                  {kw.text || kw.keyword_text}
+                                </td>
+                                <td className="py-3 px-3">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    kw.match_type === 'EXACT'
+                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                      : kw.match_type === 'PHRASE'
+                                      ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                                      : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  }`}>
+                                    {kw.match_type || 'EXACT'}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-slate-600">{kw.ad_group_name || kw.ad_group_id}</td>
+                                <td className="py-3 px-3">
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                                    {kw.status}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono">{Number(kw.impressions || 0).toLocaleString()}</td>
+                                <td className="py-3 px-3 text-right font-mono">{Number(kw.clicks || 0).toLocaleString()}</td>
+                                <td className="py-3 px-3 text-right font-mono font-bold">${spend}</td>
+                                <td className="py-3 px-4 text-right font-mono text-purple-700 font-bold">
+                                  {Number(kw.conversions || 0).toLocaleString()}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SUBTAB 4: AUDIT LOGS */}
+              {adsSubTab === 'audit' && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Campaign Mutation Audit Trail</h3>
+                    <p className="text-xs text-slate-500">Immutable record of campaign status modifications and budget revisions</p>
+                  </div>
+
+                  {googleAdsAuditLogs.length === 0 ? (
+                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      <History className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                      <p className="text-sm font-bold text-slate-700">No mutation logs recorded yet.</p>
+                      <p className="text-xs text-slate-500 mt-1">Actions such as pausing, resuming or editing budgets will appear here.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="py-3 px-4">Timestamp</th>
+                            <th className="py-3 px-3">Action</th>
+                            <th className="py-3 px-3">Campaign ID</th>
+                            <th className="py-3 px-3">Change Summary</th>
+                            <th className="py-3 px-3">Status</th>
+                            <th className="py-3 px-4">User</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800 font-mono">
+                          {googleAdsAuditLogs.map((log) => {
+                            const isSuccess = log.status === 'SUCCESS';
+                            return (
+                              <tr key={log.id} className="hover:bg-slate-50/70 transition">
+                                <td className="py-3 px-4 text-slate-500 text-[11px]">
+                                  {new Date(log.created_at).toLocaleString()}
+                                </td>
+                                <td className="py-3 px-3">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    log.action?.includes('PAUSE')
+                                      ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                      : log.action?.includes('RESUME')
+                                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                      : 'bg-blue-50 text-blue-800 border border-blue-200'
+                                  }`}>
+                                    {log.action}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-slate-700 font-bold">{log.campaign_id}</td>
+                                <td className="py-3 px-3 text-slate-600">
+                                  {log.previous_value && log.new_value ? (
+                                    <span>
+                                      <span className="text-slate-400 line-through mr-1">{log.previous_value}</span>
+                                      &rarr;
+                                      <span className="text-slate-900 font-bold ml-1">{log.new_value}</span>
+                                    </span>
+                                  ) : (
+                                    log.notes || 'Status mutation applied'
+                                  )}
+                                </td>
+                                <td className="py-3 px-3">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    isSuccess
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  }`}>
+                                    {log.status}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-slate-500 text-[11px] truncate max-w-[150px]">
+                                  {log.user_email || 'System'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ── MODAL: UPDATE DAILY BUDGET ─────────────────────────────────── */}
+          {budgetModalOpen && selectedCampaignForBudget && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in-95 duration-150 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                      <DollarSign className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Adjust Daily Campaign Budget</h3>
+                      <p className="text-[11px] text-slate-500 truncate max-w-[280px]">
+                        {selectedCampaignForBudget.name} (ID: {selectedCampaignForBudget.id})
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setBudgetModalOpen(false)}
+                    className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleUpdateBudgetSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      New Daily Budget (USD $)
+                    </label>
+                    <div className="relative">
+                      <DollarSign className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="1.00"
+                        max="50000.00"
+                        value={newBudgetAmount}
+                        onChange={(e) => setNewBudgetAmount(e.target.value)}
+                        required
+                        className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Mutates the Google Ads campaign budget object via GAQL adapter in real-time.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setBudgetModalOpen(false)}
+                      className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-50 transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={updatingBudget}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
+                    >
+                      {updatingBudget && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                      Save Daily Budget
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

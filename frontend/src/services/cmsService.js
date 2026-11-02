@@ -1,11 +1,13 @@
 /**
  * Headless CMS Service Adapter
  * Connects Market Intel DB DM role to the multi-tenant Headless CMS backend
- * Gateway: Cloudflare Tunnel https://symbols-andrews-pix-anytime.trycloudflare.com
+ * Gateway: Production Gateway https://cms.hikasimat.com
  */
 
+import { store } from '../app/store';
+
 const CMS_GATEWAY_STORAGE_KEY = 'cms_dynamic_gateway_url';
-const DEFAULT_CMS_FALLBACK = 'http://localhost:8001';
+const DEFAULT_CMS_FALLBACK = 'https://cms.hikasimat.com';
 
 let gatewayListeners = [];
 
@@ -15,7 +17,7 @@ export const getCmsBaseUrl = () => {
     const stored = localStorage.getItem(CMS_GATEWAY_STORAGE_KEY);
     if (stored && stored.trim()) {
       const clean = stored.trim().replace(/\/+$/, '');
-      if (clean.includes('symbols-andrews-pix-anytime')) {
+      if (clean.includes('trycloudflare.com')) {
         localStorage.removeItem(CMS_GATEWAY_STORAGE_KEY);
       } else {
         return clean;
@@ -24,7 +26,7 @@ export const getCmsBaseUrl = () => {
   }
   // 2. Environment variable from Vite (.env / .env.local)
   const envUrl = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_CMS_API_URL) || '';
-  if (envUrl && envUrl.trim()) {
+  if (envUrl && envUrl.trim() && !envUrl.includes('trycloudflare.com')) {
     return envUrl.trim().replace(/\/+$/, '');
   }
   // 3. Default fallback
@@ -109,7 +111,15 @@ const CMS_TOKEN_KEY = 'cms_jwt_access_token';
 const CMS_REFRESH_KEY = 'cms_jwt_refresh_token';
 
 export const getStoredCmsToken = () => {
-  return localStorage.getItem(CMS_TOKEN_KEY) || '';
+  const localToken = localStorage.getItem(CMS_TOKEN_KEY);
+  if (localToken) return localToken;
+  try {
+    const miToken = store?.getState?.()?.auth?.accessToken;
+    if (miToken) return miToken;
+  } catch {
+    // Ignore store access error
+  }
+  return '';
 };
 
 export const setStoredCmsTokens = (access, refresh) => {
@@ -221,15 +231,67 @@ export async function cmsFetch(endpoint, options = {}, requireAuth = true) {
 }
 
 /**
- * Auto-authenticate using Market Intel DB DM credentials
+ * Auto-authenticate using Market Intel DB DM credentials or federated token
  */
-export async function autoLoginCms(email = 'meynix.official@gmail.com', password = 'AdminPassword123!') {
+export async function autoLoginCms(email = null, password = null) {
   const base = getCmsBaseUrl();
   try {
+    // 1. If user is authenticated in Market Intel DB, use active access token
+    let activeToken = null;
+    try {
+      activeToken = store?.getState?.()?.auth?.accessToken;
+    } catch {
+      // Ignore store error
+    }
+
+    if (activeToken) {
+      // Try Market Intel token exchange endpoint first
+      try {
+        const exRes = await fetch(`${base}/api/v1/auth/marketintel/exchange/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: activeToken }),
+        });
+        if (exRes.ok) {
+          const tokens = await exRes.json();
+          if (tokens.access) {
+            setStoredCmsTokens(tokens.access, tokens.refresh);
+            return true;
+          }
+        }
+      } catch (exErr) {
+        console.warn('Market Intel token exchange attempt error:', exErr);
+      }
+
+      // Try direct token login
+      try {
+        const loginTokenRes = await fetch(`${base}/api/v1/auth/login/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: activeToken }),
+        });
+        if (loginTokenRes.ok) {
+          const tokens = await loginTokenRes.json();
+          if (tokens.access) {
+            setStoredCmsTokens(tokens.access, tokens.refresh);
+            return true;
+          }
+        }
+      } catch (ltErr) {
+        console.warn('Direct token login error:', ltErr);
+      }
+
+      setStoredCmsTokens(activeToken, null);
+      return true;
+    }
+
+    // 2. Fallback to credentials login if provided
+    const userEmail = email || 'meynix.official@gmail.com';
+    const userPassword = password || 'AdminPassword123!';
     const res = await fetch(`${base}/api/v1/auth/login/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: userEmail, password: userPassword }),
     });
 
     if (res.ok) {
@@ -403,6 +465,77 @@ export const cmsService = {
       method: 'POST',
       body: { visitor_id, categories, consent_type },
     }, false);
+  },
+
+  // Google Ads Workspace Integration
+  async getGoogleAdsConnection(workspaceId) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/connection/`, { method: 'GET' }, true);
+  },
+  async authorizeGoogleAds(workspaceId, redirectUri = '') {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/authorize/`, {
+      method: 'POST',
+      body: redirectUri ? { redirect_uri: redirectUri } : {},
+    }, true);
+  },
+  async disconnectGoogleAds(workspaceId) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/disconnect/`, { method: 'POST' }, true);
+  },
+  async getGoogleAdsCustomers(workspaceId) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/customers/`, { method: 'GET' }, true);
+  },
+  async selectGoogleAdsCustomer(workspaceId, { customer_id, manager_customer_id = '', developer_token = '' }) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/customers/select/`, {
+      method: 'POST',
+      body: { customer_id, manager_customer_id, developer_token },
+    }, true);
+  },
+  async getGoogleAdsCampaigns(workspaceId, { start_date, end_date } = {}) {
+    const params = new URLSearchParams();
+    if (start_date) params.append('start_date', start_date);
+    if (end_date) params.append('end_date', end_date);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/campaigns/${qs}`, { method: 'GET' }, true);
+  },
+  async pauseGoogleAdsCampaign(workspaceId, campaignId, campaignName = '') {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/campaigns/${campaignId}/pause/`, {
+      method: 'POST',
+      body: { confirm: true, campaign_name: campaignName },
+    }, true);
+  },
+  async resumeGoogleAdsCampaign(workspaceId, campaignId, campaignName = '') {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/campaigns/${campaignId}/resume/`, {
+      method: 'POST',
+      body: { confirm: true, campaign_name: campaignName },
+    }, true);
+  },
+  async updateGoogleAdsBudget(workspaceId, campaignId, { budget_resource_name, amount_micros, campaign_name = '' }) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/campaigns/${campaignId}/budget/`, {
+      method: 'POST',
+      body: {
+        budget_resource_name,
+        amount_micros,
+        campaign_id: campaignId,
+        campaign_name,
+        confirm: true,
+      },
+    }, true);
+  },
+  async getGoogleAdsAdGroups(workspaceId, { start_date, end_date } = {}) {
+    const params = new URLSearchParams();
+    if (start_date) params.append('start_date', start_date);
+    if (end_date) params.append('end_date', end_date);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/ad-groups/${qs}`, { method: 'GET' }, true);
+  },
+  async getGoogleAdsKeywords(workspaceId, { start_date, end_date } = {}) {
+    const params = new URLSearchParams();
+    if (start_date) params.append('start_date', start_date);
+    if (end_date) params.append('end_date', end_date);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/keywords/${qs}`, { method: 'GET' }, true);
+  },
+  async getGoogleAdsAuditLogs(workspaceId) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/google-ads/audit-logs/`, { method: 'GET' }, true);
   },
 };
 
