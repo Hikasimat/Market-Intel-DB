@@ -1,8 +1,11 @@
+import os
+import mimetypes
 import uuid
 from django.utils import timezone
 from rest_framework.decorators import action, api_view
 from accounts.permissions import IsPRE, IsLQ, IsPREOrLQ, IsManagerOrSuperuser, IsLQOrManager
 from rest_framework import viewsets, filters, status, permissions
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
@@ -1045,6 +1048,7 @@ class CallActivityViewSet(viewsets.ModelViewSet):
 
 class OutreachEmailViewSet(viewsets.ModelViewSet):
     serializer_class = OutreachEmailSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self):
         if self.action in ['tracking_stats', 'simulate_open', 'by_token', 'tracking_config']:
@@ -1284,6 +1288,8 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
 
         # Handle Attachments
         files = request.FILES.getlist('attachments')
+        if not files and 'attachments[]' in request.FILES:
+            files = request.FILES.getlist('attachments[]')
         total_size = sum(f.size for f in files)
         if total_size > 25 * 1024 * 1024:
             return Response({'error': 'Total attachment size exceeds 25MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1294,8 +1300,15 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             ext = f.name.split('.')[-1].lower() if '.' in f.name else ''
             if ext in ['exe', 'bat', 'cmd', 'js', 'ps1', 'vbs', 'scr']:
                 return Response({'error': f'File type .{ext} is not allowed.'}, status=status.HTTP_400_BAD_REQUEST)
-            msg.add_attachment(f.read(), maintype='application', subtype='octet-stream', filename=f.name)
+            mtype = getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
+            maintype, subtype = (mtype.split('/', 1)) if ('/' in mtype) else ('application', 'octet-stream')
             f.seek(0)
+            file_bytes = f.read()
+            filename = os.path.basename(f.name).replace('"', '').strip() or f.name
+            msg.add_attachment(file_bytes, maintype=maintype, subtype=subtype, filename=filename)
+            f.seek(0)
+
+        raw_msg_bytes = msg.as_bytes()
 
         cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -1362,7 +1375,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         def send_via_gmail():
             try:
                 from accounts.oauth_services import GmailOAuthService
-                res = GmailOAuthService.send_message(google_creds, msg.as_bytes())
+                res = GmailOAuthService.send_message(google_creds, raw_msg_bytes)
                 if res and res.get('id'):
                     fields = ['status']
                     outreach_email.status = 'WAITING FOR RESPONSE'

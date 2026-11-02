@@ -1,10 +1,12 @@
 import socket
 import logging
+import os
 import urllib.parse
 from datetime import timedelta
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, BasePermission, AllowAny
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework import status
 from django.shortcuts import redirect
 
@@ -668,6 +670,7 @@ class IsLQ(IsLQPerm):
 class GmailMailboxViewSet(viewsets.ViewSet):
     """Gmail mailbox endpoints (read, send, drafts, labels) for LQ and Manager users."""
     permission_classes = [IsLQOrManager]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
 
     @action(detail=False, methods=['get'], url_path='fetch-emails')
@@ -958,7 +961,8 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             maintype, subtype = (mtype.split('/', 1)) if ('/' in mtype) else ('application', 'octet-stream')
             f.seek(0)
             file_bytes = f.read()
-            msg.add_attachment(file_bytes, maintype=maintype, subtype=subtype, filename=f.name)
+            filename = os.path.basename(f.name).replace('"', '').strip() or f.name
+            msg.add_attachment(file_bytes, maintype=maintype, subtype=subtype, filename=filename)
             f.seek(0)
 
         thread_id = request.data.get('thread_id')
@@ -1215,7 +1219,9 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             mtype = getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
             maintype, subtype = (mtype.split('/', 1)) if ('/' in mtype) else ('application', 'octet-stream')
             f.seek(0)
-            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f.name)
+            file_bytes = f.read()
+            filename = os.path.basename(f.name).replace('"', '').strip() or f.name
+            msg.add_attachment(file_bytes, maintype=maintype, subtype=subtype, filename=filename)
             f.seek(0)
 
         if draft_id in ('null', 'undefined', ''):

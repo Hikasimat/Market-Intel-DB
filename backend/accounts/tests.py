@@ -116,11 +116,17 @@ class AccountsTestCase(APITestCase):
         self.assertEqual(new_user.profile.role, 'PRE')
 
     def test_manager_cannot_delete_user(self):
-        """Test that a Manager cannot delete users."""
+        """Test that a Manager can delete regular users but cannot delete superusers."""
         self.client.force_authenticate(user=self.manager_user)
-        url = f'/api/auth/users/{self.pre_user.id}/'
-        response = self.client.delete(url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        # Manager can delete regular PRE user
+        url_pre = f'/api/auth/users/{self.pre_user.id}/'
+        resp_pre = self.client.delete(url_pre)
+        self.assertEqual(resp_pre.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Manager CANNOT delete superuser
+        url_admin = f'/api/auth/users/{self.admin_user.id}/'
+        resp_admin = self.client.delete(url_admin)
+        self.assertEqual(resp_admin.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_mail_account_creation(self):
         """Test creating a MailAccount encrypts passwords."""
@@ -188,3 +194,67 @@ class AccountsTestCase(APITestCase):
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertEqual(response.data.get('success'), True)
             self.assertTrue(mock_thread.called)
+
+    def test_send_email_action_multiple_attachments_delivery(self):
+        """Test composing and sending email with multiple attachments of different MIME types."""
+        import email
+        from email import policy
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from accounts.models import GoogleMailCredentials
+        from prospects.models import EmailAttachment, OutreachEmail
+        import utils.encryption as encryption
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.lq_user)
+        GoogleMailCredentials.objects.get_or_create(
+            user=self.lq_user,
+            defaults={
+                'email': self.lq_user.email,
+                'access_token_encrypted': encryption.encrypt_password('dummy_access_token'),
+                'refresh_token_encrypted': encryption.encrypt_password('dummy_refresh_token'),
+                'is_active': True,
+            }
+        )
+
+        file1 = SimpleUploadedFile("report.pdf", b"%PDF-1.4 sample content", content_type="application/pdf")
+        file2 = SimpleUploadedFile("chart.png", b"\x89PNG\r\n\x1a\nfakeimage", content_type="image/png")
+        file3 = SimpleUploadedFile("notes.txt", b"plain text notes", content_type="text/plain")
+
+        captured_raw_bytes = []
+
+        def fake_send(credentials, raw_bytes, thread_id=None):
+            captured_raw_bytes.append(raw_bytes)
+            return {'id': 'msg_123', 'threadId': 'th_123'}
+
+        with patch('accounts.oauth_services.GmailOAuthService.send_message', side_effect=fake_send):
+            response = self.client.post('/api/auth/mail-account/send-email/', {
+                'to': 'client@example.com',
+                'subject': 'Quarterly Report & Charts',
+                'body': 'Please find the attached report, chart, and notes.',
+                'attachments': [file1, file2, file3]
+            }, format='multipart')
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data.get('success'), True)
+
+            # Wait briefly or join thread
+            import time
+            time.sleep(0.5)
+
+            # Verify EmailAttachment records in DB
+            tracking_id = response.data.get('tracking_id')
+            self.assertIsNotNone(tracking_id)
+            db_attachments = EmailAttachment.objects.filter(outreach_email_id=tracking_id)
+            self.assertEqual(db_attachments.count(), 3)
+            filenames = {att.original_filename for att in db_attachments}
+            self.assertEqual(filenames, {'report.pdf', 'chart.png', 'notes.txt'})
+
+            # Verify captured raw MIME message delivered to Gmail API has all 3 attachments
+            self.assertTrue(len(captured_raw_bytes) > 0)
+            parsed_email = email.message_from_bytes(captured_raw_bytes[0], policy=policy.default)
+            msg_attachments = list(parsed_email.iter_attachments())
+            self.assertEqual(len(msg_attachments), 3)
+            attachment_names = [a.get_filename() for a in msg_attachments]
+            self.assertIn('report.pdf', attachment_names)
+            self.assertIn('chart.png', attachment_names)
+            self.assertIn('notes.txt', attachment_names)

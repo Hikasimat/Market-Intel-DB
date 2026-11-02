@@ -246,14 +246,23 @@ const InboxPage = () => {
     setSavingDraft(true);
     const toastId = toast.loading('Saving draft to Gmail...');
     try {
-      const res = await api.post('/auth/mail-account/save-draft/', {
-        to: composeData.to?.trim() || '',
-        cc: composeData.cc?.trim() || '',
-        bcc: composeData.bcc?.trim() || '',
-        subject: composeData.subject || '',
-        body: composeData.body || '',
-        draft_id: composeData.draft_id,
-        thread_id: composeData.thread_id,
+      const formData = new FormData();
+      formData.append('to', composeData.to?.trim() || '');
+      if (composeData.cc?.trim()) formData.append('cc', composeData.cc.trim());
+      if (composeData.bcc?.trim()) formData.append('bcc', composeData.bcc.trim());
+      formData.append('subject', composeData.subject || '');
+      formData.append('body', composeData.body || '');
+      if (composeData.draft_id) formData.append('draft_id', composeData.draft_id);
+      if (composeData.thread_id) formData.append('thread_id', composeData.thread_id);
+
+      attachments.forEach(file => {
+        formData.append('attachments', file);
+      });
+
+      const res = await api.post('/auth/mail-account/save-draft/', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
       });
       toast.dismiss(toastId);
       const newDraftId = res.data?.draft?.id || composeData.draft_id;
@@ -303,7 +312,11 @@ const InboxPage = () => {
         formData.append('attachments', file);
       });
 
-      await api.post('/auth/mail-account/send-email/', formData);
+      await api.post('/auth/mail-account/send-email/', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
       toast.dismiss(toastId);
       toast.success('Email sent successfully');
       setShowCompose(false);
