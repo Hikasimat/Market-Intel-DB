@@ -285,6 +285,38 @@ const CmsPage = () => {
     }
   };
 
+  const ensureDomainVerified = async (targetHostname, wsIdOverride = null, siteIdOverride = null) => {
+    const wsId = wsIdOverride || selectedWorkspaceId || workspaces[0]?.id;
+    const sId = siteIdOverride || selectedSiteId || sites[0]?.id;
+    if (!targetHostname || !wsId || !sId) return;
+
+    try {
+      const domRes = await cmsService.getDomains(wsId, sId);
+      const domList = Array.isArray(domRes.data)
+        ? domRes.data
+        : domRes.data?.results || [];
+
+      const cleanHost = targetHostname.toLowerCase().trim();
+      const existing = domList.find(
+        (d) => d.hostname?.toLowerCase() === cleanHost
+      );
+
+      if (!existing) {
+        const createRes = await cmsService.createDomain(wsId, sId, {
+          hostname: cleanHost,
+          is_primary: domList.length === 0,
+        });
+        if (createRes.ok && createRes.data?.id) {
+          await cmsService.verifyDomain(wsId, sId, createRes.data.id, true);
+        }
+      } else if (!existing.is_verified) {
+        await cmsService.verifyDomain(wsId, sId, existing.id, true);
+      }
+    } catch (err) {
+      console.warn('Auto domain verification notice:', err);
+    }
+  };
+
   const loadSitesForWorkspace = async (wId) => {
     if (!wId) return;
     try {
@@ -297,6 +329,8 @@ const CmsPage = () => {
       if (siteList.length > 0) {
         const initialSite = siteList[0];
         setSelectedSiteId(initialSite.id);
+        const defaultHost = `${initialSite.slug}.hikasimat.com`;
+        ensureDomainVerified(defaultHost, wId, initialSite.id);
         await loadArticlesForSite(wId, initialSite.id, siteList);
       } else {
         setSelectedSiteId('');
@@ -401,10 +435,12 @@ const CmsPage = () => {
         setNewSiteName('');
         setNewSiteSlug('');
         setSelectedWorkspaceId(targetWsId);
-        await loadSitesForWorkspace(targetWsId);
         if (res.data?.id) {
+          const defaultHost = `${cleanSlug}.hikasimat.com`;
+          await ensureDomainVerified(defaultHost, targetWsId, res.data.id);
           setSelectedSiteId(res.data.id);
         }
+        await loadSitesForWorkspace(targetWsId);
       } else {
         toast.error('Failed to create site: ' + (res.error || 'Server error'));
       }
@@ -596,11 +632,32 @@ const CmsPage = () => {
       toast.error('Please enter a URL to submit.');
       return;
     }
+    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
+    const targetSiteId = selectedSiteId || sites[0]?.id;
+    if (!targetWsId || !targetSiteId) {
+      toast.error('Please select an active workspace and publication site first.');
+      return;
+    }
+
     setSubmittingIndexing(true);
     try {
-      const res = await cmsService.submitUrlForIndexing(selectedWorkspaceId, selectedSiteId, {
+      const rawUrl = indexingUrl.trim();
+      let candidateHost = '';
+      try {
+        candidateHost = new URL(rawUrl).hostname;
+      } catch {
+        try {
+          candidateHost = new URL(`https://${rawUrl}`).hostname;
+        } catch {}
+      }
+
+      if (candidateHost) {
+        await ensureDomainVerified(candidateHost, targetWsId, targetSiteId);
+      }
+
+      const res = await cmsService.submitUrlForIndexing(targetWsId, targetSiteId, {
         provider: indexingProvider,
-        urls: [indexingUrl.trim()],
+        urls: [rawUrl],
       });
       if (res.ok) {
         toast.success(`URL submitted to ${indexingProvider} successfully!`);

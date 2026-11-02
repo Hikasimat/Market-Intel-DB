@@ -193,9 +193,31 @@ export async function cmsFetch(endpoint, options = {}, requireAuth = true) {
     }
 
     if (!response.ok) {
-      errorMsg =
-        (typeof parsedData === 'object' && (parsedData?.error?.message || parsedData?.detail || parsedData?.message)) ||
-        `Request failed with status ${status}`;
+      if (typeof parsedData === 'object' && parsedData !== null) {
+        if (parsedData.error?.message) {
+          errorMsg = parsedData.error.message;
+          if (parsedData.error.details) {
+            const detailStr = typeof parsedData.error.details === 'object'
+              ? Object.entries(parsedData.error.details)
+                  .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+                  .join('; ')
+              : String(parsedData.error.details);
+            if (detailStr) errorMsg += ` (${detailStr})`;
+          }
+        } else if (parsedData.detail) {
+          errorMsg = parsedData.detail;
+        } else if (parsedData.message) {
+          errorMsg = parsedData.message;
+        } else {
+          // DRF validation errors like {"urls": ["..."]} or {"non_field_errors": ["..."]}
+          const fieldErrors = Object.entries(parsedData)
+            .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(', ') : errs}`)
+            .join(' | ');
+          errorMsg = fieldErrors || `Request failed with status ${status}`;
+        }
+      } else {
+        errorMsg = `Request failed with status ${status}`;
+      }
     }
   } catch (err) {
     status = 500;
@@ -419,6 +441,17 @@ export const cmsService = {
     return cmsFetch(`/api/v1/workspaces/${workspaceId}/sites/${siteId}/domains/`, {
       method: 'POST',
       body: { hostname, is_primary },
+    }, true);
+  },
+  async verifyDomain(workspaceId, siteId, domainId, simulateSuccess = true) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/sites/${siteId}/domains/${domainId}/verify/`, {
+      method: 'POST',
+      body: { simulate_success: simulateSuccess },
+    }, true);
+  },
+  async deleteDomain(workspaceId, siteId, domainId) {
+    return cmsFetch(`/api/v1/workspaces/${workspaceId}/sites/${siteId}/domains/${domainId}/`, {
+      method: 'DELETE',
     }, true);
   },
 
