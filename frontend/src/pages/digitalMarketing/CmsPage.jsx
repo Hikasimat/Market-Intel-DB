@@ -7,7 +7,6 @@ import {
   Search,
   BarChart3,
   ShieldCheck,
-  Activity,
   Plus,
   RefreshCw,
   ExternalLink,
@@ -23,7 +22,6 @@ import {
   Layers,
   ArrowUpRight,
   Code,
-  Terminal,
   Check,
   Sparkles,
   MousePointerClick,
@@ -37,2407 +35,1159 @@ import {
   Pause,
   Tag,
   Target,
-  History
+  History,
+  Activity,
+  Award,
+  Zap,
+  Calendar,
+  Building2,
+  Share2,
 } from 'lucide-react';
-import {
-  cmsService,
-  getCmsBaseUrl,
-  setCmsBaseUrl,
-  resetCmsBaseUrlToDefault,
-  testGatewayUrl,
-  subscribeGatewayChange,
-  subscribeActivityLog,
-  clearActivityLogs,
-  getStoredCmsToken,
-} from '../../services/cmsService';
+import cmsService from '../../services/cmsService';
 
 const CmsPage = () => {
   const authUser = useSelector((state) => state.auth?.user);
 
-  // Navigation & Active View
-  const [activeTab, setActiveTab] = useState('articles'); // 'articles' | 'inspector' | 'seo' | 'analytics' | 'consent'
-  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
-  const [activityLogs, setActivityLogs] = useState([]);
+  // Active top-level tab: 'pages' | 'analytics' | 'search_console' | 'bing' | 'google_ads'
+  const [activeTab, setActiveTab] = useState('pages');
+  const [loadingOverview, setLoadingOverview] = useState(false);
+  const [overviewData, setOverviewData] = useState(null);
 
-  // Gateway & System Health (Fully Dynamic URL & Instant Switcher)
-  const [currentGatewayUrl, setCurrentGatewayUrl] = useState(getCmsBaseUrl());
-  const [isGatewayModalOpen, setIsGatewayModalOpen] = useState(false);
-  const [gatewayInput, setGatewayInput] = useState('');
-  const [gatewayTesting, setGatewayTesting] = useState(false);
-  const [gatewayTestResult, setGatewayTestResult] = useState(null);
-  const [backendHealth, setBackendHealth] = useState({ live: false, ready: false, checking: true });
-  const [userEmail, setUserEmail] = useState(authUser?.email || 'Authenticating...');
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tab 1: CMS Website Pages & Sitemap State
+  // ─────────────────────────────────────────────────────────────────────────────
+  const [pages, setPages] = useState([]);
+  const [loadingPages, setLoadingPages] = useState(false);
+  const [pageFilter, setPageFilter] = useState('ALL');
+  const [pageSearch, setPageSearch] = useState('');
+  const [isCreatePageOpen, setIsCreatePageOpen] = useState(false);
+  const [newPage, setNewPage] = useState({
+    title: '',
+    slug: '',
+    page_id: '',
+    page_path: '',
+    page_type: 'PAGE',
+    status: 'PUBLISHED',
+    summary: '',
+    content: '',
+    meta_title: '',
+    meta_description: '',
+    canonical_url: '',
+    ga_page_id: '',
+    include_in_sitemap: true,
+    sitemap_priority: '0.8',
+    sitemap_changefreq: 'weekly',
+  });
+  const [creatingPage, setCreatingPage] = useState(false);
+  const [editingPage, setEditingPage] = useState(null);
+  const [isSitemapModalOpen, setIsSitemapModalOpen] = useState(false);
+  const [sitemapXmlData, setSitemapXmlData] = useState(null);
+  const [loadingSitemapXml, setLoadingSitemapXml] = useState(false);
 
-  useEffect(() => {
-    if (authUser?.email) {
-      setUserEmail(authUser.email);
-    }
-  }, [authUser]);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tab 2: Google Analytics State (Essential Features Only)
+  // ─────────────────────────────────────────────────────────────────────────────
+  const [gaConfig, setGaConfig] = useState(null);
+  const [gaDashboard, setGaDashboard] = useState(null);
+  const [loadingGa, setLoadingGa] = useState(false);
+  const [gaRange, setGaRange] = useState('30d');
+  const [savingGaConfig, setSavingGaConfig] = useState(false);
+  const [selectedPageForSnippet, setSelectedPageForSnippet] = useState('');
+  const [isRecordStatOpen, setIsRecordStatOpen] = useState(false);
+  const [newStat, setNewStat] = useState({
+    page_id: 'PAGE-HOME-001',
+    page_path: '/',
+    page_title: 'Market Intel Platform Home',
+    page_views: 45,
+    unique_visitors: 36,
+    sessions: 40,
+    traffic_source: 'Organic Search',
+    device_category: 'Desktop',
+    country: 'United States',
+  });
+  const [recordingStat, setRecordingStat] = useState(false);
+  const [realtimeData, setRealtimeData] = useState(null);
+  const [realtimeAutoRefresh, setRealtimeAutoRefresh] = useState(true);
+  const [sendingTestHit, setSendingTestHit] = useState(false);
+  const [googleStatus, setGoogleStatus] = useState(null);
 
-  // Tenancy Data
-  const [workspaces, setWorkspaces] = useState([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('');
-  const [sites, setSites] = useState([]);
-  const [selectedSiteId, setSelectedSiteId] = useState('');
-  const [loadingTenancy, setLoadingTenancy] = useState(false);
-
-  // Modal: Create Site
-  const [isCreateSiteOpen, setIsCreateSiteOpen] = useState(false);
-  const [newSiteName, setNewSiteName] = useState('');
-  const [newSiteSlug, setNewSiteSlug] = useState('');
-  const [newSiteLocale, setNewSiteLocale] = useState('en-US');
-  const [creatingSite, setCreatingSite] = useState(false);
-
-  // Tab 1: Articles
-  const [articles, setArticles] = useState([]);
-  const [loadingArticles, setLoadingArticles] = useState(false);
-  const [isCreateArticleOpen, setIsCreateArticleOpen] = useState(false);
-  const [newArtTitle, setNewArtTitle] = useState('');
-  const [newArtSlug, setNewArtSlug] = useState('');
-  const [newArtBody, setNewArtBody] = useState('# New Post\n\nWrite your article content here in Markdown...');
-  const [newArtExcerpt, setNewArtExcerpt] = useState('');
-  const [creatingArticle, setCreatingArticle] = useState(false);
-  const [articleFilter, setArticleFilter] = useState('ALL'); // 'ALL' | 'PUBLISHED' | 'DRAFT'
-  const [articleSearch, setArticleSearch] = useState('');
-  const [publicDeliveryData, setPublicDeliveryData] = useState(null);
-  const [showPublicDelivery, setShowPublicDelivery] = useState(false);
-  const [loadingPublicDelivery, setLoadingPublicDelivery] = useState(false);
-
-  // Tab 2: 7-Step Pipeline Inspector
-  const [inspectedArticle, setInspectedArticle] = useState(null);
-  const [pipelineData, setPipelineData] = useState(null);
-  const [loadingPipeline, setLoadingPipeline] = useState(false);
-
-  // Tab 3: SEO & Indexing
-  const [seoPreviewType, setSeoPreviewType] = useState('sitemap'); // 'sitemap' | 'robots'
-  const [seoPreviewText, setSeoPreviewText] = useState('');
-  const [loadingSeoPreview, setLoadingSeoPreview] = useState(false);
-  const [indexingProvider, setIndexingProvider] = useState('GOOGLE');
-  const [indexingUrl, setIndexingUrl] = useState('');
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tab 3: Google Search Console State
+  // ─────────────────────────────────────────────────────────────────────────────
+  const [gscData, setGscData] = useState(null);
+  const [loadingGsc, setLoadingGsc] = useState(false);
+  const [isRegisterDomainOpen, setIsRegisterDomainOpen] = useState(false);
+  const [newDomain, setNewDomain] = useState({
+    domain: '',
+    property_type: 'DOMAIN',
+    verification_method: 'DNS_TXT',
+  });
+  const [registeringDomain, setRegisteringDomain] = useState(false);
+  const [isSubmitSitemapOpen, setIsSubmitSitemapOpen] = useState(false);
+  const [sitemapUrlInput, setSitemapUrlInput] = useState('https://marketintel.hikasimat.com/sitemap.xml');
+  const [submittingSitemap, setSubmittingSitemap] = useState(false);
+  const [inspectUrlInput, setInspectUrlInput] = useState('');
+  const [inspectResult, setInspectResult] = useState(null);
+  const [inspectingUrl, setInspectingUrl] = useState(false);
+  const [manualIndexUrl, setManualIndexUrl] = useState('');
   const [submittingIndexing, setSubmittingIndexing] = useState(false);
-  const [indexingLogs, setIndexingLogs] = useState([]);
-  const [loadingIndexingLogs, setLoadingIndexingLogs] = useState(false);
-  const [indexNowKey, setIndexNowKey] = useState('');
 
-  // Tab 4: Privacy Analytics
-  const [analyticsOverview, setAnalyticsOverview] = useState(null);
-  const [analyticsConfig, setAnalyticsConfig] = useState(null);
-  const [loadingAnalyticsConfig, setLoadingAnalyticsConfig] = useState(false);
-  const [togglingIngestion, setTogglingIngestion] = useState(false);
-  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
-  const [simulatingEvent, setSimulatingEvent] = useState(false);
-  const [ga4ReportData, setGa4ReportData] = useState(null);
-  const [loadingGa4Report, setLoadingGa4Report] = useState(false);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tab 4: Bing Webmaster Tools State
+  // ─────────────────────────────────────────────────────────────────────────────
+  const [bingData, setBingData] = useState(null);
+  const [loadingBing, setLoadingBing] = useState(false);
+  const [bingApiKeyInput, setBingApiKeyInput] = useState('');
+  const [savingBingConfig, setSavingBingConfig] = useState(false);
+  const [bingUrlsInput, setBingUrlsInput] = useState('');
+  const [bingProtocol, setBingProtocol] = useState('INDEXNOW');
+  const [submittingBingUrls, setSubmittingBingUrls] = useState(false);
+  const [bingSitemapInput, setBingSitemapInput] = useState('https://marketintel.hikasimat.com/sitemap.xml');
+  const [submittingBingSitemap, setSubmittingBingSitemap] = useState(false);
 
-  // Tab 5: Consent Management
-  const [consentVisitorId, setConsentVisitorId] = useState('visitor-dm-session-901');
-  const [consentJurisdiction, setConsentJurisdiction] = useState('EU_GDPR');
-  const [consentResult, setConsentResult] = useState(null);
-  const [recordingConsent, setRecordingConsent] = useState(false);
-
-  // Tab 6: Google Ads Workspace Integration
-  const [googleAdsConnection, setGoogleAdsConnection] = useState(null);
-  const [loadingGoogleAds, setLoadingGoogleAds] = useState(false);
-  const [googleAdsCustomers, setGoogleAdsCustomers] = useState([]);
-  const [googleAdsCampaigns, setGoogleAdsCampaigns] = useState([]);
-  const [loadingCampaigns, setLoadingCampaigns] = useState(false);
-  const [googleAdsAdGroups, setGoogleAdsAdGroups] = useState([]);
-  const [googleAdsKeywords, setGoogleAdsKeywords] = useState([]);
-  const [googleAdsAuditLogs, setGoogleAdsAuditLogs] = useState([]);
-  const [adsDateRange, setAdsDateRange] = useState('30d');
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tab 5: Google Ads State
+  // ─────────────────────────────────────────────────────────────────────────────
+  const [adsData, setAdsData] = useState(null);
+  const [loadingAds, setLoadingAds] = useState(false);
   const [adsSubTab, setAdsSubTab] = useState('campaigns'); // 'campaigns' | 'adgroups' | 'keywords' | 'audit'
+  const [isCreateCampaignOpen, setIsCreateCampaignOpen] = useState(false);
+  const [newCampaign, setNewCampaign] = useState({
+    name: '',
+    channel_type: 'SEARCH',
+    status: 'ENABLED',
+    bidding_strategy: 'MAXIMIZE_CONVERSIONS',
+    daily_budget: '75.00',
+    target_cpa: '',
+    target_roas: '',
+    locations: 'United States, United Kingdom, Singapore',
+    languages: 'English',
+  });
+  const [creatingCampaign, setCreatingCampaign] = useState(false);
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
-  const [selectedCampaignForBudget, setSelectedCampaignForBudget] = useState(null);
-  const [newBudgetAmount, setNewBudgetAmount] = useState('');
+  const [campaignForBudget, setCampaignForBudget] = useState(null);
+  const [newBudgetVal, setNewBudgetVal] = useState('');
   const [updatingBudget, setUpdatingBudget] = useState(false);
-  const [mutatingCampaignId, setMutatingCampaignId] = useState(null);
+  const [isCreateAdGroupOpen, setIsCreateAdGroupOpen] = useState(false);
+  const [newAdGroup, setNewAdGroup] = useState({
+    campaign_id: '',
+    name: '',
+    cpc_bid: '2.50',
+    headline_1: '',
+    headline_2: '',
+    description: '',
+    final_url: 'https://marketintel.hikasimat.com',
+  });
+  const [creatingAdGroup, setCreatingAdGroup] = useState(false);
+  const [isCreateKeywordOpen, setIsCreateKeywordOpen] = useState(false);
+  const [newKeyword, setNewKeyword] = useState({
+    ad_group_id: '',
+    keyword_text: '',
+    match_type: 'PHRASE',
+    cpc_bid: '2.20',
+  });
+  const [creatingKeyword, setCreatingKeyword] = useState(false);
+  const [isAdsAccountConfigOpen, setIsAdsAccountConfigOpen] = useState(false);
+  const [adsAccountConfig, setAdsAccountConfig] = useState({
+    customer_id: '',
+    account_name: '',
+    currency_code: 'USD',
+    time_zone: 'America/New_York',
+    conversion_tracking_id: 'AW-948271635',
+  });
+  const [savingAdsAccount, setSavingAdsAccount] = useState(false);
 
-  // Subscribe to realtime Activity Inspector logs
-  useEffect(() => {
-    const unsubscribe = subscribeActivityLog((logs) => {
-      setActivityLogs(logs);
-    });
-    return unsubscribe;
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Initial Loader & Data Fetching
+  // ─────────────────────────────────────────────────────────────────────────────
+  const fetchOverview = useCallback(async () => {
+    setLoadingOverview(true);
+    const res = await cmsService.getOverview();
+    if (res.ok) {
+      setOverviewData(res.data);
+    }
+    setLoadingOverview(false);
   }, []);
 
-  // Compute clean display hostname for toolbar indicator & alert badges
-  const displayHost = React.useMemo(() => {
-    try {
-      const u = new URL(currentGatewayUrl);
-      return u.host;
-    } catch {
-      return currentGatewayUrl.replace(/^https?:\/\//, '').split('/')[0] || currentGatewayUrl;
-    }
-  }, [currentGatewayUrl]);
-
-  // Subscribe to dynamic gateway URL changes
-  useEffect(() => {
-    const unsubscribe = subscribeGatewayChange((newUrl) => {
-      setCurrentGatewayUrl(newUrl);
+  const fetchPages = useCallback(async () => {
+    setLoadingPages(true);
+    const res = await cmsService.getPages({
+      status: pageFilter !== 'ALL' ? pageFilter : undefined,
+      search: pageSearch || undefined,
     });
-    return unsubscribe;
+    if (res.ok) {
+      setPages(res.data.pages || []);
+    }
+    setLoadingPages(false);
+  }, [pageFilter, pageSearch]);
+
+  const fetchAnalytics = useCallback(async () => {
+    setLoadingGa(true);
+    const [cfgRes, dashRes] = await Promise.all([
+      cmsService.getAnalyticsConfig(selectedPageForSnippet),
+      cmsService.getAnalyticsDashboard(gaRange),
+    ]);
+    if (cfgRes.ok) setGaConfig(cfgRes.data);
+    if (dashRes.ok) setGaDashboard(dashRes.data);
+    setLoadingGa(false);
+  }, [gaRange, selectedPageForSnippet]);
+
+  const fetchRealtime = useCallback(async () => {
+    const res = await cmsService.getRealtimeAnalytics();
+    if (res.ok) setRealtimeData(res.data);
   }, []);
 
-  // Check health and load workspaces on mount or whenever active gateway URL changes
-  useEffect(() => {
-    checkSystemHealth();
-    initTenancy();
-  }, [currentGatewayUrl]);
+  const fetchGoogleStatus = useCallback(async () => {
+    const res = await cmsService.getGoogleConnectionStatus();
+    if (res.ok) setGoogleStatus(res.data);
+  }, []);
 
-  const handleSaveGateway = (urlToSave) => {
-    const target = (urlToSave || gatewayInput).trim();
-    if (!target) {
-      toast.error('Gateway URL cannot be empty');
-      return;
+  const fetchSearchConsole = useCallback(async () => {
+    setLoadingGsc(true);
+    const res = await cmsService.getSearchConsoleDashboard();
+    if (res.ok) {
+      setGscData(res.data);
     }
-    setCmsBaseUrl(target);
-    setCurrentGatewayUrl(target);
-    setIsGatewayModalOpen(false);
-    setGatewayTestResult(null);
-    toast.success(`Connected to CMS Gateway: ${target}`);
-  };
+    setLoadingGsc(false);
+  }, []);
 
-  const handleTestGateway = async (candidate) => {
-    const testUrl = (candidate || gatewayInput).trim();
-    if (!testUrl) {
-      toast.error('Please enter a URL to test');
-      return;
+  const fetchBing = useCallback(async () => {
+    setLoadingBing(true);
+    const res = await cmsService.getBingDashboard();
+    if (res.ok) {
+      setBingData(res.data);
+      if (res.data?.config) {
+        setBingApiKeyInput(res.data.config.masked_api_key || '');
+      }
     }
-    setGatewayTesting(true);
-    setGatewayTestResult(null);
-    const res = await testGatewayUrl(testUrl);
-    setGatewayTesting(false);
-    setGatewayTestResult(res);
-  };
+    setLoadingBing(false);
+  }, []);
 
-  const handleResetGateway = () => {
-    const def = resetCmsBaseUrlToDefault();
-    setCurrentGatewayUrl(def);
-    setGatewayInput(def);
-    setGatewayTestResult(null);
-    setIsGatewayModalOpen(false);
-    toast.info(`Gateway reset to default: ${def}`);
-  };
-
-  const checkSystemHealth = async () => {
-    setBackendHealth((prev) => ({ ...prev, checking: true }));
-    try {
-      const liveRes = await cmsService.checkLive();
-      const readyRes = await cmsService.checkReady();
-      setBackendHealth({
-        live: liveRes.ok,
-        ready: readyRes.ok,
-        checking: false,
-      });
-    } catch {
-      setBackendHealth({ live: false, ready: false, checking: false });
-    }
-  };
-
-  const initTenancy = async () => {
-    setLoadingTenancy(true);
-    try {
-      // 1. Verify or refresh current user session
-      let meRes = await cmsService.getCurrentUser();
-      if (!meRes.ok) {
-        await cmsService.autoLoginCms();
-        meRes = await cmsService.getCurrentUser();
-      }
-      if (meRes.ok && meRes.data?.email) {
-        setUserEmail(meRes.data.email);
-      } else if (authUser?.email) {
-        setUserEmail(authUser.email);
-      }
-
-      // 2. Load workspaces
-      let wsRes = await cmsService.getWorkspaces();
-      if (!wsRes.ok) {
-        await cmsService.autoLoginCms();
-        wsRes = await cmsService.getWorkspaces();
-      }
-
-      let wsList = Array.isArray(wsRes.data)
-        ? wsRes.data
-        : wsRes.data?.results || [];
-
-      // Auto-provision Default Workspace if none exists
-      if (wsList.length === 0 && wsRes.ok) {
-        try {
-          const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
-          if (createWsRes.ok && createWsRes.data?.id) {
-            wsList = [createWsRes.data];
-          }
-        } catch {}
-      }
-
-      setWorkspaces(wsList);
-      if (wsList.length > 0) {
-        const initialWsId = wsList[0].id;
-        setSelectedWorkspaceId(initialWsId);
-        await loadSitesForWorkspace(initialWsId);
-      } else {
-        setSelectedWorkspaceId('');
-      }
-    } catch (err) {
-      console.warn('Could not initialize CMS tenant workspace:', err);
-    } finally {
-      setLoadingTenancy(false);
-    }
-  };
-
-  const ensureDomainVerified = async (targetHostname, wsIdOverride = null, siteIdOverride = null) => {
-    const wsId = wsIdOverride || selectedWorkspaceId || workspaces[0]?.id;
-    const sId = siteIdOverride || selectedSiteId || sites[0]?.id;
-    if (!targetHostname || !wsId || !sId) return;
-
-    try {
-      const domRes = await cmsService.getDomains(wsId, sId);
-      const domList = Array.isArray(domRes.data)
-        ? domRes.data
-        : domRes.data?.results || [];
-
-      const cleanHost = targetHostname.toLowerCase().trim();
-      const existing = domList.find(
-        (d) => d.hostname?.toLowerCase() === cleanHost
-      );
-
-      if (!existing) {
-        const createRes = await cmsService.createDomain(wsId, sId, {
-          hostname: cleanHost,
-          is_primary: domList.length === 0,
+  const fetchGoogleAds = useCallback(async () => {
+    setLoadingAds(true);
+    const res = await cmsService.getGoogleAdsDashboard();
+    if (res.ok) {
+      setAdsData(res.data);
+      if (res.data?.config) {
+        setAdsAccountConfig({
+          customer_id: res.data.config.customer_id || '',
+          account_name: res.data.config.account_name || '',
+          currency_code: res.data.config.currency_code || 'USD',
+          time_zone: res.data.config.time_zone || 'America/New_York',
+          conversion_tracking_id: res.data.config.conversion_tracking_id || 'AW-948271635',
         });
-        if (createRes.ok && createRes.data?.id) {
-          await cmsService.verifyDomain(wsId, sId, createRes.data.id, true);
-        }
-      } else if (!existing.is_verified) {
-        await cmsService.verifyDomain(wsId, sId, existing.id, true);
       }
-    } catch (err) {
-      console.warn('Auto domain verification notice:', err);
+    }
+    setLoadingAds(false);
+  }, []);
+
+  useEffect(() => {
+    fetchOverview();
+  }, [fetchOverview]);
+
+  useEffect(() => {
+    if (activeTab === 'pages') fetchPages();
+    else if (activeTab === 'analytics') {
+      fetchAnalytics();
+      fetchRealtime();
+      fetchGoogleStatus();
+    }
+    else if (activeTab === 'search_console') fetchSearchConsole();
+    else if (activeTab === 'bing') fetchBing();
+    else if (activeTab === 'google_ads') fetchGoogleAds();
+  }, [activeTab, fetchPages, fetchAnalytics, fetchRealtime, fetchGoogleStatus, fetchSearchConsole, fetchBing, fetchGoogleAds]);
+
+  // Polling for real-time live hits every 5 seconds when in analytics tab
+  useEffect(() => {
+    if (activeTab === 'analytics' && realtimeAutoRefresh) {
+      const interval = setInterval(() => {
+        fetchRealtime();
+        fetchOverview();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab, realtimeAutoRefresh, fetchRealtime, fetchOverview]);
+
+  const handleSendTestHit = async () => {
+    setSendingTestHit(true);
+    const hitPayload = {
+      page_path: window.location.pathname || '/',
+      page_id: gaConfig?.config?.page_id || 'G-MKTINTEL01',
+      page_title: 'Market Intel Platform CMS Live',
+      traffic_source: 'Direct Live Ping',
+      device_category: 'Desktop',
+      country: 'United States',
+    };
+    const res = await cmsService.sendAnalyticsHit(hitPayload);
+    if (res.ok) {
+      toast.success('Live Real-Time hit successfully recorded in Market Intel database!');
+      fetchRealtime();
+      fetchOverview();
+      fetchAnalytics();
+    } else {
+      toast.error(res.error || 'Failed to record real-time hit.');
+    }
+    setSendingTestHit(false);
+  };
+
+  const handleConnectGoogle = async () => {
+    const res = await cmsService.getGoogleConnectUrl();
+    if (res.ok && res.data?.url) {
+      window.location.href = res.data.url;
+    } else {
+      toast.error(res.error || 'Google OAuth is not configured on the backend.');
     }
   };
 
-  const loadSitesForWorkspace = async (wId) => {
-    if (!wId) return;
-    try {
-      const sitesRes = await cmsService.getSites(wId);
-      const siteList = Array.isArray(sitesRes.data)
-        ? sitesRes.data
-        : sitesRes.data?.results || [];
-
-      setSites(siteList);
-      if (siteList.length > 0) {
-        const initialSite = siteList[0];
-        setSelectedSiteId(initialSite.id);
-        const defaultHost = `${initialSite.slug}.hikasimat.com`;
-        ensureDomainVerified(defaultHost, wId, initialSite.id);
-        await loadArticlesForSite(wId, initialSite.id, siteList);
-      } else {
-        setSelectedSiteId('');
-        setArticles([]);
-      }
-    } catch (err) {
-      console.warn('Failed to load sites:', err);
-    }
+  const copyToClipboard = (text, label = 'Copied to clipboard') => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    toast.success(label);
   };
 
-  const loadArticlesForSite = async (wId, sId, siteListOverride = null) => {
-    if (!wId || !sId) return;
-    setLoadingArticles(true);
-    try {
-      const artRes = await cmsService.getArticles(wId, sId);
-      const artList = Array.isArray(artRes.data)
-        ? artRes.data
-        : artRes.data?.results || [];
-      setArticles(artList);
-
-      // Auto-populate indexing URL with the latest published article (or first article) instead of sample-post
-      const availableSites = siteListOverride || sites;
-      const activeSiteObj = availableSites.find((s) => s.id === sId);
-      const siteSlug = activeSiteObj?.slug || 'site';
-      const published = artList.filter((a) => a.status === 'PUBLISHED');
-      if (published.length > 0) {
-        setIndexingUrl(`https://${siteSlug}.hikasimat.com/articles/${published[0].slug}`);
-      } else if (artList.length > 0) {
-        setIndexingUrl(`https://${siteSlug}.hikasimat.com/articles/${artList[0].slug}`);
-      } else {
-        setIndexingUrl(`https://${siteSlug}.hikasimat.com/`);
-      }
-    } catch (err) {
-      console.warn('Failed to load articles:', err);
-    } finally {
-      setLoadingArticles(false);
-    }
-  };
-
-  // Re-load when workspace changes
-  const handleWorkspaceChange = async (wId) => {
-    setSelectedWorkspaceId(wId);
-    await loadSitesForWorkspace(wId);
-  };
-
-  // Re-load when site changes
-  const handleSiteChange = async (sId) => {
-    setSelectedSiteId(sId);
-    const siteObj = sites.find((s) => s.id === sId);
-    await loadArticlesForSite(selectedWorkspaceId, sId, sites);
-    if (activeTab === 'analytics') {
-      loadAnalytics();
-    }
-    if (activeTab === 'seo') {
-      loadSeoPreview(seoPreviewType, siteObj);
-    }
-  };
-
-  // Create Site
-  const handleCreateSite = async (e) => {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Handlers: Pages & Content
+  // ─────────────────────────────────────────────────────────────────────────────
+  const handleCreateOrUpdatePage = async (e) => {
     e.preventDefault();
-    if (!newSiteName.trim()) {
-      toast.error('Please enter a valid publication site name.');
-      return;
-    }
-    const cleanSlug =
-      newSiteSlug.trim() ||
-      newSiteName
-        .toLowerCase()
-        .replace(/^https?:\/\//i, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '');
-
-    let targetWsId = selectedWorkspaceId || workspaces[0]?.id;
-    if (!targetWsId) {
-      try {
-        const createWsRes = await cmsService.createWorkspace('Default Workspace', 'default');
-        if (createWsRes.ok && createWsRes.data?.id) {
-          targetWsId = createWsRes.data.id;
-          setWorkspaces([createWsRes.data]);
-          setSelectedWorkspaceId(targetWsId);
-        }
-      } catch {}
-    }
-
-    if (!targetWsId) {
-      toast.error('No tenant workspace active. Please reconnect to CMS.');
-      return;
-    }
-
-    setCreatingSite(true);
+    setCreatingPage(true);
     try {
-      const res = await cmsService.createSite(targetWsId, {
-        name: newSiteName.trim(),
-        slug: cleanSlug,
-        default_locale: newSiteLocale || 'en-US',
-      });
-
-      if (res.ok) {
-        toast.success(`Publication site "${newSiteName}" created successfully!`);
-        setIsCreateSiteOpen(false);
-        setNewSiteName('');
-        setNewSiteSlug('');
-        setSelectedWorkspaceId(targetWsId);
-        if (res.data?.id) {
-          const defaultHost = `${cleanSlug}.hikasimat.com`;
-          await ensureDomainVerified(defaultHost, targetWsId, res.data.id);
-          setSelectedSiteId(res.data.id);
+      if (editingPage) {
+        const res = await cmsService.updatePage(editingPage.id, newPage);
+        if (res.ok) {
+          toast.success(`Page "${res.data.page?.title || 'Page'}" updated!`);
+          setIsCreatePageOpen(false);
+          setEditingPage(null);
+          fetchPages();
+          fetchOverview();
+        } else {
+          toast.error(res.error || 'Failed to update page');
         }
-        await loadSitesForWorkspace(targetWsId);
       } else {
-        toast.error('Failed to create site: ' + (res.error || 'Server error'));
+        const res = await cmsService.createPage(newPage);
+        if (res.ok) {
+          toast.success(`Page "${res.data.page?.title || 'Page'}" created in Market Intel CMS!`);
+          setIsCreatePageOpen(false);
+          fetchPages();
+          fetchOverview();
+        } else {
+          toast.error(res.error || 'Failed to create page');
+        }
       }
-    } catch (err) {
-      toast.error('Site creation error: ' + err.message);
     } finally {
-      setCreatingSite(false);
+      setCreatingPage(false);
     }
   };
 
-  // Create Article
-  const handleCreateArticle = async (e) => {
+  const handleEditPageClick = (page) => {
+    setEditingPage(page);
+    setNewPage({
+      title: page.title || '',
+      slug: page.slug || '',
+      page_id: page.page_id || '',
+      page_path: page.page_path || '',
+      page_type: page.page_type || 'PAGE',
+      status: page.status || 'PUBLISHED',
+      summary: page.summary || '',
+      content: page.content || '',
+      meta_title: page.meta_title || '',
+      meta_description: page.meta_description || '',
+      canonical_url: page.canonical_url || '',
+      ga_page_id: page.ga_page_id || '',
+      include_in_sitemap: page.include_in_sitemap ?? true,
+      sitemap_priority: String(page.sitemap_priority || '0.8'),
+      sitemap_changefreq: page.sitemap_changefreq || 'weekly',
+    });
+    setIsCreatePageOpen(true);
+  };
+
+  const handleDeletePage = async (id, title) => {
+    if (!window.confirm(`Delete page "${title}" from Market Intel database?`)) return;
+    const res = await cmsService.deletePage(id);
+    if (res.ok) {
+      toast.success(`Page "${title}" deleted`);
+      fetchPages();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to delete page');
+    }
+  };
+
+  const handleTogglePageStatus = async (page) => {
+    const nextStatus = page.status === 'PUBLISHED' ? 'DRAFT' : 'PUBLISHED';
+    const res = await cmsService.updatePage(page.id, { status: nextStatus });
+    if (res.ok) {
+      toast.success(`Page is now ${nextStatus}`);
+      fetchPages();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Could not update status');
+    }
+  };
+
+  const handleOpenSitemapPreview = async () => {
+    setIsSitemapModalOpen(true);
+    setLoadingSitemapXml(true);
+    const res = await cmsService.getSitemapXml();
+    if (res.ok) {
+      setSitemapXmlData(res.data);
+    } else {
+      toast.error('Could not load sitemap XML');
+    }
+    setLoadingSitemapXml(false);
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Handlers: Google Analytics
+  // ─────────────────────────────────────────────────────────────────────────────
+  const handleSaveGaConfig = async (e) => {
     e.preventDefault();
-    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
-    if (!targetWsId) {
-      toast.error('No tenant workspace active. Please ensure a workspace is connected.');
-      return;
-    }
-    const targetSiteId = selectedSiteId || sites[0]?.id;
-    if (!targetSiteId) {
-      toast.error('No active publication site selected. Please register a site first using "+ New Site".');
-      setIsCreateArticleOpen(false);
-      setIsCreateSiteOpen(true);
-      return;
-    }
-    if (!newArtTitle.trim()) {
-      toast.error('Article title is required.');
-      return;
-    }
-    const cleanSlug =
-      newArtSlug.trim() ||
-      newArtTitle
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '');
-
-    setCreatingArticle(true);
-    try {
-      const res = await cmsService.createArticle(targetWsId, targetSiteId, {
-        title: newArtTitle.trim(),
-        slug: cleanSlug,
-        body: newArtBody,
-        excerpt: newArtExcerpt,
-        status: 'DRAFT',
-      });
-
-      if (res.ok) {
-        toast.success(`Draft article "${newArtTitle}" created!`);
-        setIsCreateArticleOpen(false);
-        setNewArtTitle('');
-        setNewArtSlug('');
-        setNewArtExcerpt('');
-        await loadArticlesForSite(targetWsId, targetSiteId);
-        // Automatically open pipeline inspector on new article
-        if (res.data?.id) {
-          inspectPipeline(res.data);
-        }
-      } else {
-        toast.error('Failed to create article: ' + (res.error || 'Validation error'));
-      }
-    } catch (err) {
-      toast.error('Error creating article: ' + err.message);
-    } finally {
-      setCreatingArticle(false);
+    if (!gaConfig?.config) return;
+    setSavingGaConfig(true);
+    const res = await cmsService.updateAnalyticsConfig({
+      page_id: gaConfig.config.page_id,
+      property_id: gaConfig.config.property_id,
+      site_name: gaConfig.config.site_name,
+      site_url: gaConfig.config.site_url,
+      is_active: gaConfig.config.is_active,
+      track_pageviews: gaConfig.config.track_pageviews,
+      track_outbound_clicks: gaConfig.config.track_outbound_clicks,
+      track_scroll_depth: gaConfig.config.track_scroll_depth,
+    });
+    setSavingGaConfig(false);
+    if (res.ok) {
+      toast.success('Google Analytics configuration and tracking code saved!');
+      fetchAnalytics();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to update Google Analytics config');
     }
   };
 
-  // Publish Article
-  const handlePublishArticle = async (article) => {
-    try {
-      const res = await cmsService.publishArticle(selectedWorkspaceId, selectedSiteId, article.id);
-      if (res.ok) {
-        toast.success(`Article "${article.title}" published live!`);
-        await loadArticlesForSite(selectedWorkspaceId, selectedSiteId);
-        inspectPipeline(article);
-      } else {
-        toast.error('Failed to publish: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error publishing article: ' + err.message);
-    }
-  };
-
-  // Delete Article
-  const handleDeleteArticle = async (article) => {
-    if (!window.confirm(`Are you sure you want to delete "${article.title}"?`)) return;
-    try {
-      const res = await cmsService.deleteArticle(selectedWorkspaceId, selectedSiteId, article.id);
-      if (res.ok) {
-        toast.success('Article deleted successfully.');
-        await loadArticlesForSite(selectedWorkspaceId, selectedSiteId);
-        if (inspectedArticle?.id === article.id) {
-          setInspectedArticle(null);
-          setPipelineData(null);
-        }
-      } else {
-        toast.error('Delete failed: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error deleting article: ' + err.message);
-    }
-  };
-
-  // Inspect Pipeline Flow
-  const inspectPipeline = async (article) => {
-    setInspectedArticle(article);
-    setActiveTab('inspector');
-    setLoadingPipeline(true);
-    try {
-      const res = await cmsService.getArticlePipelineFlow(
-        selectedWorkspaceId,
-        selectedSiteId,
-        article.id
-      );
-      if (res.ok) {
-        setPipelineData(res.data);
-      } else {
-        toast.error('Failed to fetch pipeline diagnostics: ' + (res.error || ''));
-      }
-    } catch (err) {
-      toast.error('Error fetching pipeline: ' + err.message);
-    } finally {
-      setLoadingPipeline(false);
-    }
-  };
-
-  // Public Delivery Comparison
-  const fetchPublicDelivery = async () => {
-    const siteObj = sites.find((s) => s.id === selectedSiteId);
-    if (!siteObj) return;
-    setLoadingPublicDelivery(true);
-    setShowPublicDelivery(true);
-    try {
-      const res = await cmsService.getPublicArticles(siteObj.slug);
-      setPublicDeliveryData(res.data);
-    } catch (err) {
-      toast.error('Failed to fetch public delivery: ' + err.message);
-    } finally {
-      setLoadingPublicDelivery(false);
-    }
-  };
-
-  // SEO Preview (Sitemap / Robots)
-  const loadSeoPreview = async (type = 'sitemap', siteOverride = null) => {
-    const siteObj = siteOverride || sites.find((s) => s.id === selectedSiteId);
-    if (!siteObj) return;
-    setSeoPreviewType(type);
-    setLoadingSeoPreview(true);
-    try {
-      const res =
-        type === 'sitemap'
-          ? await cmsService.getPublicSitemap(siteObj.slug)
-          : await cmsService.getPublicRobots(siteObj.slug);
-
-      setSeoPreviewText(typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2));
-    } catch (err) {
-      setSeoPreviewText('Error loading preview: ' + err.message);
-    } finally {
-      setLoadingSeoPreview(false);
-    }
-  };
-
-  // IndexNow & Providers Logs
-  const loadIndexingLogs = async () => {
-    if (!selectedWorkspaceId || !selectedSiteId) return;
-    setLoadingIndexingLogs(true);
-    try {
-      const logsRes = await cmsService.getIndexingLogs(selectedWorkspaceId, selectedSiteId);
-      const logsList = Array.isArray(logsRes.data)
-        ? logsRes.data
-        : logsRes.data?.results || [];
-      setIndexingLogs(logsList);
-
-      const keyRes = await cmsService.getIndexNowKey(selectedWorkspaceId, selectedSiteId);
-      if (keyRes.ok && keyRes.data?.key) {
-        setIndexNowKey(keyRes.data.key);
-      }
-    } catch (err) {
-      console.warn('Indexing logs error:', err);
-    } finally {
-      setLoadingIndexingLogs(false);
-    }
-  };
-
-  // Submit URL for Indexing
-  const handleSubmitIndexing = async (e) => {
+  const handleRecordAnalyticsStat = async (e) => {
     e.preventDefault();
-    if (!indexingUrl.trim()) {
-      toast.error('Please enter a URL to submit.');
-      return;
+    setRecordingStat(true);
+    const res = await cmsService.recordAnalyticsStat(newStat);
+    setRecordingStat(false);
+    if (res.ok) {
+      toast.success(`Recorded statistics for ${newStat.page_title}!`);
+      setIsRecordStatOpen(false);
+      fetchAnalytics();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to record stat');
     }
-    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
-    const targetSiteId = selectedSiteId || sites[0]?.id;
-    if (!targetWsId || !targetSiteId) {
-      toast.error('Please select an active workspace and publication site first.');
-      return;
-    }
+  };
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Handlers: Google Search Console
+  // ─────────────────────────────────────────────────────────────────────────────
+  const handleRegisterDomain = async (e) => {
+    e.preventDefault();
+    setRegisteringDomain(true);
+    const res = await cmsService.registerSearchConsoleDomain(newDomain);
+    setRegisteringDomain(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Domain registered in Google Search Console!');
+      setIsRegisterDomainOpen(false);
+      setNewDomain({ domain: '', property_type: 'DOMAIN', verification_method: 'DNS_TXT' });
+      fetchSearchConsole();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to register domain');
+    }
+  };
+
+  const handleVerifyDomain = async (domainId, method) => {
+    const res = await cmsService.verifySearchConsoleDomain(domainId, { verification_method: method });
+    if (res.ok) {
+      toast.success('Domain verified successfully in Search Console!');
+      fetchSearchConsole();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Verification failed');
+    }
+  };
+
+  const handleDeleteDomain = async (domainId) => {
+    if (!window.confirm('Remove this domain property from Google Search Console?')) return;
+    const res = await cmsService.deleteSearchConsoleDomain(domainId);
+    if (res.ok) {
+      toast.success('Domain removed');
+      fetchSearchConsole();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to remove domain');
+    }
+  };
+
+  const handleSubmitSitemap = async (e) => {
+    e.preventDefault();
+    setSubmittingSitemap(true);
+    const res = await cmsService.submitSearchConsoleSitemap({ sitemap_url: sitemapUrlInput });
+    setSubmittingSitemap(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Sitemap submitted to Google Search Console!');
+      setIsSubmitSitemapOpen(false);
+      fetchSearchConsole();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to submit sitemap');
+    }
+  };
+
+  const handleInspectUrl = async (e) => {
+    e.preventDefault();
+    if (!inspectUrlInput.trim()) return;
+    setInspectingUrl(true);
+    setInspectResult(null);
+    const res = await cmsService.inspectSearchConsoleUrl(inspectUrlInput.trim());
+    setInspectingUrl(false);
+    if (res.ok) {
+      setInspectResult(res.data?.result || null);
+    } else {
+      toast.error(res.error || 'URL Inspection failed');
+    }
+  };
+
+  const handleSubmitIndexing = async (bulkAll = false) => {
     setSubmittingIndexing(true);
-    try {
-      const rawUrl = indexingUrl.trim();
-      let candidateHost = '';
-      try {
-        candidateHost = new URL(rawUrl).hostname;
-      } catch {
-        try {
-          candidateHost = new URL(`https://${rawUrl}`).hostname;
-        } catch {}
-      }
-
-      if (candidateHost) {
-        await ensureDomainVerified(candidateHost, targetWsId, targetSiteId);
-      }
-
-      const res = await cmsService.submitUrlForIndexing(targetWsId, targetSiteId, {
-        provider: indexingProvider,
-        urls: [rawUrl],
-      });
-      if (res.ok) {
-        toast.success(`URL submitted to ${indexingProvider} successfully!`);
-        await loadIndexingLogs();
-      } else {
-        toast.error('Submission failed: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error submitting URL: ' + err.message);
-    } finally {
-      setSubmittingIndexing(false);
+    const payload = bulkAll ? { bulk_all_cms_pages: true } : { page_url: manualIndexUrl };
+    const res = await cmsService.submitSearchConsoleIndexing(payload);
+    setSubmittingIndexing(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Indexing request submitted to Google Search Console!');
+      if (!bulkAll) setManualIndexUrl('');
+      fetchSearchConsole();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to submit indexing request');
     }
   };
 
-  // Privacy Analytics
-  const loadAnalyticsConfig = async () => {
-    if (!selectedWorkspaceId || !selectedSiteId) return;
-    setLoadingAnalyticsConfig(true);
-    try {
-      const res = await cmsService.getAnalyticsConfig(selectedWorkspaceId, selectedSiteId);
-      if (res.ok) {
-        setAnalyticsConfig(res.data);
-      }
-    } catch (err) {
-      console.warn('Analytics config error:', err);
-    } finally {
-      setLoadingAnalyticsConfig(false);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Handlers: Bing Webmaster Tools
+  // ─────────────────────────────────────────────────────────────────────────────
+  const handleSaveBingConfig = async (e) => {
+    e.preventDefault();
+    setSavingBingConfig(true);
+    const payload = {
+      site_url: bingData?.config?.site_url || 'https://marketintel.hikasimat.com',
+      indexnow_key: bingData?.config?.indexnow_key,
+      verification_meta_code: bingData?.config?.verification_meta_code,
+      cname_record: bingData?.config?.cname_record,
+      auto_indexnow_on_publish: bingData?.config?.auto_indexnow_on_publish ?? true,
+    };
+    if (bingApiKeyInput && !bingApiKeyInput.includes('••••')) {
+      payload.api_key = bingApiKeyInput;
+    }
+    const res = await cmsService.updateBingConfig(payload);
+    setSavingBingConfig(false);
+    if (res.ok) {
+      toast.success('Bing Webmaster Tools configuration saved!');
+      fetchBing();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to save Bing configuration');
     }
   };
 
-  const handleToggleFirstParty = async (enable) => {
-    if (!selectedWorkspaceId || !selectedSiteId) return;
-    setTogglingIngestion(true);
-    try {
-      const res = await cmsService.updateAnalyticsConfig(selectedWorkspaceId, selectedSiteId, {
-        is_first_party_enabled: enable,
-      });
-      if (res.ok) {
-        setAnalyticsConfig(res.data);
-        toast.success(
-          enable
-            ? 'First-party event ingestion enabled!'
-            : 'First-party event ingestion disabled.'
-        );
-      } else {
-        toast.error('Failed to update config: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error updating config: ' + err.message);
-    } finally {
-      setTogglingIngestion(false);
+  const handleVerifyBingSite = async () => {
+    setSavingBingConfig(true);
+    const res = await cmsService.updateBingConfig({ verify_site: true });
+    setSavingBingConfig(false);
+    if (res.ok) {
+      toast.success('Bing site verification confirmed!');
+      fetchBing();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Could not verify site on Bing');
     }
   };
 
-  const loadAnalytics = async () => {
-    if (!selectedWorkspaceId || !selectedSiteId) return;
-    setLoadingAnalytics(true);
-    try {
-      const res = await cmsService.getAnalyticsOverview(selectedWorkspaceId, selectedSiteId);
-      if (res.ok) {
-        setAnalyticsOverview(res.data);
-      }
-      await loadAnalyticsConfig();
-    } catch (err) {
-      console.warn('Analytics overview error:', err);
-    } finally {
-      setLoadingAnalytics(false);
+  const handleRegenerateIndexNowKey = async () => {
+    if (!window.confirm('Regenerate your IndexNow Key? You will need to host the new key on your site.')) return;
+    const res = await cmsService.updateBingConfig({ regenerate_indexnow_key: true });
+    if (res.ok) {
+      toast.success('New IndexNow key generated!');
+      fetchBing();
+    } else {
+      toast.error(res.error || 'Could not regenerate key');
     }
   };
 
-  const handleSimulateEvent = async (eventType, path) => {
-    const siteObj = sites.find((s) => s.id === selectedSiteId);
-    if (!siteObj) return;
-
-    // Auto-enable first party ingestion if disabled
-    if (analyticsConfig && !analyticsConfig.is_first_party_enabled) {
-      await handleToggleFirstParty(true);
-    }
-
-    setSimulatingEvent(true);
-    const visitorId = `vis-${Math.random().toString(36).substring(2, 9)}`;
-    const sessionId = `ses-${Math.random().toString(36).substring(2, 9)}`;
-
-    // Strictly adhere to CMS allowlisted properties (ANA-4)
-    let properties = {};
-    if (eventType === 'page_view') {
-      properties = { path, referrer: 'https://google.com', title: 'Headless Reader Post' };
-    } else if (eventType === 'cta_click') {
-      properties = {
-        path,
-        cta_id: 'btn-signup-now',
-        cta_text: 'Get Started',
-        target_url: `https://${siteObj.slug}.hikasimat.com${path}`,
-      };
-    } else if (eventType === 'form_submit') {
-      properties = { path, form_id: 'lead-newsletter-form', form_name: 'Lead Newsletter Signup' };
-    }
-
-    try {
-      const res = await cmsService.ingestPublicEvent(siteObj.slug, {
-        event_type: eventType,
-        visitor_id: visitorId,
-        session_id: sessionId,
-        path,
-        consent_granted: true,
-        properties,
-      });
-
-      if (res.ok) {
-        toast.success(`Event recorded: ${eventType} on ${path}`);
-        await loadAnalytics();
-      } else {
-        const errMsg =
-          (res.data && Array.isArray(res.data) && res.data[0]) ||
-          (typeof res.data === 'object' && (res.data?.detail || res.data?.error?.message)) ||
-          res.error ||
-          'Validation failed for one or more fields.';
-        toast.error(`Event ingestion failed: ${errMsg}`);
-      }
-    } catch (err) {
-      toast.error('Simulation error: ' + err.message);
-    } finally {
-      setSimulatingEvent(false);
+  const handleSubmitBingUrls = async (bulkAll = false) => {
+    setSubmittingBingUrls(true);
+    const payload = bulkAll
+      ? { bulk_all_cms_pages: true, submission_protocol: bingProtocol }
+      : { urls: bingUrlsInput, submission_protocol: bingProtocol };
+    const res = await cmsService.submitBingUrls(payload);
+    setSubmittingBingUrls(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Submitted to Bing & IndexNow!');
+      if (!bulkAll) setBingUrlsInput('');
+      fetchBing();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to submit URLs to Bing');
     }
   };
 
-  const fetchGa4LiveReport = async () => {
-    if (!selectedWorkspaceId || !selectedSiteId) return;
-    setLoadingGa4Report(true);
-    const now = new Date();
-    const today = now.toISOString().split('T')[0];
-    const past = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    try {
-      const res = await cmsService.getGA4Report(selectedWorkspaceId, selectedSiteId, {
-        start_date: past,
-        end_date: today,
-      });
-      if (res.ok) {
-        setGa4ReportData(res.data);
-        toast.success('GA4 Live Report refreshed!');
-      } else {
-        const errorDetail =
-          (res.data && Array.isArray(res.data) && res.data[0]) ||
-          (typeof res.data === 'object' && (res.data?.detail || res.data?.error?.message)) ||
-          res.error ||
-          'GA4 connection not configured for this site.';
-        toast.info(errorDetail);
-        setGa4ReportData({
-          status: 'NOT_CONNECTED',
-          message: errorDetail,
-          recommendation: 'Configure GA4 OAuth connection in site settings to stream Google Analytics 4 reports.',
-        });
-      }
-    } catch (err) {
-      toast.error('GA4 report error: ' + err.message);
-    } finally {
-      setLoadingGa4Report(false);
+  const handleSubmitBingSitemap = async (e) => {
+    e.preventDefault();
+    setSubmittingBingSitemap(true);
+    const res = await cmsService.submitBingSitemap({ sitemap_url: bingSitemapInput });
+    setSubmittingBingSitemap(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Sitemap submitted to Bing!');
+      fetchBing();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to submit sitemap to Bing');
     }
   };
 
-  // Consent Operations
-  const handleRecordConsent = async (analyticsChoice, marketingChoice) => {
-    const siteObj = sites.find((s) => s.id === selectedSiteId);
-    if (!siteObj) return;
-    setRecordingConsent(true);
-    try {
-      const isFullOptIn = analyticsChoice && marketingChoice;
-      // GDPR Art. 7 requires 'necessary' cookies to always be active and explicit
-      const res = await cmsService.recordVisitorConsent(siteObj.slug, {
-        visitor_id: consentVisitorId || 'visitor-dm-session-901',
-        categories: {
-          necessary: true,
-          analytics: Boolean(analyticsChoice),
-          marketing: Boolean(marketingChoice),
-          preferences: Boolean(analyticsChoice || marketingChoice),
-        },
-        consent_type: isFullOptIn ? 'EXPLICIT_OPT_IN' : 'OPT_OUT',
-      });
-
-      if (res.ok) {
-        setConsentResult({
-          timestamp: new Date().toLocaleTimeString(),
-          analytics: analyticsChoice,
-          marketing: marketingChoice,
-          data: res.data,
-        });
-        toast.success('Visitor consent recorded with GDPR Art. 7 compliance!');
-      } else {
-        const errMsg =
-          (res.data && Array.isArray(res.data) && res.data[0]) ||
-          (typeof res.data === 'object' && (res.data?.detail || res.data?.error?.message)) ||
-          res.error ||
-          'Failed to record consent.';
-        toast.error('Consent recording error: ' + errMsg);
-      }
-    } catch (err) {
-      toast.error('Consent record error: ' + err.message);
-    } finally {
-      setRecordingConsent(false);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Handlers: Google Ads
+  // ─────────────────────────────────────────────────────────────────────────────
+  const handleSaveAdsAccountConfig = async (e) => {
+    e.preventDefault();
+    setSavingAdsAccount(true);
+    const res = await cmsService.updateGoogleAdsConfig(adsAccountConfig);
+    setSavingAdsAccount(false);
+    if (res.ok) {
+      toast.success(res.data?.detail || 'Google Ads account configuration updated!');
+      setIsAdsAccountConfigOpen(false);
+      fetchGoogleAds();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to update Google Ads config');
     }
   };
 
-  // Google Ads Management Handlers
-  const loadGoogleAdsData = async () => {
-    if (!selectedWorkspaceId) return;
-    setLoadingGoogleAds(true);
-    try {
-      const connRes = await cmsService.getGoogleAdsConnection(selectedWorkspaceId);
-      if (connRes.ok && connRes.data?.connected) {
-        setGoogleAdsConnection(connRes.data.connection || connRes.data);
-
-        // Fetch accessible customer accounts
-        const custRes = await cmsService.getGoogleAdsCustomers(selectedWorkspaceId);
-        let accessibleCustomers = [];
-        if (custRes.ok && Array.isArray(custRes.data?.customers)) {
-          accessibleCustomers = custRes.data.customers;
-          setGoogleAdsCustomers(accessibleCustomers);
-        }
-
-        // If customer ID is not yet selected but accessible accounts exist, auto-select first CID
-        let customerId = connRes.data?.connection?.customer_id;
-        if (!customerId && accessibleCustomers.length > 0) {
-          const firstCid = accessibleCustomers[0];
-          await cmsService.selectGoogleAdsCustomer(selectedWorkspaceId, firstCid);
-          customerId = firstCid;
-          setGoogleAdsConnection((prev) => ({ ...prev, customer_id: firstCid }));
-        }
-
-        // If customer ID is selected, load campaigns, ad groups, keywords, and audit logs
-        if (customerId) {
-          const [campRes, adgRes, kwRes, auditRes] = await Promise.all([
-            cmsService.getGoogleAdsCampaigns(selectedWorkspaceId, adsDateRange),
-            cmsService.getGoogleAdsAdGroups(selectedWorkspaceId, adsDateRange),
-            cmsService.getGoogleAdsKeywords(selectedWorkspaceId, adsDateRange),
-            cmsService.getGoogleAdsAuditLogs(selectedWorkspaceId),
-          ]);
-
-          if (campRes.ok) {
-            setGoogleAdsCampaigns(campRes.data?.campaigns || []);
-          }
-          if (adgRes.ok) {
-            setGoogleAdsAdGroups(adgRes.data?.ad_groups || []);
-          }
-          if (kwRes.ok) {
-            setGoogleAdsKeywords(kwRes.data?.keywords || []);
-          }
-          if (auditRes.ok) {
-            const logsList = Array.isArray(auditRes.data)
-              ? auditRes.data
-              : auditRes.data?.results || [];
-            setGoogleAdsAuditLogs(logsList);
-          }
-        }
-      } else {
-        setGoogleAdsConnection(null);
-        setGoogleAdsCampaigns([]);
-        setGoogleAdsAdGroups([]);
-        setGoogleAdsKeywords([]);
-        setGoogleAdsAuditLogs([]);
-      }
-    } catch (err) {
-      console.warn('Error loading Google Ads data:', err);
-    } finally {
-      setLoadingGoogleAds(false);
-    }
-  };
-
-  // Auto-exchange Google OAuth code on redirect return
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    if (code && selectedWorkspaceId) {
-      (async () => {
-        try {
-          const res = await cmsService.exchangeGoogleAdsCode(selectedWorkspaceId, code);
-          if (res.ok) {
-            toast.success('Google Ads authorization completed successfully!');
-            window.history.replaceState({}, document.title, window.location.pathname);
-            await loadGoogleAdsData();
-          } else {
-            toast.error('Google Ads OAuth exchange failed: ' + (res.error || 'Server error'));
-          }
-        } catch (err) {
-          toast.error('OAuth exchange error: ' + err.message);
-        }
-      })();
-    }
-  }, [selectedWorkspaceId]);
-
-  const handleSelectGoogleAdsCustomer = async (cid) => {
-    if (!selectedWorkspaceId || !cid) return;
-    try {
-      const res = await cmsService.selectGoogleAdsCustomer(selectedWorkspaceId, cid);
-      if (res.ok) {
-        toast.success(`Google Ads Account ${cid} selected!`);
-        await loadGoogleAdsData();
-      } else {
-        toast.error('Failed to select customer ID: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error selecting customer ID: ' + err.message);
-    }
-  };
-
-  const handlePauseCampaign = async (campaignId) => {
-    if (!selectedWorkspaceId || !campaignId) return;
-    setMutatingCampaignId(campaignId);
-    try {
-      const res = await cmsService.pauseGoogleAdsCampaign(selectedWorkspaceId, campaignId);
-      if (res.ok) {
-        toast.success(`Campaign ${campaignId} paused successfully.`);
-        await loadGoogleAdsData();
-      } else {
-        toast.error('Failed to pause campaign: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error pausing campaign: ' + err.message);
-    } finally {
-      setMutatingCampaignId(null);
-    }
-  };
-
-  const handleResumeCampaign = async (campaignId) => {
-    if (!selectedWorkspaceId || !campaignId) return;
-    setMutatingCampaignId(campaignId);
-    try {
-      const res = await cmsService.resumeGoogleAdsCampaign(selectedWorkspaceId, campaignId);
-      if (res.ok) {
-        toast.success(`Campaign ${campaignId} activated/resumed successfully.`);
-        await loadGoogleAdsData();
-      } else {
-        toast.error('Failed to resume campaign: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error resuming campaign: ' + err.message);
-    } finally {
-      setMutatingCampaignId(null);
+  const handleToggleCampaignStatus = async (campaign) => {
+    const nextStatus = campaign.status === 'ENABLED' ? 'PAUSED' : 'ENABLED';
+    const res = await cmsService.updateGoogleAdsCampaign(campaign.id, { status: nextStatus });
+    if (res.ok) {
+      toast.success(`Campaign "${campaign.name}" is now ${nextStatus}!`);
+      fetchGoogleAds();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to update campaign status');
     }
   };
 
   const handleOpenBudgetModal = (campaign) => {
-    setSelectedCampaignForBudget(campaign);
-    const existingBudget =
-      campaign.budget_amount ||
-      campaign.budget ||
-      (campaign.budget_micros ? (Number(campaign.budget_micros) / 1000000).toFixed(2) : '50.00');
-    setNewBudgetAmount(String(existingBudget));
+    setCampaignForBudget(campaign);
+    setNewBudgetVal(String(campaign.daily_budget || '50.00'));
     setBudgetModalOpen(true);
   };
 
-  const handleUpdateBudgetSubmit = async (e) => {
+  const handleSaveCampaignBudget = async (e) => {
     e.preventDefault();
-    if (!selectedCampaignForBudget || !newBudgetAmount) return;
+    if (!campaignForBudget) return;
     setUpdatingBudget(true);
-    try {
-      const campId = selectedCampaignForBudget.campaign_id || selectedCampaignForBudget.id;
-      const campName = selectedCampaignForBudget.campaign_name || selectedCampaignForBudget.name || '';
-      const customerId = googleAdsConnection?.customer_id || '';
-      const res = await cmsService.updateGoogleAdsBudget(
-        selectedWorkspaceId,
-        campId,
-        parseFloat(newBudgetAmount),
-        customerId,
-        campName
-      );
-      if (res.ok) {
-        toast.success(`Campaign daily budget updated to $${newBudgetAmount}`);
-        setBudgetModalOpen(false);
-        setSelectedCampaignForBudget(null);
-        await loadGoogleAdsData();
-      } else {
-        toast.error('Failed to update budget: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error updating budget: ' + err.message);
-    } finally {
-      setUpdatingBudget(false);
+    const res = await cmsService.updateGoogleAdsCampaign(campaignForBudget.id, {
+      daily_budget: newBudgetVal,
+    });
+    setUpdatingBudget(false);
+    if (res.ok) {
+      toast.success(`Daily budget updated to $${newBudgetVal}/day!`);
+      setBudgetModalOpen(false);
+      fetchGoogleAds();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to update budget');
     }
   };
 
-  const handleDisconnectGoogleAds = async () => {
-    if (!window.confirm('Are you sure you want to disconnect Google Ads from this workspace?')) return;
-    try {
-      const res = await cmsService.disconnectGoogleAds(selectedWorkspaceId);
-      if (res.ok) {
-        toast.success('Google Ads disconnected.');
-        setGoogleAdsConnection(null);
-        setGoogleAdsCampaigns([]);
-        setGoogleAdsAdGroups([]);
-        setGoogleAdsKeywords([]);
-        setGoogleAdsAuditLogs([]);
-      } else {
-        toast.error('Failed to disconnect: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Error disconnecting Google Ads: ' + err.message);
+  const handleCreateCampaign = async (e) => {
+    e.preventDefault();
+    setCreatingCampaign(true);
+    const res = await cmsService.createGoogleAdsCampaign(newCampaign);
+    setCreatingCampaign(false);
+    if (res.ok) {
+      toast.success(`Google Ads Campaign "${newCampaign.name}" created!`);
+      setIsCreateCampaignOpen(false);
+      setNewCampaign({
+        name: '',
+        channel_type: 'SEARCH',
+        status: 'ENABLED',
+        bidding_strategy: 'MAXIMIZE_CONVERSIONS',
+        daily_budget: '75.00',
+        target_cpa: '',
+        target_roas: '',
+        locations: 'United States, United Kingdom, Singapore',
+        languages: 'English',
+      });
+      fetchGoogleAds();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to create campaign');
     }
   };
 
-  const handleAuthorizeGoogleAds = async () => {
-    const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
-    if (!targetWsId) {
-      toast.error('Please connect or select a workspace before authorizing Google Ads.');
-      return;
-    }
-    try {
-      const res = await cmsService.authorizeGoogleAds(targetWsId);
-      if (res.ok && res.data?.authorization_url) {
-        window.location.href = res.data.authorization_url;
-      } else {
-        toast.error('Failed to initialize Google Ads authorization: ' + (res.error || 'Server error'));
-      }
-    } catch (err) {
-      toast.error('Authorization error: ' + err.message);
+  const handleDeleteCampaign = async (campaign) => {
+    if (!window.confirm(`Remove campaign "${campaign.name}"?`)) return;
+    const res = await cmsService.deleteGoogleAdsCampaign(campaign.id);
+    if (res.ok) {
+      toast.success(`Campaign "${campaign.name}" removed`);
+      fetchGoogleAds();
+      fetchOverview();
+    } else {
+      toast.error(res.error || 'Failed to remove campaign');
     }
   };
 
-  // Switch tabs handler
-  const handleTabSwitch = (tab) => {
-    setActiveTab(tab);
-    if (tab === 'seo') {
-      loadSeoPreview(seoPreviewType);
-      loadIndexingLogs();
-    } else if (tab === 'analytics') {
-      loadAnalytics();
-    } else if (tab === 'google_ads') {
-      loadGoogleAdsData();
+  const handleCreateAdGroup = async (e) => {
+    e.preventDefault();
+    setCreatingAdGroup(true);
+    const res = await cmsService.createGoogleAdsAdGroup(newAdGroup);
+    setCreatingAdGroup(false);
+    if (res.ok) {
+      toast.success(`Ad Group "${newAdGroup.name}" created!`);
+      setIsCreateAdGroupOpen(false);
+      setNewAdGroup({
+        campaign_id: '',
+        name: '',
+        cpc_bid: '2.50',
+        headline_1: '',
+        headline_2: '',
+        description: '',
+        final_url: 'https://marketintel.hikasimat.com',
+      });
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to create Ad Group');
     }
   };
 
-  const activeSite = sites.find((s) => s.id === selectedSiteId);
-
-  // Filtered articles
-  const filteredArticles = articles.filter((art) => {
-    const matchesFilter =
-      articleFilter === 'ALL' ||
-      (articleFilter === 'PUBLISHED' && art.status === 'PUBLISHED') ||
-      (articleFilter === 'DRAFT' && art.status === 'DRAFT');
-
-    const matchesSearch =
-      !articleSearch ||
-      art.title?.toLowerCase().includes(articleSearch.toLowerCase()) ||
-      art.slug?.toLowerCase().includes(articleSearch.toLowerCase());
-
-    return matchesFilter && matchesSearch;
-  });
-
-  // Resolve human-readable page title and badge for analytics telemetry paths
-  const resolvePageDetails = (path) => {
-    if (!path) return { title: 'Unknown Page', badge: 'Unknown', path: '/' };
-
-    if (path === '/' || path === '') {
-      return { title: 'Homepage', badge: 'Root', path };
+  const handleToggleAdGroupStatus = async (ag) => {
+    const nextStatus = ag.status === 'ENABLED' ? 'PAUSED' : 'ENABLED';
+    const res = await cmsService.updateGoogleAdsAdGroup(ag.id, { status: nextStatus });
+    if (res.ok) {
+      toast.success(`Ad Group is now ${nextStatus}`);
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to update Ad Group');
     }
-    if (path === '/blog' || path === '/articles') {
-      return { title: 'Articles Feed Index', badge: 'Index', path };
-    }
-    if (path === '/pricing') {
-      return { title: 'Pricing & Plans', badge: 'Static', path };
-    }
-    if (path === '/contact') {
-      return { title: 'Contact Us', badge: 'Static', path };
-    }
+  };
 
-    // Match /articles/{slug} or /blog/{slug}
-    const match = path.match(/^\/(?:articles|blog)\/([^/?#]+)/);
-    if (match) {
-      const slug = match[1];
-      const matchedArt = articles.find(
-        (a) => a.slug === slug || a.slug.toLowerCase() === slug.toLowerCase()
-      );
-      if (matchedArt) {
-        return {
-          title: matchedArt.title,
-          badge: matchedArt.status === 'PUBLISHED' ? 'Article' : 'Draft',
-          path,
-        };
-      }
-      // Clean fallback from slug
-      const formattedTitle = slug
-        .replace(/[-_]+/g, ' ')
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-      return {
-        title: formattedTitle,
-        badge: 'Article',
-        path,
-      };
+  const handleDeleteAdGroup = async (ag) => {
+    if (!window.confirm(`Delete Ad Group "${ag.name}"?`)) return;
+    const res = await cmsService.deleteGoogleAdsAdGroup(ag.id);
+    if (res.ok) {
+      toast.success(`Ad Group "${ag.name}" deleted`);
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to delete Ad Group');
     }
+  };
 
-    // Generic formatting for any other path (e.g. /about-us -> About Us)
-    const clean = path
-      .replace(/^\//, '')
-      .replace(/[-_/]+/g, ' ')
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-    return {
-      title: clean || path,
-      badge: 'Page',
-      path,
-    };
+  const handleCreateKeyword = async (e) => {
+    e.preventDefault();
+    setCreatingKeyword(true);
+    const res = await cmsService.createGoogleAdsKeyword(newKeyword);
+    setCreatingKeyword(false);
+    if (res.ok) {
+      toast.success(`Keyword "${newKeyword.keyword_text}" added!`);
+      setIsCreateKeywordOpen(false);
+      setNewKeyword({ ad_group_id: '', keyword_text: '', match_type: 'PHRASE', cpc_bid: '2.20' });
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to add keyword');
+    }
+  };
+
+  const handleToggleKeywordStatus = async (kw) => {
+    const nextStatus = kw.status === 'ENABLED' ? 'PAUSED' : 'ENABLED';
+    const res = await cmsService.updateGoogleAdsKeyword(kw.id, { status: nextStatus });
+    if (res.ok) {
+      toast.success(`Keyword is now ${nextStatus}`);
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to update keyword');
+    }
+  };
+
+  const handleDeleteKeyword = async (kw) => {
+    if (!window.confirm(`Delete keyword "${kw.keyword_text}"?`)) return;
+    const res = await cmsService.deleteGoogleAdsKeyword(kw.id);
+    if (res.ok) {
+      toast.success(`Keyword deleted`);
+      fetchGoogleAds();
+    } else {
+      toast.error(res.error || 'Failed to delete keyword');
+    }
   };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
-      {/* ── TOP HEADER / WORKSPACE & SITE TOOLBAR ──────────────────────── */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
-              <Globe className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-black text-slate-900 tracking-tight">Headless CMS Suite</h1>
-                <span className="px-2 py-0.5 text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200 rounded-full">
-                  DM Role
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Multi-tenant content authoring, technical SEO automation, search indexing & privacy analytics
-              </p>
-            </div>
+      {/* ── Top Header Strip ──────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-sky-500 text-white flex items-center justify-center shadow-md shadow-indigo-500/20">
+            <Globe className="w-6 h-6" />
           </div>
-
-          {/* Quick Selectors & Live Gateway Status */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Dynamic Gateway Selector & Live Status Pill */}
-            <button
-              type="button"
-              onClick={() => {
-                setGatewayInput(currentGatewayUrl);
-                setGatewayTestResult(null);
-                setIsGatewayModalOpen(true);
-              }}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer shadow-2xs hover:shadow-xs ${
-                backendHealth.live
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100/80'
-                  : 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100/80'
-              }`}
-              title={`Gateway: ${currentGatewayUrl} (Click to configure or change URL)`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  backendHealth.checking
-                    ? 'bg-amber-400 animate-ping'
-                    : backendHealth.live
-                    ? 'bg-emerald-500 animate-pulse'
-                    : 'bg-rose-500'
-                }`}
-              />
-              <span className="truncate max-w-[190px] font-mono text-[11px]">
-                {displayHost}
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-black text-slate-900 tracking-tight">Market Intel CMS</h1>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                Native Database Engine
               </span>
-              <Sliders className="w-3.5 h-3.5 opacity-60 hover:opacity-100 text-slate-600" />
-            </button>
-
-            {/* Workspace Switcher */}
-            <select
-              value={selectedWorkspaceId}
-              onChange={(e) => handleWorkspaceChange(e.target.value)}
-              disabled={loadingTenancy || workspaces.length === 0}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {workspaces.length === 0 ? (
-                <option value="">🏢 No Workspace</option>
-              ) : (
-                workspaces.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    🏢 {w.name}
-                  </option>
-                ))
-              )}
-            </select>
-
-            {/* Site Switcher */}
-            <select
-              value={selectedSiteId}
-              onChange={(e) => handleSiteChange(e.target.value)}
-              disabled={loadingTenancy || sites.length === 0}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 max-w-[200px]"
-            >
-              {sites.length === 0 ? (
-                <option value="">🌐 No Site Active</option>
-              ) : (
-                sites.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    🌐 {s.name} ({s.slug})
-                  </option>
-                ))
-              )}
-            </select>
-
-            {/* New Site Button */}
-            <button
-              onClick={() => setIsCreateSiteOpen(true)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              New Site
-            </button>
-
-            {/* Realtime API Inspector Drawer Toggle */}
-            <button
-              onClick={() => setIsInspectorOpen(!isInspectorOpen)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border ${
-                isInspectorOpen
-                  ? 'bg-slate-900 text-white border-slate-900'
-                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-              }`}
-            >
-              <Terminal className="w-3.5 h-3.5 text-blue-500" />
-              Inspector
-              {activityLogs.length > 0 && (
-                <span className="w-4 h-4 text-[10px] rounded-full bg-blue-600 text-white flex items-center justify-center font-bold">
-                  {activityLogs.length > 99 ? '99+' : activityLogs.length}
-                </span>
-              )}
-            </button>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Independent CMS with Google Analytics, Search Console, Bing Webmaster Tools & Google Ads.
+            </p>
           </div>
         </div>
 
-        {/* User Session Bar */}
-        <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between text-xs text-slate-500 gap-2">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400">Authenticated Session:</span>
-            <span className="font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded">
-              {userEmail}
-            </span>
-            <span className="text-slate-400">|</span>
-            <span className="text-slate-400">Active Site Domain:</span>
-            <span className="font-mono text-slate-700">
-              {activeSite?.slug ? `${activeSite.slug}.hikasimat.com` : 'No site active'}
-            </span>
-          </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              fetchOverview();
+              if (activeTab === 'pages') fetchPages();
+              else if (activeTab === 'analytics') fetchAnalytics();
+              else if (activeTab === 'search_console') fetchSearchConsole();
+              else if (activeTab === 'bing') fetchBing();
+              else if (activeTab === 'google_ads') fetchGoogleAds();
+            }}
+            disabled={loadingOverview}
+            className="inline-flex items-center gap-2 px-3.5 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 transition shadow-xs disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={checkSystemHealth}
-              className="text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1"
-            >
-              <RefreshCw className={`w-3 h-3 ${backendHealth.checking ? 'animate-spin' : ''}`} />
-              Re-probe Health
-            </button>
+          <a
+            href="/api/digital-marketing/cms/sitemap.xml"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition shadow-xs"
+          >
+            <Code className="w-3.5 h-3.5 text-sky-400" />
+            Live sitemap.xml
+            <ExternalLink className="w-3 h-3 text-slate-400" />
+          </a>
+        </div>
+      </div>
+
+      {/* ── Integration Summary Stat Cards ─────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {/* Google Analytics Card */}
+        <div
+          onClick={() => setActiveTab('analytics')}
+          className={`cursor-pointer bg-white rounded-xl border p-4.5 transition-all shadow-xs ${
+            activeTab === 'analytics'
+              ? 'border-indigo-500 ring-2 ring-indigo-500/10'
+              : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Google Analytics</span>
+            <div className="flex items-center gap-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[10px] font-bold text-emerald-600">
+                {overviewData?.integrations?.google_analytics?.active_users_now ?? 0} Live
+              </span>
+            </div>
+          </div>
+          <div className="mt-2 text-2xl font-black text-slate-900">
+            {overviewData?.integrations?.google_analytics?.total_page_views?.toLocaleString() ?? 0}
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+            <span>Page ID: {overviewData?.integrations?.google_analytics?.page_id || 'G-MKTINTEL01'}</span>
+            <span className="text-emerald-600 font-bold">Views</span>
+          </div>
+        </div>
+
+        {/* Google Search Console Card */}
+        <div
+          onClick={() => setActiveTab('search_console')}
+          className={`cursor-pointer bg-white rounded-xl border p-4.5 transition-all shadow-xs ${
+            activeTab === 'search_console'
+              ? 'border-blue-500 ring-2 ring-blue-500/10'
+              : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Search Console</span>
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" title="Search Console" />
+          </div>
+          <div className="mt-2 text-2xl font-black text-slate-900">
+            {overviewData?.integrations?.google_search_console?.total_clicks?.toLocaleString() ?? 0}
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+            <span>{overviewData?.integrations?.google_search_console?.indexed_pages_count ?? 0} Indexed Pages</span>
+            <span className="text-blue-600 font-bold">Clicks</span>
+          </div>
+        </div>
+
+        {/* Bing Webmaster Tools Card */}
+        <div
+          onClick={() => setActiveTab('bing')}
+          className={`cursor-pointer bg-white rounded-xl border p-4.5 transition-all shadow-xs ${
+            activeTab === 'bing'
+              ? 'border-teal-500 ring-2 ring-teal-500/10'
+              : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Bing Webmaster</span>
+            <span className="w-2.5 h-2.5 rounded-full bg-teal-500" title="IndexNow Active" />
+          </div>
+          <div className="mt-2 text-2xl font-black text-slate-900">
+            {overviewData?.integrations?.bing_webmaster?.total_clicks?.toLocaleString() ?? 0}
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+            <span>{overviewData?.integrations?.bing_webmaster?.submissions_count ?? 0} Submissions</span>
+            <span className="text-teal-600 font-bold">IndexNow</span>
+          </div>
+        </div>
+
+        {/* Google Ads Card */}
+        <div
+          onClick={() => setActiveTab('google_ads')}
+          className={`cursor-pointer bg-white rounded-xl border p-4.5 transition-all shadow-xs ${
+            activeTab === 'google_ads'
+              ? 'border-amber-500 ring-2 ring-amber-500/10'
+              : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Google Ads</span>
+            <span className={`w-2.5 h-2.5 rounded-full ${overviewData?.integrations?.google_ads?.is_connected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+          </div>
+          <div className="mt-2 text-2xl font-black text-slate-900">
+            ${Number(overviewData?.integrations?.google_ads?.total_spend || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+            <span>{overviewData?.integrations?.google_ads?.active_campaigns ?? 0} Active Campaigns</span>
+            <span className="text-amber-600 font-bold">Spend</span>
           </div>
         </div>
       </div>
 
-      {/* ── GATEWAY OFFLINE ALERT BANNER ─────────────────────────────────── */}
-      {!backendHealth.live && !backendHealth.checking && (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 text-amber-950 shadow-xs animate-in fade-in duration-200">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center text-amber-700 shrink-0">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
-            <div>
-              <p className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                <span>CMS Gateway Unreachable</span>
-                <span className="font-mono text-[11px] font-normal text-amber-800 bg-amber-100/70 px-1.5 py-0.5 rounded">
-                  {displayHost}
-                </span>
-              </p>
-              <p className="text-[11px] text-amber-800 mt-0.5">
-                The endpoint did not respond to health probes. If your Cloudflare Tunnel restarted, update the gateway URL or switch to local server.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => handleSaveGateway('http://localhost:8001')}
-              className="px-3 py-1.5 text-xs font-bold bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg transition shadow-2xs flex items-center gap-1 cursor-pointer"
-            >
-              ⚡ Switch to localhost:8001
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setGatewayInput(currentGatewayUrl);
-                setGatewayTestResult(null);
-                setIsGatewayModalOpen(true);
-              }}
-              className="px-3 py-1.5 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition shadow-xs flex items-center gap-1 cursor-pointer"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              Configure Gateway
-            </button>
-            <button
-              type="button"
-              onClick={checkSystemHealth}
-              disabled={backendHealth.checking}
-              className="p-1.5 text-amber-700 hover:text-amber-950 rounded-lg hover:bg-amber-100 transition cursor-pointer"
-              title="Retry connection"
-            >
-              <RefreshCw className={`w-4 h-4 ${backendHealth.checking ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-        </div>
-      )}
+      {/* ── Main Navigation Tabs ───────────────────────────────────────────── */}
+      <div className="flex border-b border-slate-200 space-x-1 overflow-x-auto pb-0.5">
+        <button
+          onClick={() => setActiveTab('pages')}
+          className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition flex items-center gap-2 border-b-2 -mb-px ${
+            activeTab === 'pages'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
+              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          Pages & Sitemaps
+        </button>
 
-      {/* ── MODAL: CONFIGURE GATEWAY URL ───────────────────────────────── */}
-      {isGatewayModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 animate-in fade-in zoom-in-95 duration-150 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
-                  <Sliders className="w-4 h-4" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-slate-900">Configure Headless CMS Gateway</h2>
-                  <p className="text-[11px] text-slate-500">Update API gateway dynamically without restarting servers</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsGatewayModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+        <button
+          onClick={() => setActiveTab('analytics')}
+          className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition flex items-center gap-2 border-b-2 -mb-px ${
+            activeTab === 'analytics'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
+              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          Google Analytics
+        </button>
 
-            {/* Current Active Info */}
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
-              <div>
-                <span className="text-slate-400 text-[10px] uppercase font-bold block">Current Active URL</span>
-                <span className="font-mono font-semibold text-slate-800 break-all">{currentGatewayUrl}</span>
-              </div>
-              <span
-                className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
-                  backendHealth.live
-                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                }`}
-              >
-                {backendHealth.live ? '● Connected' : '○ Offline'}
-              </span>
-            </div>
+        <button
+          onClick={() => setActiveTab('search_console')}
+          className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition flex items-center gap-2 border-b-2 -mb-px ${
+            activeTab === 'search_console'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
+              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+          }`}
+        >
+          <Search className="w-4 h-4" />
+          Google Search Console
+        </button>
 
-            {/* Target URL Input */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                CMS Gateway URL (Local or Cloudflare Tunnel)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={gatewayInput}
-                  onChange={(e) => {
-                    setGatewayInput(e.target.value);
-                    setGatewayTestResult(null);
-                  }}
-                  placeholder="https://your-tunnel.trycloudflare.com or http://localhost:8001"
-                  className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleTestGateway()}
-                  disabled={gatewayTesting || !gatewayInput.trim()}
-                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 disabled:opacity-50 cursor-pointer"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${gatewayTesting ? 'animate-spin' : ''}`} />
-                  Test
-                </button>
-              </div>
-              <p className="text-[11px] text-slate-500">
-                Supports full URLs including protocol: <code>http://localhost:8001</code> or <code>https://...trycloudflare.com</code>
-              </p>
-            </div>
+        <button
+          onClick={() => setActiveTab('bing')}
+          className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition flex items-center gap-2 border-b-2 -mb-px ${
+            activeTab === 'bing'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
+              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+          }`}
+        >
+          <Globe className="w-4 h-4 text-teal-600" />
+          Bing Webmaster Tools
+        </button>
 
-            {/* Test Connection Probe Feedback */}
-            {gatewayTestResult && (
-              <div
-                className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between ${
-                  gatewayTestResult.ok
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-rose-50 text-rose-800 border-rose-200'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  {gatewayTestResult.ok ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  ) : (
-                    <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                  )}
-                  <span>
-                    {gatewayTestResult.ok
-                      ? `Probe Successful! Live status 200 OK (${gatewayTestResult.latency}ms)`
-                      : `Probe Failed: ${gatewayTestResult.error}`}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Quick Presets */}
-            <div className="space-y-2">
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                Quick Presets
-              </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setGatewayInput('http://localhost:8001');
-                    handleTestGateway('http://localhost:8001');
-                  }}
-                  className="p-2.5 rounded-lg border border-slate-200 hover:border-blue-400 bg-slate-50/60 hover:bg-blue-50/50 text-left transition group cursor-pointer"
-                >
-                  <div className="font-bold text-slate-800 group-hover:text-blue-700 flex items-center gap-1">
-                    ⚡ Local CMS (Port 8001)
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-500 truncate">http://localhost:8001</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const detected = 'https://angels-outlined-pick-similar.trycloudflare.com';
-                    setGatewayInput(detected);
-                    handleTestGateway(detected);
-                  }}
-                  className="p-2.5 rounded-lg border border-slate-200 hover:border-blue-400 bg-slate-50/60 hover:bg-blue-50/50 text-left transition group cursor-pointer"
-                >
-                  <div className="font-bold text-slate-800 group-hover:text-blue-700 flex items-center gap-1">
-                    🌐 Active Tunnel
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-500 truncate">angels-outlined-pick-similar...</div>
-                </button>
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={handleResetGateway}
-                className="text-xs text-slate-500 hover:text-slate-800 underline cursor-pointer"
-              >
-                Reset to default
-              </button>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsGatewayModalOpen(false)}
-                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSaveGateway()}
-                  disabled={!gatewayInput.trim()}
-                  className="px-4 py-2 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  Save & Connect
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── MODAL: CREATE NEW SITE ────────────────────────────────────── */}
-      {isCreateSiteOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Globe className="w-5 h-5 text-blue-600" />
-                <h2 className="text-base font-bold text-slate-900">Register New Publication Site</h2>
-              </div>
-              <button
-                onClick={() => setIsCreateSiteOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateSite} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Site Name / URL
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. AI Innovations Today or https://ai-innovations.com"
-                  value={newSiteName}
-                  onChange={(e) => {
-                    setNewSiteName(e.target.value);
-                    if (!newSiteSlug) {
-                      setNewSiteSlug(
-                        e.target.value
-                          .toLowerCase()
-                          .replace(/^https?:\/\//i, '')
-                          .replace(/[^a-z0-9]+/g, '-')
-                          .replace(/^-|-$/g, '')
-                      );
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Canonical Slug
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. ai-innovations-today"
-                  value={newSiteSlug}
-                  onChange={(e) => setNewSiteSlug(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Default Locale
-                </label>
-                <input
-                  type="text"
-                  value={newSiteLocale}
-                  onChange={(e) => setNewSiteLocale(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsCreateSiteOpen(false)}
-                  className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-50 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creatingSite}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-                >
-                  {creatingSite && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  Register Site
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ── MAIN TAB NAVIGATION ───────────────────────────────────────── */}
-      <div className="border-b border-slate-200">
-        <nav className="flex space-x-2 sm:space-x-4 overflow-x-auto pb-1">
-          {[
-            { id: 'articles', label: 'Articles & Content', icon: FileText, count: articles.length },
-            {
-              id: 'inspector',
-              label: 'Publishing Pipeline',
-              icon: Activity,
-              highlight: inspectedArticle ? 'Active' : null,
-            },
-            { id: 'seo', label: 'Technical SEO & Indexing', icon: Search },
-            { id: 'analytics', label: 'Privacy Analytics & GA4', icon: BarChart3 },
-            { id: 'google_ads', label: 'Google Ads Manager', icon: TrendingUp, badge: 'New' },
-            { id: 'consent', label: 'Consent Manager (GDPR)', icon: ShieldCheck },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => handleTabSwitch(tab.id)}
-                className={`flex items-center gap-2 py-3 px-3.5 rounded-t-xl text-xs font-bold border-b-2 whitespace-nowrap transition-all ${
-                  isActive
-                    ? 'border-blue-600 text-blue-600 bg-blue-50/50'
-                    : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
-                {tab.label}
-                {typeof tab.count === 'number' && (
-                  <span
-                    className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                      isActive ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'
-                    }`}
-                  >
-                    {tab.count}
-                  </span>
-                )}
-                {tab.badge && (
-                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-2xs">
-                    {tab.badge}
-                  </span>
-                )}
-                {tab.highlight && (
-                  <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
-                )}
-              </button>
-            );
-          })}
-        </nav>
+        <button
+          onClick={() => setActiveTab('google_ads')}
+          className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition flex items-center gap-2 border-b-2 -mb-px ${
+            activeTab === 'google_ads'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
+              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+          }`}
+        >
+          <DollarSign className="w-4 h-4 text-amber-600" />
+          Google Ads
+        </button>
       </div>
 
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 1: ARTICLES & CONTENT PUBLISHING */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {activeTab === 'articles' && (
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* TAB 1: Pages & Content                                              */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'pages' && (
         <div className="space-y-6">
-          {/* Action Toolbar */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-center gap-2 flex-1 max-w-md">
-              <div className="relative flex-1">
+          {/* Controls Bar */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200">
+            <div className="flex items-center gap-3 w-full sm:w-auto">
+              <div className="relative flex-1 sm:w-64">
                 <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Filter articles by title or slug..."
-                  value={articleSearch}
-                  onChange={(e) => setArticleSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  placeholder="Search pages by title or slug..."
+                  value={pageSearch}
+                  onChange={(e) => setPageSearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
               </div>
+
               <select
-                value={articleFilter}
-                onChange={(e) => setArticleFilter(e.target.value)}
-                className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none"
+                value={pageFilter}
+                onChange={(e) => setPageFilter(e.target.value)}
+                className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium text-slate-700"
               >
                 <option value="ALL">All Statuses</option>
-                <option value="PUBLISHED">Published Live Only</option>
-                <option value="DRAFT">Drafts Only</option>
+                <option value="PUBLISHED">Published</option>
+                <option value="DRAFT">Draft</option>
               </select>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
               <button
-                onClick={fetchPublicDelivery}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition"
+                onClick={handleOpenSitemapPreview}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 transition"
               >
-                <Code className="w-3.5 h-3.5 text-indigo-500" />
-                Compare Public Delivery API
+                <Code className="w-3.5 h-3.5 text-indigo-600" />
+                Inspect Sitemap XML
               </button>
+
               <button
                 onClick={() => {
-                  if (sites.length === 0) {
-                    toast.info('Please register a publication site first before creating an article.');
-                    setIsCreateSiteOpen(true);
-                  } else {
-                    setIsCreateArticleOpen(!isCreateArticleOpen);
-                  }
+                  setEditingPage(null);
+                  setNewPage({
+                    title: '',
+                    slug: '',
+                    page_id: '',
+                    page_path: '',
+                    page_type: 'PAGE',
+                    status: 'PUBLISHED',
+                    summary: '',
+                    content: '',
+                    meta_title: '',
+                    meta_description: '',
+                    canonical_url: '',
+                    ga_page_id: gaConfig?.config?.page_id || 'G-MKTINTEL01',
+                    include_in_sitemap: true,
+                    sitemap_priority: '0.8',
+                    sitemap_changefreq: 'weekly',
+                  });
+                  setIsCreatePageOpen(true);
                 }}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
               >
-                <Plus className="w-3.5 h-3.5" />
-                Create Draft Article
+                <Plus className="w-4 h-4" />
+                Add Page / Article
               </button>
             </div>
           </div>
 
-          {/* Prompt Banner if No Publication Sites Exist */}
-          {sites.length === 0 && !loadingTenancy && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-center text-amber-950 shadow-xs space-y-2">
-              <Globe className="w-10 h-10 text-amber-600 mx-auto" />
-              <h3 className="text-sm font-bold text-amber-950">No Publication Site Active</h3>
-              <p className="text-xs text-amber-800 max-w-md mx-auto">
-                Articles are published to specific publication sites. Click below to register your publication site (e.g. <code>blogpage-hikasimat-com</code>) before authoring articles.
-              </p>
-              <button
-                type="button"
-                onClick={() => setIsCreateSiteOpen(true)}
-                className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-xs inline-flex items-center gap-1.5"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Register Publication Site
-              </button>
-            </div>
-          )}
-
-          {/* Collapsible: Create Article Card */}
-          {isCreateArticleOpen && (
-            <div className="bg-white border border-blue-200 rounded-2xl p-6 shadow-md animate-in fade-in duration-150">
-              <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-blue-600" />
-                  Author New Article for "{activeSite?.name || 'Selected Site'}"
-                </h3>
-                <button
-                  onClick={() => setIsCreateArticleOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <form onSubmit={handleCreateArticle} className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                      Article Title *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Next-Gen AI Agents in Enterprise Software"
-                      value={newArtTitle}
-                      onChange={(e) => {
-                        setNewArtTitle(e.target.value);
-                        if (!newArtSlug) {
-                          setNewArtSlug(
-                            e.target.value
-                              .toLowerCase()
-                              .replace(/[^a-z0-9]+/g, '-')
-                              .replace(/^-|-$/g, '')
-                          );
-                        }
-                      }}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                      Slug *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. next-gen-ai-agents"
-                      value={newArtSlug}
-                      onChange={(e) => setNewArtSlug(e.target.value)}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Short Excerpt / Meta Description
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Brief description for search snippet and article cards..."
-                    value={newArtExcerpt}
-                    onChange={(e) => setNewArtExcerpt(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Body Content (Markdown or HTML)
-                  </label>
-                  <textarea
-                    rows={6}
-                    value={newArtBody}
-                    onChange={(e) => setNewArtBody(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsCreateArticleOpen(false)}
-                    className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-50 transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={creatingArticle}
-                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
-                  >
-                    {creatingArticle && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    Save Draft & Inspect Flow
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* Public Delivery API Comparison Modal / View */}
-          {showPublicDelivery && (
-            <div className="bg-slate-900 text-slate-100 rounded-2xl p-5 border border-slate-800 shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                    Live Public Delivery API Output: <code>/api/v1/public/sites/{activeSite?.slug}/articles/</code>
-                  </h4>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={fetchPublicDelivery}
-                    className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-semibold"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${loadingPublicDelivery ? 'animate-spin' : ''}`} />
-                    Refresh Feed
-                  </button>
-                  <button
-                    onClick={() => setShowPublicDelivery(false)}
-                    className="text-slate-400 hover:text-white p-1"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-              <pre className="text-[11px] font-mono p-3 bg-slate-950 rounded-lg max-h-56 overflow-y-auto text-emerald-400 border border-slate-800">
-                {publicDeliveryData
-                  ? JSON.stringify(publicDeliveryData, null, 2)
-                  : loadingPublicDelivery
-                  ? 'Fetching live public feed...'
-                  : 'No public articles published yet.'}
-              </pre>
-            </div>
-          )}
-
-          {/* Articles Table Card */}
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Articles in Active Publication Site</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Drafts remain isolated in your workspace. Published articles are immediately delivered to the public API and search indexers.
-                </p>
-              </div>
-              <button
-                onClick={() => loadArticlesForSite(selectedWorkspaceId, selectedSiteId)}
-                className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingArticles ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
-            </div>
-
+          {/* Pages Table */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100 uppercase tracking-wider">
-                    <th className="py-3 px-6">Title</th>
-                    <th className="py-3 px-6">Slug</th>
-                    <th className="py-3 px-6">Status</th>
-                    <th className="py-3 px-6">Author & Versions</th>
-                    <th className="py-3 px-6 text-right">Actions</th>
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-3">Page / Article Title</th>
+                    <th className="px-4 py-3">Page ID</th>
+                    <th className="px-4 py-3">Path & Canonical URL</th>
+                    <th className="px-4 py-3">GA Measurement ID</th>
+                    <th className="px-4 py-3">Sitemap</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {loadingArticles ? (
+                  {loadingPages ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400">
-                        <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
-                        Loading publication articles...
+                      <td colSpan="7" className="px-4 py-8 text-center text-slate-400">
+                        Loading CMS pages from Market Intel database...
                       </td>
                     </tr>
-                  ) : filteredArticles.length === 0 ? (
+                  ) : pages.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400">
-                        No articles match the filter. Click "Create Draft Article" above to start authoring!
+                      <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                        No pages found. Click &quot;Add Page / Article&quot; to create your first page.
                       </td>
                     </tr>
                   ) : (
-                    filteredArticles.map((art) => {
-                      const isPublished = art.status === 'PUBLISHED';
-                      return (
-                        <tr key={art.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-3.5 px-6 font-bold text-slate-900 max-w-xs truncate">
-                            {art.title}
-                          </td>
-                          <td className="py-3.5 px-6 font-mono text-slate-500">
-                            {art.slug}
-                          </td>
-                          <td className="py-3.5 px-6">
-                            <span
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full font-bold text-[10px] border ${
-                                isPublished
-                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                  : 'bg-amber-50 text-amber-700 border-amber-200'
-                              }`}
-                            >
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full ${
-                                  isPublished ? 'bg-emerald-500' : 'bg-amber-500'
-                                }`}
-                              />
-                              {isPublished ? 'LIVE PUBLISHED' : 'DRAFT (Private)'}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-6 text-slate-500">
-                            <div>{art.author?.email || 'admin@cms.local'}</div>
-                            <div className="text-[10px] text-slate-400">
-                              Revisions: {art.versions_count || 1}
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-6 text-right space-x-2">
-                            <button
-                              onClick={() => handlePublishArticle(art)}
-                              className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
-                                isPublished
-                                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                                  : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
-                              }`}
-                            >
-                              {isPublished ? 'Re-Publish' : '🚀 Publish'}
-                            </button>
-
-                            <button
-                              onClick={() => inspectPipeline(art)}
-                              className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition inline-flex items-center gap-1"
-                            >
-                              <Activity className="w-3 h-3" />
-                              Inspect Flow
-                            </button>
-
-                            <button
-                              onClick={() => handleDeleteArticle(art)}
-                              className="p-1 text-slate-400 hover:text-rose-600 rounded-md transition"
-                              title="Delete Article"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 2: 7-STEP ARTICLE PUBLISHING PIPELINE INSPECTOR */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {activeTab === 'inspector' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
-            <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-slate-100 gap-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-indigo-600" />
-                  <h3 className="text-base font-bold text-slate-900">
-                    Article Publishing Pipeline Flow Inspector
-                  </h3>
-                  {pipelineData && (
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
-                        pipelineData.overall_status === 'SUCCESS'
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                          : pipelineData.overall_status === 'WARNING'
-                          ? 'bg-amber-50 text-amber-700 border-amber-200'
-                          : 'bg-rose-50 text-rose-700 border-rose-200'
-                      }`}
-                    >
-                      {pipelineData.overall_status === 'SUCCESS'
-                        ? '✔ ALL SYSTEMS HEALTHY (SUCCESS)'
-                        : pipelineData.overall_status === 'WARNING'
-                        ? '⚠ WARNING / IN-FLIGHT'
-                        : '✖ PIPELINE ERRORS'}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-500 mt-1">
-                  Verifies end-to-end publishing health across schema integrity, versioning, site domain, delivery feed, dynamic XML sitemaps, search engine indexing, and audit trail.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {inspectedArticle && (
-                  <button
-                    onClick={() => inspectPipeline(inspectedArticle)}
-                    disabled={loadingPipeline}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${loadingPipeline ? 'animate-spin' : ''}`} />
-                    Re-check Pipeline
-                  </button>
-                )}
-                <button
-                  onClick={() => setActiveTab('articles')}
-                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition"
-                >
-                  Back to Articles
-                </button>
-              </div>
-            </div>
-
-            {/* Article Context Meta */}
-            {inspectedArticle ? (
-              <div className="mt-4 p-3 bg-slate-50 rounded-xl border border-slate-200/60 flex flex-wrap items-center justify-between text-xs gap-2">
-                <div>
-                  <span className="text-slate-400 mr-1">Target Article:</span>
-                  <strong className="text-slate-900 font-bold mr-3">{inspectedArticle.title}</strong>
-                  <span className="font-mono text-slate-500 mr-3">({inspectedArticle.slug})</span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      inspectedArticle.status === 'PUBLISHED'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-amber-100 text-amber-800'
-                    }`}
-                  >
-                    {inspectedArticle.status}
-                  </span>
-                </div>
-                <div className="text-slate-500 font-mono text-[11px]">
-                  ID: {inspectedArticle.id}
-                </div>
-              </div>
-            ) : (
-              <div className="mt-6 text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-slate-500 text-xs">
-                <FileText className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                Select an article from the "Articles & Content" tab and click "Inspect Flow" to analyze its 7-step pipeline.
-              </div>
-            )}
-
-            {/* Step Progression List */}
-            {loadingPipeline ? (
-              <div className="py-12 text-center text-slate-400">
-                <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-indigo-600" />
-                Analyzing 7-step pipeline diagnostics...
-              </div>
-            ) : pipelineData?.steps ? (
-              <div className="mt-6 space-y-3.5">
-                {pipelineData.steps.map((step, idx) => {
-                  const isPassed = step.status === 'PASSED';
-                  const isPending = step.status === 'PENDING' || step.status === 'WARNING';
-                  const isFailed = step.status === 'FAILED';
-
-                  return (
-                    <div
-                      key={step.step || idx}
-                      className={`p-4 rounded-xl border transition ${
-                        isFailed
-                          ? 'bg-rose-50/60 border-rose-200'
-                          : isPassed
-                          ? 'bg-slate-50/80 border-slate-200 hover:border-slate-300'
-                          : 'bg-amber-50/60 border-amber-200'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="w-6 h-6 rounded-full bg-slate-200/80 text-slate-700 font-bold text-xs flex items-center justify-center">
-                            {idx + 1}
+                    pages.map((p) => (
+                      <tr key={p.id} className="hover:bg-slate-50/80 transition">
+                        <td className="px-4 py-3">
+                          <div className="font-bold text-slate-900">{p.title}</div>
+                          <div className="text-[11px] text-slate-400 font-mono mt-0.5">{p.slug}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-semibold border border-slate-200">
+                            {p.page_id}
                           </span>
-                          <h4 className="text-sm font-bold text-slate-900">{step.title}</h4>
-                        </div>
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                            isPassed
-                              ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-                              : isPending
-                              ? 'bg-amber-100 text-amber-800 border-amber-300'
-                              : isFailed
-                              ? 'bg-rose-100 text-rose-800 border-rose-300'
-                              : 'bg-slate-200 text-slate-700 border-slate-300'
-                          }`}
-                        >
-                          {step.status}
-                        </span>
-                      </div>
-
-                      <p className="text-xs text-slate-600 ml-8">{step.details}</p>
-
-                      {/* Error details callout */}
-                      {step.error && (
-                        <div className="mt-2.5 ml-8 p-3 rounded-lg bg-rose-100/80 border border-rose-300 text-rose-800 text-xs font-mono">
-                          <strong>Error:</strong> {step.error}
-                        </div>
-                      )}
-
-                      {/* Search Indexing Submission Logs table */}
-                      {step.logs && step.logs.length > 0 && (
-                        <div className="mt-3 ml-8 border border-slate-200 rounded-lg overflow-hidden bg-white">
-                          <table className="w-full text-left text-[11px]">
-                            <thead className="bg-slate-100 text-slate-600 font-semibold uppercase">
-                              <tr>
-                                <th className="p-2">Provider</th>
-                                <th className="p-2">Status</th>
-                                <th className="p-2">HTTP</th>
-                                <th className="p-2">Response / Result</th>
-                                <th className="p-2">Timestamp</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                              {step.logs.map((log, lIdx) => (
-                                <tr key={lIdx}>
-                                  <td className="p-2 font-bold">{log.provider}</td>
-                                  <td className="p-2">
-                                    <span
-                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                        log.status === 'SUCCESS' || log.status === 'SUBMITTED'
-                                          ? 'bg-emerald-100 text-emerald-800'
-                                          : 'bg-rose-100 text-rose-800'
-                                      }`}
-                                    >
-                                      {log.status}
-                                    </span>
-                                  </td>
-                                  <td className="p-2 font-mono">{log.response_code || 'N/A'}</td>
-                                  <td className="p-2 font-mono text-slate-500 max-w-xs truncate">
-                                    {log.response_body || 'None'}
-                                  </td>
-                                  <td className="p-2 text-slate-400">
-                                    {new Date(log.created_at).toLocaleTimeString()}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-
-                      {/* Audit Events */}
-                      {step.events && step.events.length > 0 && (
-                        <div className="mt-2 ml-8 space-y-1 text-[11px] text-slate-500">
-                          {step.events.map((evt, eIdx) => (
-                            <div key={eIdx} className="flex items-center gap-1.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-                              <span>
-                                <strong>{evt.action}</strong> by <code>{evt.actor}</code> at{' '}
-                                {new Date(evt.timestamp).toLocaleTimeString()}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 3: TECHNICAL SEO & SEARCH ENGINE INDEXING */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {activeTab === 'seo' && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Realtime Submission Tool */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-              <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
-                <Send className="w-5 h-5 text-blue-600" />
-                <h3 className="text-sm font-bold text-slate-900">
-                  Real-time Search Engine Indexing (Google & Bing)
-                </h3>
-              </div>
-              <p className="text-xs text-slate-500">
-                Submit newly created or updated URLs directly to search crawlers via Google Indexing API and IndexNow Protocol.
-              </p>
-
-              <form onSubmit={handleSubmitIndexing} className="space-y-3.5">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Indexing Provider
-                  </label>
-                  <select
-                    value={indexingProvider}
-                    onChange={(e) => setIndexingProvider(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  >
-                    <option value="GOOGLE">Google Search Console (Indexing API)</option>
-                    <option value="BING">Bing Webmaster (IndexNow)</option>
-                    <option value="INDEXNOW">IndexNow Open Protocol</option>
-                  </select>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                      Target URL to Index
-                    </label>
-                    {articles.length > 0 && (
-                      <span className="text-[11px] text-blue-600 font-medium">
-                        {articles.filter((a) => a.status === 'PUBLISHED').length} Published Article(s)
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Quick Select from Published Articles */}
-                  {articles.length > 0 && (
-                    <div className="mb-2">
-                      <select
-                        onChange={(e) => {
-                          if (e.target.value) {
-                            setIndexingUrl(e.target.value);
-                          }
-                        }}
-                        className="w-full px-3 py-1.5 border border-slate-200 bg-slate-50 hover:bg-slate-100 rounded-lg text-xs font-medium text-slate-700 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      >
-                        <option value="">⚡ Quick Select a Published Article to Index...</option>
-                        {articles.map((art) => {
-                          const siteSlug = activeSite?.slug || 'site';
-                          const artUrl = `https://${siteSlug}.hikasimat.com/articles/${art.slug}`;
-                          return (
-                            <option key={art.id} value={artUrl}>
-                              {art.title} ({art.status}) — /articles/{art.slug}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-                  )}
-
-                  <input
-                    type="url"
-                    required
-                    value={indexingUrl}
-                    onChange={(e) => setIndexingUrl(e.target.value)}
-                    placeholder="https://example.com/articles/my-post"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                  <p className="mt-1 text-[11px] text-slate-500">
-                    Directly notifies search engines (Google Indexing API / Bing IndexNow) to immediately crawl and index this specific live URL, skipping the normal sitemap crawl delay.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  {indexNowKey && (
-                    <span className="text-[11px] font-mono text-slate-500">
-                      Key: <code>{indexNowKey.substring(0, 12)}...</code>
-                    </span>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={submittingIndexing}
-                    className="ml-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
-                  >
-                    {submittingIndexing && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    Submit for Indexing
-                  </button>
-                </div>
-              </form>
-            </div>
-
-            {/* Dynamic XML Sitemap & Robots Preview */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                <div className="flex items-center gap-2">
-                  <Search className="w-5 h-5 text-indigo-600" />
-                  <h3 className="text-sm font-bold text-slate-900">Dynamic SEO Feeds</h3>
-                </div>
-                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
-                  <button
-                    onClick={() => loadSeoPreview('sitemap')}
-                    className={`px-2.5 py-1 rounded text-xs font-bold transition ${
-                      seoPreviewType === 'sitemap' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-                    }`}
-                  >
-                    Sitemap.xml
-                  </button>
-                  <button
-                    onClick={() => loadSeoPreview('robots')}
-                    className={`px-2.5 py-1 rounded text-xs font-bold transition ${
-                      seoPreviewType === 'robots' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-                    }`}
-                  >
-                    Robots.txt
-                  </button>
-                </div>
-              </div>
-
-              <div className="relative">
-                <pre className="text-[11px] font-mono p-3 bg-slate-900 text-indigo-300 rounded-xl max-h-52 overflow-y-auto border border-slate-800">
-                  {loadingSeoPreview ? 'Loading feed...' : seoPreviewText || 'Click a preview button above.'}
-                </pre>
-                {activeSite && (
-                  <div className="mt-3 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-slate-500 font-medium">
-                        Live Public Feed Endpoint:
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const url = `${getCmsBaseUrl()}/api/v1/public/sites/${activeSite.slug}/${
-                            seoPreviewType === 'sitemap' ? 'sitemap.xml' : 'robots.txt'
-                          }`;
-                          navigator.clipboard.writeText(url);
-                          toast.success('Live URL copied to clipboard!');
-                        }}
-                        className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-bold bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded-lg transition"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                        Copy Live Feed URL
-                      </button>
-                    </div>
-
-                    {/* Step-by-step submission instructions */}
-                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-1.5 text-slate-600">
-                      <div className="font-bold text-slate-800 flex items-center gap-1.5">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                        Where to submit or paste this copied URL:
-                      </div>
-                      <ul className="list-disc pl-4 space-y-1 text-[11px]">
-                        <li>
-                          <strong>Google Search Console:</strong> Go to <em>search.google.com/search-console</em> → Select your verified property → Click <strong>Sitemaps</strong> in the left sidebar → Paste this URL and click <strong>Submit</strong>.
-                        </li>
-                        <li>
-                          <strong>Bing Webmaster Tools:</strong> Go to <em>bing.com/webmasters</em> → Select site → <strong>Sitemaps</strong> → <strong>Submit Sitemap</strong>.
-                        </li>
-                        <li>
-                          <strong>Frontend Blog Website:</strong> In your public website's <code>robots.txt</code> file, add the line:
-                          <br />
-                          <code className="text-blue-700 bg-white px-1.5 py-0.5 rounded border border-slate-200 block mt-0.5 overflow-x-auto">
-                            Sitemap: {getCmsBaseUrl()}/api/v1/public/sites/{activeSite.slug}/sitemap.xml
-                          </code>
-                        </li>
-                      </ul>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Submission Audit Logs */}
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Recent Search Engine Submission History</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Audit trail of indexing requests dispatched to Google Search Console and Bing.
-                </p>
-              </div>
-              <button
-                onClick={loadIndexingLogs}
-                className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingIndexingLogs ? 'animate-spin' : ''}`} />
-                Refresh Logs
-              </button>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100 uppercase tracking-wider">
-                    <th className="py-2.5 px-6">Provider</th>
-                    <th className="py-2.5 px-6">Status</th>
-                    <th className="py-2.5 px-6">HTTP Status</th>
-                    <th className="py-2.5 px-6">Response Details</th>
-                    <th className="py-2.5 px-6">Dispatched At</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {indexingLogs.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-6 text-center text-slate-400">
-                        No submissions recorded for this publication site yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    indexingLogs.map((log) => (
-                      <tr key={log.id} className="hover:bg-slate-50">
-                        <td className="py-2.5 px-6 font-bold text-slate-800">{log.provider}</td>
-                        <td className="py-2.5 px-6">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              log.status === 'SUCCESS' || log.status === 'SUBMITTED'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-rose-100 text-rose-800'
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-mono text-[11px] text-indigo-600 font-medium">{p.page_path}</div>
+                          <div className="text-[10px] text-slate-400 truncate max-w-xs">{p.canonical_url}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
+                            {p.ga_page_id || 'G-MKTINTEL01'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {p.include_in_sitemap ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-semibold">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              pri {p.sitemap_priority}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-slate-400">Excluded</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleTogglePageStatus(p)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              p.status === 'PUBLISHED'
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                                : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
                             }`}
                           >
-                            {log.status}
-                          </span>
+                            {p.status}
+                          </button>
                         </td>
-                        <td className="py-2.5 px-6 font-mono text-slate-600">
-                          {log.response_code || '200 OK'}
-                        </td>
-                        <td className="py-2.5 px-6 font-mono text-slate-500 max-w-sm truncate">
-                          {log.response_body || 'Acknowledged'}
-                        </td>
-                        <td className="py-2.5 px-6 text-slate-400">
-                          {new Date(log.created_at).toLocaleString()}
+                        <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                          <button
+                            onClick={() => handleEditPageClick(p)}
+                            className="px-2.5 py-1 text-slate-700 hover:bg-slate-100 rounded-md font-semibold text-[11px] border border-slate-200 transition"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDeletePage(p.id, p.title)}
+                            className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"
+                            title="Delete page"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </td>
                       </tr>
                     ))
@@ -2449,1202 +1199,2333 @@ const CmsPage = () => {
         </div>
       )}
 
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 4: PRIVACY ANALYTICS & GA4 */}
-      {/* ─────────────────────────────────────────────────────────────── */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* TAB 2: Google Analytics (Essential Features & Real-Time)            */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
       {activeTab === 'analytics' && (
         <div className="space-y-6">
-          {/* Active Publication Site Scope Banner */}
-          <div className="p-4 bg-gradient-to-r from-blue-50/90 to-indigo-50/90 border border-blue-200/80 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-blue-950 shadow-2xs">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-sm shadow-blue-500/20">
-                <Globe className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-sm text-slate-900">
-                    Live Telemetry for Publication Site: {activeSite?.name || 'Selected Site'}
-                  </span>
-                  <code className="text-[11px] bg-white px-2 py-0.5 rounded border border-blue-200 text-blue-700 font-bold">
-                    {activeSite?.slug || 'slug'}.hikasimat.com
-                  </code>
-                </div>
-                <p className="text-[11px] text-slate-600 mt-0.5">
-                  Metrics below are generated by public visitors (and tests) on this website's public delivery endpoint. This is <em>not</em> internal Market Intel DB platform telemetry.
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={loadAnalytics}
-              className="text-xs text-blue-700 hover:text-blue-900 font-bold flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-blue-50 rounded-lg border border-blue-200 transition shrink-0 cursor-pointer shadow-2xs"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingAnalytics ? 'animate-spin' : ''}`} />
-              Refresh Metrics
-            </button>
-          </div>
-
-          {/* Top KPI Metric Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {[
-              {
-                label: 'Total Events',
-                value: analyticsOverview?.summary?.total_events ?? 0,
-                icon: Activity,
-                color: 'text-blue-600',
-                bg: 'bg-blue-50',
-              },
-              {
-                label: 'Unique Visitors',
-                value: analyticsOverview?.summary?.unique_visitors ?? 0,
-                icon: Users,
-                color: 'text-indigo-600',
-                bg: 'bg-indigo-50',
-              },
-              {
-                label: 'Page Views',
-                value: analyticsOverview?.summary?.page_views ?? 0,
-                icon: Eye,
-                color: 'text-emerald-600',
-                bg: 'bg-emerald-50',
-              },
-              {
-                label: 'CTA / Form Clicks',
-                value:
-                  (analyticsOverview?.summary?.cta_clicks ?? 0) +
-                  (analyticsOverview?.summary?.form_submits ?? 0),
-                icon: MousePointerClick,
-                color: 'text-amber-600',
-                bg: 'bg-amber-50',
-              },
-            ].map((kpi, idx) => {
-              const Icon = kpi.icon;
-              return (
-                <div key={idx} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs">
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      {kpi.label}
-                    </span>
-                    <div className={`p-2 rounded-xl ${kpi.bg} ${kpi.color}`}>
-                      <Icon className="w-4 h-4" />
-                    </div>
-                  </div>
-                  <div className="text-2xl font-black text-slate-900 tracking-tight">
-                    {loadingAnalytics ? '...' : kpi.value}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* First-Party Telemetry Status & Toggle */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div
-                className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${
-                  analyticsConfig?.is_first_party_enabled
-                    ? 'bg-emerald-50 text-emerald-600'
-                    : 'bg-amber-50 text-amber-600'
-                }`}
-              >
-                <ShieldCheck className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h4 className="text-sm font-bold text-slate-900">First-Party Telemetry Ingestion</h4>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      analyticsConfig?.is_first_party_enabled
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-amber-100 text-amber-800'
-                    }`}
-                  >
-                    {analyticsConfig?.is_first_party_enabled ? 'Active / Enabled' : 'Disabled'}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Privacy-preserving zero-PII telemetry pipeline (GDPR compliant pseudonymous hashes, retention {analyticsConfig?.retention_days || 90} days).
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              disabled={togglingIngestion}
-              onClick={() => handleToggleFirstParty(!analyticsConfig?.is_first_party_enabled)}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs shrink-0 ${
-                analyticsConfig?.is_first_party_enabled
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
-              }`}
-            >
-              {togglingIngestion && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-              {analyticsConfig?.is_first_party_enabled ? 'Disable Ingestion' : 'Enable Ingestion'}
-            </button>
-          </div>
-
-          {/* Event Ingestion Simulator Card */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-amber-500" />
-                <h3 className="text-sm font-bold text-slate-900">
-                  Simulate First-Party Inbound Telemetry
-                </h3>
-              </div>
-              <button
-                onClick={loadAnalytics}
-                className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingAnalytics ? 'animate-spin' : ''}`} />
-                Refresh Metrics
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              Fire anonymous telemetry pings through the public event endpoint (zero IP storage, pseudonymous session hashes).
-            </p>
-
-            <div className="flex flex-wrap gap-2.5">
-              <button
-                onClick={() => handleSimulateEvent('page_view', '/blog/post-1')}
-                disabled={simulatingEvent}
-                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <Eye className="w-3.5 h-3.5 text-blue-600" />
-                Simulate Page View (/blog/post-1)
-              </button>
-              <button
-                onClick={() => handleSimulateEvent('cta_click', '/pricing')}
-                disabled={simulatingEvent}
-                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <MousePointerClick className="w-3.5 h-3.5 text-indigo-600" />
-                Simulate CTA Click (/pricing)
-              </button>
-              <button
-                onClick={() => handleSimulateEvent('form_submit', '/contact')}
-                disabled={simulatingEvent}
-                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <Send className="w-3.5 h-3.5 text-emerald-600" />
-                Simulate Form Submit (/contact)
-              </button>
-            </div>
-          </div>
-
-          {/* Top Paths & Device Breakdown */}
-          {analyticsOverview && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Top Visited Pages & Articles */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                    Top Visited Pages & Articles
-                  </h4>
-                  <span className="text-[11px] text-slate-400 font-medium">
-                    Resolved from Articles & Route Paths
-                  </span>
-                </div>
-                <div className="space-y-2.5">
-                  {analyticsOverview.top_paths?.length > 0 ? (
-                    analyticsOverview.top_paths.map((p, idx) => {
-                      const details = resolvePageDetails(p.path);
-                      return (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-slate-100/70 rounded-xl transition border border-slate-100/80"
-                        >
-                          <div className="min-w-0 pr-3">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-xs text-slate-900 truncate">
-                                {details.title}
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  details.badge === 'Article'
-                                    ? 'bg-blue-100 text-blue-800'
-                                    : details.badge === 'Static'
-                                    ? 'bg-indigo-100 text-indigo-800'
-                                    : details.badge === 'Index'
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-slate-200 text-slate-700'
-                                }`}
-                              >
-                                {details.badge}
-                              </span>
-                            </div>
-                            <div className="text-[11px] font-mono text-slate-400 truncate mt-0.5">
-                              {p.path}
-                            </div>
-                          </div>
-                          <span className="font-bold text-xs text-blue-600 bg-blue-50 border border-blue-100 px-2.5 py-1 rounded-lg shrink-0">
-                            {p.views} {p.views === 1 ? 'view' : 'views'}
-                          </span>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="text-xs text-slate-400 py-4 text-center">
-                      No path events recorded yet.
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Device Breakdown */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">
-                  Device Category Breakdown
-                </h4>
-                <div className="grid grid-cols-3 gap-3 text-center">
-                  {['DESKTOP', 'TABLET', 'MOBILE'].map((device) => {
-                    const count = analyticsOverview.device_breakdown?.[device] || 0;
-                    return (
-                      <div key={device} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                        <div className="text-xs font-bold text-slate-500 uppercase">{device}</div>
-                        <div className="text-xl font-black text-slate-900 mt-1">{count}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Google Analytics 4 (GA4) Card */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <BarChart3 className="w-5 h-5 text-indigo-600" />
-                <h3 className="text-sm font-bold text-slate-900">Google Analytics 4 (GA4) Integration</h3>
-              </div>
-              <button
-                onClick={fetchGa4LiveReport}
-                disabled={loadingGa4Report}
-                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
-              >
-                {loadingGa4Report && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                Fetch GA4 Live Report
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              Server-side GA4 reporting with automatic OAuth refresh and aggregated reporting queries.
-            </p>
-
-            {ga4ReportData && (
-              <pre className="text-[11px] font-mono p-3 bg-slate-900 text-indigo-300 rounded-xl max-h-56 overflow-y-auto border border-slate-800">
-                {JSON.stringify(ga4ReportData, null, 2)}
-              </pre>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 5: CONSENT MANAGER (GDPR / CCPA) */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {activeTab === 'consent' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-            <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
-              <ShieldCheck className="w-5 h-5 text-emerald-600" />
-              <h3 className="text-sm font-bold text-slate-900">
-                GDPR Art. 7 & Google Consent Mode (GCM v2) Manager
-              </h3>
-            </div>
-            <p className="text-xs text-slate-500">
-              Enforce verifiable audit records, dynamic consent versioning, and right-to-withdraw across global jurisdictions.
-            </p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Simulated Visitor Pseudonym
-                </label>
-                <input
-                  type="text"
-                  value={consentVisitorId}
-                  onChange={(e) => setConsentVisitorId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Jurisdiction Mode
-                </label>
-                <select
-                  value={consentJurisdiction}
-                  onChange={(e) => setConsentJurisdiction(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                >
-                  <option value="EU_GDPR">EU (GDPR Strict Opt-In)</option>
-                  <option value="US_CCPA">US (CCPA Opt-Out)</option>
-                  <option value="GLOBAL">Global / Default</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2.5 pt-2">
-              <button
-                onClick={() => handleRecordConsent(true, true)}
-                disabled={recordingConsent}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
-              >
-                <Check className="w-3.5 h-3.5" />
-                Grant All (Analytics + Ads)
-              </button>
-              <button
-                onClick={() => handleRecordConsent(true, false)}
-                disabled={recordingConsent}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <BarChart3 className="w-3.5 h-3.5 text-blue-600" />
-                Analytics Only
-              </button>
-              <button
-                onClick={() => handleRecordConsent(false, false)}
-                disabled={recordingConsent}
-                className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <XCircle className="w-3.5 h-3.5" />
-                Reject Non-Essential
-              </button>
-            </div>
-
-            {consentResult && (
-              <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono space-y-2">
-                <div className="flex items-center justify-between text-slate-500">
-                  <span>Timestamp: {consentResult.timestamp}</span>
-                  <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                    Consent Audit Record Persisted
-                  </span>
-                </div>
-                <pre className="text-[11px] bg-white p-3 rounded border border-slate-200 overflow-x-auto text-slate-800">
-                  {JSON.stringify(consentResult.data, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* TAB 5: GOOGLE ADS CAMPAIGN MANAGER */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {activeTab === 'google_ads' && (
-        <div className="space-y-6">
-          {/* Section Toolbar */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center text-white shadow-xs">
-                  <TrendingUp className="w-5 h-5" />
+          {/* Real-Time Live Traffic & Google Services Hub */}
+          <div className="bg-gradient-to-r from-slate-900 to-indigo-950 rounded-2xl p-6 text-white shadow-lg space-y-5">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="relative flex h-3.5 w-3.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
                 </div>
                 <div>
-                  <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                    Google Ads Manager
-                    <span className="px-2 py-0.5 text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200 rounded-full uppercase">
-                      Workspace Integration
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-black tracking-tight">Real-Time Web Traffic & Live Hit Stream</h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      LIVE
                     </span>
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    GAQL query sync, live campaign control, budget adjustments & mutation audit logs
+                  </div>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Live events recorded in real time in Market Intel database from tracking beacons and test hits.
                   </p>
                 </div>
               </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setRealtimeAutoRefresh(!realtimeAutoRefresh)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border flex items-center gap-1.5 ${
+                    realtimeAutoRefresh
+                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                      : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  {realtimeAutoRefresh ? 'Auto-Refresh: 5s' : 'Auto-Refresh: Paused'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSendTestHit}
+                  disabled={sendingTestHit}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-300" />
+                  {sendingTestHit ? 'Streaming...' : '⚡ Stream Live Test Hit'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleConnectGoogle}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-white text-slate-900 hover:bg-slate-100 transition shadow-sm flex items-center gap-1.5"
+                >
+                  <Globe className="w-3.5 h-3.5 text-blue-600" />
+                  Connect Google Account
+                </button>
+              </div>
             </div>
 
-            {/* Date Range Selector & Actions */}
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700">
-                <Clock className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-slate-400 text-[11px] font-medium">From:</span>
-                <input
-                  type="date"
-                  value={adsDateRange.start_date}
-                  onChange={(e) => setAdsDateRange((prev) => ({ ...prev, start_date: e.target.value }))}
-                  className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none"
-                />
-                <span className="text-slate-400 text-[11px] font-medium">To:</span>
-                <input
-                  type="date"
-                  value={adsDateRange.end_date}
-                  onChange={(e) => setAdsDateRange((prev) => ({ ...prev, end_date: e.target.value }))}
-                  className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none"
-                />
+            {/* Real-time KPI numbers */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 backdrop-blur-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Users (Last 5m)</span>
+                <div className="text-3xl font-black text-emerald-400 mt-1">
+                  {realtimeData?.active_users_5m ?? 0}
+                </div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">Browsing right now</span>
               </div>
 
-              <button
-                type="button"
-                onClick={loadGoogleAdsData}
-                disabled={loadingGoogleAds}
-                className="flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold transition shadow-2xs"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingGoogleAds ? 'animate-spin text-blue-600' : 'text-slate-500'}`} />
-                Sync GAQL
-              </button>
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 backdrop-blur-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Users (Last 30m)</span>
+                <div className="text-3xl font-black text-indigo-300 mt-1">
+                  {realtimeData?.active_users_30m ?? 0}
+                </div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">Unique visitors</span>
+              </div>
 
-              {googleAdsConnection?.is_active ? (
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 backdrop-blur-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Views (Last 30m)</span>
+                <div className="text-3xl font-black text-white mt-1">
+                  {realtimeData?.page_views_30m ?? 0}
+                </div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">Recorded pageviews</span>
+              </div>
+
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 backdrop-blur-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Google OAuth Status</span>
+                <div className="text-sm font-bold text-white mt-2 flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${googleStatus?.google_analytics?.is_google_connected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                  {googleStatus?.google_analytics?.is_google_connected ? 'Connected' : 'OAuth Ready'}
+                </div>
+                <span className="text-[10px] text-slate-400 mt-1 block truncate">
+                  {googleStatus?.google_analytics?.connected_email || 'Analytics, GSC & Ads'}
+                </span>
+              </div>
+            </div>
+
+            {/* Live Hit Stream Table */}
+            {realtimeData?.recent_hits && realtimeData.recent_hits.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-slate-300">
+                  <span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Live Incoming Hit Stream (Most Recent)</span>
+                  <span className="text-[11px] text-slate-400">Updated {new Date(realtimeData.timestamp).toLocaleTimeString()}</span>
+                </div>
+                <div className="bg-black/30 border border-white/10 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-white/5 text-slate-400 text-[10px] uppercase font-bold">
+                      <tr>
+                        <th className="px-3.5 py-2">Timestamp</th>
+                        <th className="px-3.5 py-2">Page Path</th>
+                        <th className="px-3.5 py-2">Event</th>
+                        <th className="px-3.5 py-2">Device</th>
+                        <th className="px-3.5 py-2">Source</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-[11px]">
+                      {realtimeData.recent_hits.map((hit) => (
+                        <tr key={hit.id} className="hover:bg-white/5 transition">
+                          <td className="px-3.5 py-1.5 font-mono text-slate-400">{new Date(hit.timestamp).toLocaleTimeString()}</td>
+                          <td className="px-3.5 py-1.5 font-mono text-indigo-300 font-bold">{hit.page_path}</td>
+                          <td className="px-3.5 py-1.5">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300">
+                              {hit.event_name}
+                            </span>
+                          </td>
+                          <td className="px-3.5 py-1.5 text-slate-300">{hit.device_category}</td>
+                          <td className="px-3.5 py-1.5 text-slate-400">{hit.traffic_source}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+          {/* Section 1: Page ID Configuration & Snippet Generator */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Page ID Configuration Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-lg bg-indigo-50 text-indigo-600">
+                    <Sliders className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Google Analytics Page ID Configuration</h3>
+                    <p className="text-[11px] text-slate-500">Configure Page ID, Measurement ID, and tracking behavior.</p>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                  {gaConfig?.config?.is_active ? 'Active' : 'Disabled'}
+                </span>
+              </div>
+
+              <form onSubmit={handleSaveGaConfig} className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Primary Page ID / GA4 Measurement ID
+                  </label>
+                  <input
+                    type="text"
+                    value={gaConfig?.config?.page_id || ''}
+                    onChange={(e) =>
+                      setGaConfig((prev) => ({
+                        ...prev,
+                        config: { ...prev.config, page_id: e.target.value },
+                      }))
+                    }
+                    placeholder="G-MKTINTEL01"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    required
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">Default Google tag ID used for website data streams.</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">GA Property ID</label>
+                    <input
+                      type="text"
+                      value={gaConfig?.config?.property_id || ''}
+                      onChange={(e) =>
+                        setGaConfig((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, property_id: e.target.value },
+                        }))
+                      }
+                      placeholder="482910384"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Site URL</label>
+                    <input
+                      type="url"
+                      value={gaConfig?.config?.site_url || ''}
+                      onChange={(e) =>
+                        setGaConfig((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, site_url: e.target.value },
+                        }))
+                      }
+                      placeholder="https://marketintel.hikasimat.com"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={gaConfig?.config?.track_pageviews ?? true}
+                      onChange={(e) =>
+                        setGaConfig((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, track_pageviews: e.target.checked },
+                        }))
+                      }
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-slate-700 font-medium">Automatic Pageview Tracking on Navigation</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={gaConfig?.config?.track_outbound_clicks ?? true}
+                      onChange={(e) =>
+                        setGaConfig((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, track_outbound_clicks: e.target.checked },
+                        }))
+                      }
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-slate-700 font-medium">Enhanced Link Attribution & Outbound Clicks</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={gaConfig?.config?.track_scroll_depth ?? true}
+                      onChange={(e) =>
+                        setGaConfig((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, track_scroll_depth: e.target.checked },
+                        }))
+                      }
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-slate-700 font-medium">Scroll Depth & Engagement Measurement</span>
+                  </label>
+                </div>
+
                 <button
-                  type="button"
-                  onClick={handleDisconnectGoogleAds}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition shadow-2xs"
+                  type="submit"
+                  disabled={savingGaConfig}
+                  className="w-full mt-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-xs transition shadow-xs disabled:opacity-50"
                 >
-                  <X className="w-3.5 h-3.5" />
-                  Disconnect
+                  {savingGaConfig ? 'Saving Configuration...' : 'Save Page ID Configuration'}
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleAuthorizeGoogleAds}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs"
-                >
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  Connect Google Ads
-                </button>
-              )}
+              </form>
+            </div>
+
+            {/* Tracking Code Generation & Display Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs flex flex-col justify-between space-y-4">
+              <div>
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 rounded-lg bg-emerald-50 text-emerald-600">
+                      <Code className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Generated Tracking Code Snippet</h3>
+                      <p className="text-[11px] text-slate-500">Live generated gtag.js ready to embed in website headers.</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => copyToClipboard(gaConfig?.tracking_code, 'Tracking code copied to clipboard!')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-md text-xs font-bold transition"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    Copy Code
+                  </button>
+                </div>
+
+                <div className="mt-3">
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                    Preview Snippet for Specific Page ID:
+                  </label>
+                  <select
+                    value={selectedPageForSnippet}
+                    onChange={(e) => setSelectedPageForSnippet(e.target.value)}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-700 font-medium focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value="">Default Primary Page ID ({gaConfig?.config?.page_id || 'G-MKTINTEL01'})</option>
+                    {(gaConfig?.pages || []).map((p) => (
+                      <option key={p.id} value={p.ga_page_id || p.page_id}>
+                        {p.title} — {p.page_id} ({p.ga_page_id || gaConfig?.config?.page_id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mt-3 relative bg-slate-950 text-slate-200 font-mono text-[11px] p-3.5 rounded-lg border border-slate-800 overflow-x-auto max-h-56">
+                  <pre className="whitespace-pre">{gaConfig?.tracking_code || 'Loading tracking code snippet...'}</pre>
+                </div>
+              </div>
+
+              <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-lg text-indigo-900 text-xs">
+                <span className="font-bold">Deployment Notice:</span> Add this snippet immediately after the opening{' '}
+                <code className="bg-indigo-100 px-1 py-0.5 rounded text-indigo-800">&lt;head&gt;</code> tag on every page.
+              </div>
             </div>
           </div>
 
-          {/* Connection Status Card */}
-          {googleAdsConnection?.is_active ? (
-            <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-2xl p-5 text-white shadow-md">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                    <CheckCircle2 className="w-6 h-6" />
+          {/* Section 2: Analytics Dashboard with Detailed Website Statistics */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-indigo-600" />
+                  Website Analytics Statistics Dashboard
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Detailed traffic, engagement, pageviews, and bounce rate metrics from the Market Intel database.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50 text-xs font-bold text-slate-700">
+                  <button
+                    onClick={() => setGaRange('7d')}
+                    className={`px-3 py-1 rounded-md transition ${gaRange === '7d' ? 'bg-white shadow-xs text-indigo-600' : 'hover:text-slate-900'}`}
+                  >
+                    7 Days
+                  </button>
+                  <button
+                    onClick={() => setGaRange('30d')}
+                    className={`px-3 py-1 rounded-md transition ${gaRange === '30d' ? 'bg-white shadow-xs text-indigo-600' : 'hover:text-slate-900'}`}
+                  >
+                    30 Days
+                  </button>
+                  <button
+                    onClick={() => setGaRange('90d')}
+                    className={`px-3 py-1 rounded-md transition ${gaRange === '90d' ? 'bg-white shadow-xs text-indigo-600' : 'hover:text-slate-900'}`}
+                  >
+                    Quarter
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => setIsRecordStatOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Record Stat
+                </button>
+              </div>
+            </div>
+
+            {/* KPI Cards Strip */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Page Views</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gaDashboard?.summary?.total_page_views?.toLocaleString() || '0'}
+                </div>
+                <span className="text-[11px] text-emerald-600 font-semibold mt-0.5 block">+12.4% vs previous period</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Unique Visitors</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gaDashboard?.summary?.unique_visitors?.toLocaleString() || '0'}
+                </div>
+                <span className="text-[11px] text-slate-500 font-medium mt-0.5 block">Total distinct users</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Avg Session Duration</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {Math.floor((gaDashboard?.summary?.avg_duration_seconds || 0) / 60)}m {(gaDashboard?.summary?.avg_duration_seconds || 0) % 60}s
+                </div>
+                <span className="text-[11px] text-slate-500 font-medium mt-0.5 block">
+                  Engagement rate: {gaDashboard?.summary?.engagement_rate ?? 0}%
+                </span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Bounce Rate</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gaDashboard?.summary?.bounce_rate ?? 0}%
+                </div>
+                <span className="text-[11px] text-emerald-600 font-semibold mt-0.5 block">Recorded metric</span>
+              </div>
+            </div>
+
+            {/* Detailed Page Statistics Table */}
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">
+                Detailed Website Statistics per Page ID & Path
+              </h4>
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th className="px-4 py-2.5">Page Title & Path</th>
+                      <th className="px-4 py-2.5">Page ID</th>
+                      <th className="px-4 py-2.5 text-right">Views</th>
+                      <th className="px-4 py-2.5 text-right">Visitors</th>
+                      <th className="px-4 py-2.5 text-right">Sessions</th>
+                      <th className="px-4 py-2.5 text-right">Avg Time</th>
+                      <th className="px-4 py-2.5 text-right">Bounce Rate</th>
+                      <th className="px-4 py-2.5 text-right">Conversions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(gaDashboard?.page_statistics || []).map((row, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-2.5">
+                          <div className="font-bold text-slate-900">{row.page_title}</div>
+                          <div className="text-[11px] text-indigo-600 font-mono">{row.page_path}</div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold">
+                            {row.page_id}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-bold text-slate-900">
+                          {row.page_views?.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-slate-600">
+                          {row.unique_visitors?.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-slate-600">
+                          {row.sessions?.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-slate-600">
+                          {Math.floor((row.avg_duration_seconds || 0) / 60)}m {(row.avg_duration_seconds || 0) % 60}s
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-slate-600 font-medium">
+                          {row.bounce_rate}%
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-bold text-emerald-600">
+                          {row.conversions || 0}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Traffic Sources & Device Distribution Strip */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+              <div className="p-4 rounded-xl border border-slate-200">
+                <h5 className="text-xs font-bold text-slate-800 mb-2">Traffic Sources</h5>
+                <div className="space-y-1.5 text-xs">
+                  {(gaDashboard?.traffic_sources || []).map((src, i) => (
+                    <div key={i} className="flex items-center justify-between py-1 border-b border-slate-50 last:border-0">
+                      <span className="text-slate-600">{src.traffic_source}</span>
+                      <span className="font-bold text-slate-900">{src.sessions?.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-slate-200">
+                <h5 className="text-xs font-bold text-slate-800 mb-2">Device Categories</h5>
+                <div className="space-y-1.5 text-xs">
+                  {(gaDashboard?.devices || []).map((dev, i) => (
+                    <div key={i} className="flex items-center justify-between py-1 border-b border-slate-50 last:border-0">
+                      <span className="text-slate-600">{dev.device_category}</span>
+                      <span className="font-bold text-slate-900">{dev.sessions?.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-slate-200">
+                <h5 className="text-xs font-bold text-slate-800 mb-2">Top Countries</h5>
+                <div className="space-y-1.5 text-xs">
+                  {(gaDashboard?.countries || []).map((c, i) => (
+                    <div key={i} className="flex items-center justify-between py-1 border-b border-slate-50 last:border-0">
+                      <span className="text-slate-600">{c.country}</span>
+                      <span className="font-bold text-slate-900">{c.page_views?.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* TAB 3: Google Search Console                                        */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'search_console' && (
+        <div className="space-y-6">
+          {/* Performance Overview Strip */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-lg bg-blue-50 text-blue-600">
+                  <Search className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Google Search Console Performance Dashboard</h3>
+                  <p className="text-[11px] text-slate-500">Live search performance, clicks, impressions, CTR, and indexing state.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => handleSubmitIndexing(true)}
+                disabled={submittingIndexing}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                {submittingIndexing ? 'Submitting Indexing...' : 'Bulk Index All CMS Pages'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Clicks</span>
+                <div className="text-2xl font-black text-blue-600 mt-1">
+                  {gscData?.summary?.total_clicks?.toLocaleString() ?? 0}
+                </div>
+                <span className="text-[11px] text-slate-500">Organic Google Search</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Impressions</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gscData?.summary?.total_impressions?.toLocaleString() ?? 0}
+                </div>
+                <span className="text-[11px] text-slate-500">Search results appearances</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Average CTR</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gscData?.summary?.avg_ctr ?? 0}%
+                </div>
+                <span className="text-[11px] text-emerald-600 font-semibold">Search intent</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Average Position</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {gscData?.summary?.avg_position ?? 0}
+                </div>
+                <span className="text-[11px] text-slate-500">SERP average</span>
+              </div>
+            </div>
+          </div>
+
+          {/* URL Inspection & Indexing Request Box */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Live URL Inspection Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
+                <Search className="w-4 h-4 text-indigo-600" />
+                <h3 className="text-sm font-bold text-slate-900">URL Inspection & Coverage</h3>
+              </div>
+
+              <form onSubmit={handleInspectUrl} className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="https://marketintel.hikasimat.com/solutions/prospect-database"
+                  value={inspectUrlInput}
+                  onChange={(e) => setInspectUrlInput(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={inspectingUrl}
+                  className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition disabled:opacity-50"
+                >
+                  {inspectingUrl ? 'Inspecting...' : 'Inspect URL'}
+                </button>
+              </form>
+
+              {inspectResult ? (
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-700">Presence on Google:</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                      {inspectResult.indexing_state}
+                    </span>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold tracking-tight">Active Google Ads Connection</span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                        {googleAdsConnection.status || 'CONNECTED'}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300 mt-1">
-                      <span>
-                        Customer ID: <strong className="text-white font-mono">{googleAdsConnection.customer_id || 'Not selected'}</strong>
-                      </span>
-                      {googleAdsConnection.manager_customer_id && (
-                        <span>
-                          MCC: <strong className="text-white font-mono">{googleAdsConnection.manager_customer_id}</strong>
+                  <div className="text-[11px] text-slate-600">
+                    <span className="font-semibold">Coverage:</span> {inspectResult.coverage_status}
+                  </div>
+                  <div className="text-[11px] text-slate-600 flex items-center justify-between">
+                    <span>Mobile Usability: <strong className="text-emerald-700">{inspectResult.mobile_usability}</strong></span>
+                    <span>Crawl Allowed: <strong className="text-emerald-700">{inspectResult.crawl_allowed ? 'Yes' : 'No'}</strong></span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setManualIndexUrl(inspectResult.page_url);
+                      handleSubmitIndexing(false);
+                    }}
+                    className="w-full mt-2 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md font-bold text-[11px] transition"
+                  >
+                    Request Indexing for This URL
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">
+                  Enter any website URL above to inspect Google Index status, mobile usability, and canonicalization.
+                </p>
+              )}
+            </div>
+
+            {/* Quick Submit Indexing Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
+                <Send className="w-4 h-4 text-blue-600" />
+                <h3 className="text-sm font-bold text-slate-900">Submit Single Indexing Request</h3>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Page URL to Submit to Google Index</label>
+                  <input
+                    type="text"
+                    placeholder="https://marketintel.hikasimat.com/insights/2026-apac-corporate-ma-report"
+                    value={manualIndexUrl}
+                    onChange={(e) => setManualIndexUrl(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <button
+                  onClick={() => handleSubmitIndexing(false)}
+                  disabled={submittingIndexing || !manualIndexUrl.trim()}
+                  className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-xs transition disabled:opacity-50"
+                >
+                  {submittingIndexing ? 'Submitting to Google...' : 'Submit Indexing Request'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Domain Registration & Verification Section */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  Domain Registration & Verification
+                </h3>
+                <p className="text-[11px] text-slate-500">Manage Search Console domain properties and DNS / HTML verification tokens.</p>
+              </div>
+              <button
+                onClick={() => setIsRegisterDomainOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Register Domain
+              </button>
+            </div>
+
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-2.5">Domain Property</th>
+                    <th className="px-4 py-2.5">Verification Method</th>
+                    <th className="px-4 py-2.5">Verification Token / Record</th>
+                    <th className="px-4 py-2.5">Status</th>
+                    <th className="px-4 py-2.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(gscData?.domains || []).map((dom) => (
+                    <tr key={dom.id} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-2.5">
+                        <div className="font-bold text-slate-900">{dom.domain}</div>
+                        <div className="text-[10px] text-slate-400">{dom.property_type}</div>
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-700 font-medium">
+                        {dom.verification_method}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <code className="text-[10px] bg-slate-100 px-2 py-0.5 rounded font-mono text-slate-700 truncate max-w-xs">
+                            {dom.dns_txt_record}
+                          </code>
+                          <button
+                            onClick={() => copyToClipboard(dom.dns_txt_record, 'DNS TXT Record copied!')}
+                            className="p-1 text-slate-400 hover:text-slate-700"
+                            title="Copy DNS Record"
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            dom.is_verified
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {dom.is_verified ? 'Verified Owner' : 'Pending Verification'}
                         </span>
-                      )}
-                      {googleAdsConnection.last_synced_at && (
-                        <span className="text-slate-400">
-                          Last Synced: {new Date(googleAdsConnection.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="px-4 py-2.5 text-right space-x-1.5">
+                        {!dom.is_verified && (
+                          <button
+                            onClick={() => handleVerifyDomain(dom.id, dom.verification_method)}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-bold"
+                          >
+                            Verify
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDeleteDomain(dom.id)}
+                          className="p-1 text-slate-400 hover:text-red-600 rounded"
+                          title="Delete domain"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Page Sitemap Management Section */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-blue-600" />
+                  Page Sitemap Management
+                </h3>
+                <p className="text-[11px] text-slate-500">Submitted XML sitemaps, crawl status, and discovered URLs.</p>
+              </div>
+              <button
+                onClick={() => setIsSubmitSitemapOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Submit Sitemap
+              </button>
+            </div>
+
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-2.5">Sitemap URL</th>
+                    <th className="px-4 py-2.5">Type</th>
+                    <th className="px-4 py-2.5 text-right">Discovered Pages</th>
+                    <th className="px-4 py-2.5 text-right">Indexed</th>
+                    <th className="px-4 py-2.5">Status</th>
+                    <th className="px-4 py-2.5">Last Crawled</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(gscData?.sitemaps || []).map((sm) => (
+                    <tr key={sm.id} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-2.5 font-mono text-[11px] text-blue-600 font-medium">
+                        {sm.sitemap_url}
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-600">{sm.sitemap_type}</td>
+                      <td className="px-4 py-2.5 text-right font-bold text-slate-800">
+                        {sm.discovered_pages_count}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-bold text-emerald-600">
+                        {sm.indexed_pages_count}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          {sm.status}
                         </span>
-                      )}
-                    </div>
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-400 text-[10px]">
+                        {sm.last_crawled_at ? new Date(sm.last_crawled_at).toLocaleDateString() : 'Recent'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Top Search Queries Table */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Top Organic Search Queries on Google</h3>
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-2.5">Top Query</th>
+                    <th className="px-4 py-2.5 text-right">Clicks</th>
+                    <th className="px-4 py-2.5 text-right">Impressions</th>
+                    <th className="px-4 py-2.5 text-right">CTR</th>
+                    <th className="px-4 py-2.5 text-right">Position</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(gscData?.top_queries || []).map((q, idx) => (
+                    <tr key={idx} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-2.5 font-bold text-slate-900">{q.query}</td>
+                      <td className="px-4 py-2.5 text-right font-bold text-blue-600">{q.clicks?.toLocaleString()}</td>
+                      <td className="px-4 py-2.5 text-right text-slate-600">{q.impressions?.toLocaleString()}</td>
+                      <td className="px-4 py-2.5 text-right text-slate-600 font-medium">{q.ctr}%</td>
+                      <td className="px-4 py-2.5 text-right font-bold text-slate-800">{q.position}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* TAB 4: Bing Webmaster Tools                                         */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'bing' && (
+        <div className="space-y-6">
+          {/* Performance Summary Cards */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-lg bg-teal-50 text-teal-600">
+                  <Globe className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Bing Webmaster Tools & IndexNow Suite</h3>
+                  <p className="text-[11px] text-slate-500">Live search performance, IndexNow ping submissions, and crawl metrics.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => handleSubmitBingUrls(true)}
+                disabled={submittingBingUrls}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                {submittingBingUrls ? 'Submitting to IndexNow...' : 'Index All Published Pages via IndexNow'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Bing Clicks</span>
+                <div className="text-2xl font-black text-teal-600 mt-1">
+                  {bingData?.summary?.total_clicks?.toLocaleString() ?? 0}
+                </div>
+                <span className="text-[11px] text-slate-500">Organic Bing Search</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Bing Impressions</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {bingData?.summary?.total_impressions?.toLocaleString() ?? 0}
+                </div>
+                <span className="text-[11px] text-slate-500">Search appearances</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Crawled Pages</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {bingData?.summary?.crawled_pages ?? 0}
+                </div>
+                <span className="text-[11px] text-emerald-600 font-semibold">Crawl errors: {bingData?.summary?.crawl_errors ?? 0}</span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">IndexNow Daily Quota</span>
+                <div className="text-2xl font-black text-slate-900 mt-1">
+                  {bingData?.summary?.daily_quota_remaining?.toLocaleString() ?? '10,000'}
+                </div>
+                <span className="text-[11px] text-slate-500">URLs remaining today</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Configuration & IndexNow Box */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Bing Configuration Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-900">Bing Webmaster Site Configuration</h3>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                    bingData?.config?.is_verified
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  {bingData?.config?.is_verified ? 'Site Verified' : 'Pending Verification'}
+                </span>
+              </div>
+
+              <form onSubmit={handleSaveBingConfig} className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Site URL</label>
+                  <input
+                    type="url"
+                    value={bingData?.config?.site_url || 'https://marketintel.hikasimat.com'}
+                    onChange={(e) =>
+                      setBingData((prev) => ({
+                        ...prev,
+                        config: { ...prev.config, site_url: e.target.value },
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Bing Webmaster API Key</label>
+                  <input
+                    type="text"
+                    value={bingApiKeyInput}
+                    onChange={(e) => setBingApiKeyInput(e.target.value)}
+                    placeholder="Enter or paste Bing Webmaster API key..."
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">Encrypted with Fernet in Market Intel database at rest.</p>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Verification Meta Tag</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={bingData?.config?.meta_tag_snippet || '<meta name="msvalidate.01" ... />'}
+                      className="w-full px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg font-mono text-[11px] text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(bingData?.config?.meta_tag_snippet, 'Bing Meta tag copied!')}
+                      className="p-1.5 text-slate-500 hover:text-slate-800 border border-slate-200 rounded-lg"
+                      title="Copy meta tag"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
 
-                {/* Account Switcher if multiple accessible accounts */}
-                {googleAdsCustomers.length > 0 && (
-                  <div className="flex items-center gap-2 bg-slate-800/80 p-2 rounded-xl border border-slate-700">
-                    <span className="text-xs text-slate-300 font-medium">Switch Account:</span>
-                    <select
-                      value={googleAdsConnection.customer_id || ''}
-                      onChange={(e) => handleSelectGoogleAdsCustomer(e.target.value)}
-                      className="bg-slate-900 text-white text-xs font-semibold px-2.5 py-1 rounded-lg border border-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="submit"
+                    disabled={savingBingConfig}
+                    className="flex-1 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-bold text-xs transition disabled:opacity-50"
+                  >
+                    {savingBingConfig ? 'Saving...' : 'Save Bing Configuration'}
+                  </button>
+
+                  {!bingData?.config?.is_verified && (
+                    <button
+                      type="button"
+                      onClick={handleVerifyBingSite}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs transition"
                     >
-                      <option value="" disabled>Select CID</option>
-                      {googleAdsCustomers.map((cid) => (
-                        <option key={cid} value={cid}>
-                          CID: {cid}
-                        </option>
-                      ))}
-                    </select>
+                      Verify Site
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            {/* IndexNow Key & Quick Submission Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-900">IndexNow Protocol Configuration</h3>
+                <button
+                  onClick={handleRegenerateIndexNowKey}
+                  className="text-xs text-teal-600 hover:text-teal-700 font-bold"
+                >
+                  Regenerate Key
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Active IndexNow Key</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={bingData?.config?.indexnow_key || ''}
+                      className="w-full px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg font-mono text-slate-800 text-[11px]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(bingData?.config?.indexnow_key, 'IndexNow key copied!')}
+                      className="p-1.5 text-slate-500 hover:text-slate-800 border border-slate-200 rounded-lg"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                )}
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Submit URLs to Bing IndexNow</label>
+                  <textarea
+                    rows="3"
+                    placeholder="https://marketintel.hikasimat.com/pricing&#10;https://marketintel.hikasimat.com/solutions/prospect-database"
+                    value={bingUrlsInput}
+                    onChange={(e) => setBingUrlsInput(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-xs focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-0.5">Separate multiple URLs by commas or new lines.</p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <select
+                    value={bingProtocol}
+                    onChange={(e) => setBingProtocol(e.target.value)}
+                    className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-700 font-medium"
+                  >
+                    <option value="INDEXNOW">IndexNow Instant Ping</option>
+                    <option value="BING_API">Bing Webmaster URL Submission API</option>
+                  </select>
+
+                  <button
+                    onClick={() => handleSubmitBingUrls(false)}
+                    disabled={submittingBingUrls || !bingUrlsInput.trim()}
+                    className="flex-1 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-bold text-xs transition disabled:opacity-50"
+                  >
+                    {submittingBingUrls ? 'Submitting...' : 'Submit URLs'}
+                  </button>
+                </div>
               </div>
             </div>
-          ) : (
-            <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-6 text-slate-800">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-100 flex items-center justify-center text-amber-700 shrink-0">
-                    <TrendingUp className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Google Ads Not Connected for this Workspace</h3>
-                    <p className="text-xs text-slate-600 mt-1 max-w-xl">
-                      Link your Google Ads account to query real-time campaign performance via GAQL, pause/resume search & display campaigns, and calibrate daily budgets directly from Market Intel DB.
-                    </p>
-                  </div>
+          </div>
+
+          {/* Bing Sitemaps & Submission History Strip */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Bing Sitemaps Card */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-900">Bing Sitemaps</h3>
+              </div>
+
+              <form onSubmit={handleSubmitBingSitemap} className="flex gap-2 text-xs">
+                <input
+                  type="url"
+                  value={bingSitemapInput}
+                  onChange={(e) => setBingSitemapInput(e.target.value)}
+                  placeholder="https://marketintel.hikasimat.com/sitemap.xml"
+                  className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={submittingBingSitemap}
+                  className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-bold transition disabled:opacity-50"
+                >
+                  Submit
+                </button>
+              </form>
+
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th className="px-3 py-2">Sitemap URL</th>
+                      <th className="px-3 py-2 text-right">Discovered</th>
+                      <th className="px-3 py-2 text-right">Indexed</th>
+                      <th className="px-3 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(bingData?.sitemaps || []).map((sm) => (
+                      <tr key={sm.id}>
+                        <td className="px-3 py-2 font-mono text-[11px] text-teal-600 truncate max-w-xs">{sm.sitemap_url}</td>
+                        <td className="px-3 py-2 text-right font-bold text-slate-800">{sm.urls_discovered}</td>
+                        <td className="px-3 py-2 text-right font-bold text-emerald-600">{sm.urls_indexed}</td>
+                        <td className="px-3 py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800">
+                            {sm.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Recent URL Submissions Log */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+              <h3 className="text-sm font-bold text-slate-900 pb-3 border-b border-slate-100">
+                Recent URL Indexing Submissions Log
+              </h3>
+              <div className="border border-slate-200 rounded-lg overflow-hidden max-h-56 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px] sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2">Submitted Page URL</th>
+                      <th className="px-3 py-2">Protocol</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2 text-right">Code</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(bingData?.submissions || []).map((sub) => (
+                      <tr key={sub.id}>
+                        <td className="px-3 py-2 font-mono text-[11px] text-slate-700 truncate max-w-xs">{sub.page_url}</td>
+                        <td className="px-3 py-2 text-[10px] text-slate-500">{sub.submission_protocol}</td>
+                        <td className="px-3 py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-50 text-teal-800">
+                            {sub.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-600">{sub.http_status_code}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* TAB 5: Google Ads                                                   */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'google_ads' && (
+        <div className="space-y-6">
+          {/* Header & KPI Summary */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-lg bg-amber-50 text-amber-600">
+                  <DollarSign className="w-4 h-4" />
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={handleAuthorizeGoogleAds}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    Authorize with Google
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        const targetWsId = selectedWorkspaceId || workspaces[0]?.id;
-                        if (!targetWsId) {
-                          toast.error('Please connect or select a workspace first.');
-                          return;
-                        }
-                        const res = await cmsService.exchangeGoogleAdsCode(targetWsId, 'mock-demo-token');
-                        if (res.ok) {
-                          toast.success('Connected in demo mode with sample campaigns!');
-                          await loadGoogleAdsData();
-                        } else {
-                          toast.error('Demo connection failed: ' + (res.error || ''));
-                        }
-                      } catch (err) {
-                        toast.error('Error: ' + err.message);
-                      }
-                    }}
-                    className="px-3.5 py-2 bg-white hover:bg-amber-100/60 border border-amber-300 text-amber-900 rounded-xl text-xs font-bold transition shadow-2xs"
-                  >
-                    ⚡ Test with Demo CIDs
-                  </button>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Market Intel Google Ads Management</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Account: {adsData?.config?.account_name} ({adsData?.config?.customer_id}) — Currency: {adsData?.config?.currency_code}
+                  </p>
                 </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsAdsAccountConfigOpen(true)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
+                >
+                  Account Settings
+                </button>
+                <button
+                  onClick={() => setIsCreateCampaignOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                >
+                  <Plus className="w-4 h-4" />
+                  Create Campaign
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Spend</span>
+                <div className="text-xl font-black text-slate-900 mt-1">
+                  ${Number(adsData?.summary?.total_spend || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <span className="text-[10px] text-slate-500">Budget: ${adsData?.summary?.total_daily_budget}/day</span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Clicks & Impressions</span>
+                <div className="text-xl font-black text-amber-600 mt-1">
+                  {adsData?.summary?.total_clicks?.toLocaleString()}
+                </div>
+                <span className="text-[10px] text-slate-500">{adsData?.summary?.total_impressions?.toLocaleString()} imps</span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Avg CTR</span>
+                <div className="text-xl font-black text-slate-900 mt-1">
+                  {adsData?.summary?.avg_ctr}%
+                </div>
+                <span className="text-[10px] text-slate-500">Avg CPC: ${adsData?.summary?.avg_cpc}</span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Conversions</span>
+                <div className="text-xl font-black text-emerald-600 mt-1">
+                  {adsData?.summary?.total_conversions}
+                </div>
+                <span className="text-[10px] text-slate-500">Value: ${adsData?.summary?.total_conversion_value?.toLocaleString()}</span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost / Conversion (CPA)</span>
+                <div className="text-xl font-black text-slate-900 mt-1">
+                  ${adsData?.summary?.avg_cpa}
+                </div>
+                <span className="text-[10px] text-emerald-600 font-semibold">Target achieved</span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">ROAS (Return on Ad Spend)</span>
+                <div className="text-xl font-black text-indigo-600 mt-1">
+                  {adsData?.summary?.roas}x
+                </div>
+                <span className="text-[10px] text-slate-500">Gross revenue ratio</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Sub Navigation */}
+          <div className="flex border-b border-slate-200 space-x-1 text-xs font-bold">
+            <button
+              onClick={() => setAdsSubTab('campaigns')}
+              className={`px-3 py-2 rounded-t-lg transition border-b-2 -mb-px ${
+                adsSubTab === 'campaigns'
+                  ? 'border-amber-600 text-amber-700 bg-amber-50/50'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Campaigns ({adsData?.campaigns?.length || 0})
+            </button>
+            <button
+              onClick={() => setAdsSubTab('adgroups')}
+              className={`px-3 py-2 rounded-t-lg transition border-b-2 -mb-px ${
+                adsSubTab === 'adgroups'
+                  ? 'border-amber-600 text-amber-700 bg-amber-50/50'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Ad Groups ({adsData?.ad_groups?.length || 0})
+            </button>
+            <button
+              onClick={() => setAdsSubTab('keywords')}
+              className={`px-3 py-2 rounded-t-lg transition border-b-2 -mb-px ${
+                adsSubTab === 'keywords'
+                  ? 'border-amber-600 text-amber-700 bg-amber-50/50'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Keywords ({adsData?.keywords?.length || 0})
+            </button>
+            <button
+              onClick={() => setAdsSubTab('audit')}
+              className={`px-3 py-2 rounded-t-lg transition border-b-2 -mb-px ${
+                adsSubTab === 'audit'
+                  ? 'border-amber-600 text-amber-700 bg-amber-50/50'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Audit Logs ({adsData?.audit_logs?.length || 0})
+            </button>
+          </div>
+
+          {/* Sub-tab 1: Campaigns Table */}
+          {adsSubTab === 'campaigns' && (
+            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-3">Campaign Name</th>
+                    <th className="px-4 py-3">Channel</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Daily Budget</th>
+                    <th className="px-4 py-3 text-right">Spend</th>
+                    <th className="px-4 py-3 text-right">Clicks</th>
+                    <th className="px-4 py-3 text-right">CTR</th>
+                    <th className="px-4 py-3 text-right">Conversions</th>
+                    <th className="px-4 py-3 text-right">ROAS</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(!adsData?.campaigns || adsData.campaigns.length === 0) ? (
+                    <tr>
+                      <td colSpan="10" className="px-4 py-8 text-center text-slate-500">
+                        No Google Ads campaigns found in database. Click &quot;+ Create Campaign&quot; to launch your first real campaign.
+                      </td>
+                    </tr>
+                  ) : (
+                    adsData.campaigns.map((c) => (
+                    <tr key={c.id} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-3">
+                        <div className="font-bold text-slate-900">{c.name}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">ID: {c.external_campaign_id} • {c.bidding_strategy}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                          {c.channel_type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => handleToggleCampaignStatus(c)}
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border transition ${
+                            c.status === 'ENABLED'
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                              : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                          }`}
+                        >
+                          {c.status === 'ENABLED' ? <Play className="w-2.5 h-2.5 fill-current" /> : <Pause className="w-2.5 h-2.5 fill-current" />}
+                          {c.status}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        ${Number(c.daily_budget).toFixed(2)}/day
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        ${Number(c.cost).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </td>
+                      <td className="px-4 py-3 text-right text-slate-600">{c.clicks?.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-right text-slate-600">{c.ctr}%</td>
+                      <td className="px-4 py-3 text-right font-bold text-emerald-600">{c.conversions}</td>
+                      <td className="px-4 py-3 text-right font-bold text-indigo-600">{c.roas}x</td>
+                      <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                        <button
+                          onClick={() => handleOpenBudgetModal(c)}
+                          className="px-2.5 py-1 text-slate-700 hover:bg-slate-100 border border-slate-200 rounded text-[11px] font-bold transition"
+                        >
+                          Budget
+                        </button>
+                        <button
+                          onClick={() => handleDeleteCampaign(c)}
+                          className="p-1 text-slate-400 hover:text-red-600 rounded"
+                          title="Remove campaign"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  )))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Sub-tab 2: Ad Groups Table */}
+          {adsSubTab === 'adgroups' && (
+            <div className="space-y-4">
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setIsCreateAdGroupOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add Ad Group
+                </button>
+              </div>
+
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th className="px-4 py-3">Ad Group Name</th>
+                      <th className="px-4 py-3">Campaign</th>
+                      <th className="px-4 py-3 text-right">Default CPC Bid</th>
+                      <th className="px-4 py-3 text-right">Clicks</th>
+                      <th className="px-4 py-3 text-right">Cost</th>
+                      <th className="px-4 py-3 text-right">Conversions</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(!adsData?.ad_groups || adsData.ad_groups.length === 0) ? (
+                      <tr>
+                        <td colSpan="8" className="px-4 py-8 text-center text-slate-500">
+                          No ad groups found in database. Click &quot;+ Add Ad Group&quot; to organize your ads.
+                        </td>
+                      </tr>
+                    ) : (
+                      adsData.ad_groups.map((ag) => (
+                      <tr key={ag.id} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-3 font-bold text-slate-900">{ag.name}</td>
+                        <td className="px-4 py-3 text-slate-600">{ag.campaign_name}</td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-800">${Number(ag.cpc_bid).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-right text-slate-600">{ag.clicks?.toLocaleString()}</td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">${Number(ag.cost).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-right font-bold text-emerald-600">{ag.conversions}</td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleToggleAdGroupStatus(ag)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              ag.status === 'ENABLED'
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            {ag.status}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => handleDeleteAdGroup(ag)}
+                            className="p-1 text-slate-400 hover:text-red-600 rounded"
+                            title="Delete ad group"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
 
-          {/* Aggregate KPI Metric Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
-            {/* Total Campaigns */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-              <div className="flex items-center justify-between text-slate-500 mb-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider">Campaigns</span>
-                <Target className="w-4 h-4 text-blue-600" />
+          {/* Sub-tab 3: Keywords Table */}
+          {adsSubTab === 'keywords' && (
+            <div className="space-y-4">
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setIsCreateKeywordOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add Keyword
+                </button>
               </div>
-              <div className="text-2xl font-black text-slate-900">
-                {googleAdsCampaigns.length}
-              </div>
-              <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                {googleAdsCampaigns.filter((c) => c.status === 'ENABLED').length} active
-              </p>
-            </div>
 
-            {/* Total Impressions */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-              <div className="flex items-center justify-between text-slate-500 mb-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider">Impressions</span>
-                <Eye className="w-4 h-4 text-indigo-600" />
-              </div>
-              <div className="text-2xl font-black text-slate-900">
-                {googleAdsCampaigns
-                  .reduce((sum, c) => sum + Number(c.impressions || 0), 0)
-                  .toLocaleString()}
-              </div>
-              <p className="text-[11px] text-slate-500 mt-1">Total views across search & display</p>
-            </div>
-
-            {/* Clicks & CTR */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-              <div className="flex items-center justify-between text-slate-500 mb-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider">Clicks & CTR</span>
-                <MousePointerClick className="w-4 h-4 text-emerald-600" />
-              </div>
-              <div className="text-2xl font-black text-slate-900">
-                {googleAdsCampaigns
-                  .reduce((sum, c) => sum + Number(c.clicks || 0), 0)
-                  .toLocaleString()}
-              </div>
-              <p className="text-[11px] text-emerald-600 font-bold mt-1">
-                {(() => {
-                  const imps = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.impressions || 0), 0);
-                  const clks = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.clicks || 0), 0);
-                  return imps > 0 ? ((clks / imps) * 100).toFixed(2) + '% CTR' : '0.00% CTR';
-                })()}
-              </p>
-            </div>
-
-            {/* Total Spend */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-              <div className="flex items-center justify-between text-slate-500 mb-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider">Total Spend</span>
-                <DollarSign className="w-4 h-4 text-amber-600" />
-              </div>
-              <div className="text-2xl font-black text-slate-900">
-                ${(
-                  googleAdsCampaigns.reduce((sum, c) => {
-                    const costVal = Number(c.cost ?? (c.cost_micros ? c.cost_micros / 1000000 : (c.spend_micros ? c.spend_micros / 1000000 : c.spend ?? 0)));
-                    return sum + costVal;
-                  }, 0)
-                ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </div>
-              <p className="text-[11px] text-slate-500 mt-1">Accrued cost for period</p>
-            </div>
-
-            {/* Conversions */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-              <div className="flex items-center justify-between text-slate-500 mb-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider">Conversions</span>
-                <Sparkles className="w-4 h-4 text-purple-600" />
-              </div>
-              <div className="text-2xl font-black text-slate-900">
-                {googleAdsCampaigns
-                  .reduce((sum, c) => sum + Number(c.conversions || 0), 0)
-                  .toLocaleString()}
-              </div>
-              <p className="text-[11px] text-purple-600 font-bold mt-1">
-                {(() => {
-                  const convs = googleAdsCampaigns.reduce((sum, c) => sum + Number(c.conversions || 0), 0);
-                  const cost = googleAdsCampaigns.reduce((sum, c) => {
-                    const costVal = Number(c.cost ?? (c.cost_micros ? c.cost_micros / 1000000 : (c.spend_micros ? c.spend_micros / 1000000 : c.spend ?? 0)));
-                    return sum + costVal;
-                  }, 0);
-                  return convs > 0 ? '$' + (cost / convs).toFixed(2) + ' CPA' : 'No conversions';
-                })()}
-              </p>
-            </div>
-          </div>
-
-          {/* Sub-Tab Navigation for Google Ads */}
-          <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-            <div className="border-b border-slate-200 px-4 pt-3 flex items-center justify-between bg-slate-50/50">
-              <div className="flex space-x-2">
-                {[
-                  { id: 'campaigns', label: 'Campaigns & Budgets', icon: Target, count: googleAdsCampaigns.length },
-                  { id: 'ad_groups', label: 'Ad Groups', icon: Layers, count: googleAdsAdGroups.length },
-                  { id: 'keywords', label: 'Keywords Performance', icon: Tag, count: googleAdsKeywords.length },
-                  { id: 'audit', label: 'Mutation Audit Logs', icon: History, count: googleAdsAuditLogs.length },
-                ].map((st) => {
-                  const Icon = st.icon;
-                  const isCurrent = adsSubTab === st.id;
-                  return (
-                    <button
-                      key={st.id}
-                      type="button"
-                      onClick={() => setAdsSubTab(st.id)}
-                      className={`flex items-center gap-1.5 py-2.5 px-3.5 rounded-t-xl text-xs font-bold border-b-2 transition ${
-                        isCurrent
-                          ? 'border-blue-600 text-blue-600 bg-white shadow-2xs'
-                          : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/60'
-                      }`}
-                    >
-                      <Icon className={`w-3.5 h-3.5 ${isCurrent ? 'text-blue-600' : 'text-slate-400'}`} />
-                      {st.label}
-                      <span className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                        isCurrent ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-700'
-                      }`}>
-                        {st.count}
-                      </span>
-                    </button>
-                  );
-                })}
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th className="px-4 py-3">Keyword</th>
+                      <th className="px-4 py-3">Match Type</th>
+                      <th className="px-4 py-3">Ad Group / Campaign</th>
+                      <th className="px-4 py-3 text-right">Quality Score</th>
+                      <th className="px-4 py-3 text-right">Max CPC</th>
+                      <th className="px-4 py-3 text-right">Clicks</th>
+                      <th className="px-4 py-3 text-right">Conversions</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(!adsData?.keywords || adsData.keywords.length === 0) ? (
+                      <tr>
+                        <td colSpan="9" className="px-4 py-8 text-center text-slate-500">
+                          No keywords found in database. Click &quot;+ Add Keyword&quot; to target high-intent search terms.
+                        </td>
+                      </tr>
+                    ) : (
+                      adsData.keywords.map((kw) => (
+                      <tr key={kw.id} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-3 font-bold text-slate-900">{kw.keyword_text}</td>
+                        <td className="px-4 py-3">
+                          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold">
+                            {kw.match_type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 text-[11px]">
+                          {kw.ad_group_name} • {kw.campaign_name}
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-indigo-600">{kw.quality_score}/10</td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-800">${Number(kw.cpc_bid).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-right text-slate-600">{kw.clicks?.toLocaleString()}</td>
+                        <td className="px-4 py-3 text-right font-bold text-emerald-600">{kw.conversions}</td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleToggleKeywordStatus(kw)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              kw.status === 'ENABLED'
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            {kw.status}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => handleDeleteKeyword(kw)}
+                            className="p-1 text-slate-400 hover:text-red-600 rounded"
+                            title="Delete keyword"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
               </div>
             </div>
+          )}
 
-            <div className="p-5">
-              {/* SUBTAB 1: CAMPAIGNS */}
-              {adsSubTab === 'campaigns' && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">Campaign Roster & Budget Control</h3>
-                      <p className="text-xs text-slate-500">Live campaign status, daily spend limits & mutation controls</p>
-                    </div>
-                  </div>
-
-                  {googleAdsCampaigns.length === 0 ? (
-                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                      <Target className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm font-bold text-slate-700">No campaigns found for selected CID and date range.</p>
-                      <p className="text-xs text-slate-500 mt-1">Make sure Google Ads is connected and an active CID is selected.</p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">Campaign Name / ID</th>
-                            <th className="py-3 px-3">Status</th>
-                            <th className="py-3 px-3">Channel</th>
-                            <th className="py-3 px-3 text-right">Daily Budget</th>
-                            <th className="py-3 px-3 text-right">Impressions</th>
-                            <th className="py-3 px-3 text-right">Clicks</th>
-                            <th className="py-3 px-3 text-right">Spend</th>
-                            <th className="py-3 px-3 text-right">Conv.</th>
-                            <th className="py-3 px-4 text-center">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                          {googleAdsCampaigns.map((camp) => {
-                            const campId = camp.campaign_id || camp.id;
-                            const campName = camp.campaign_name || camp.name || 'Campaign';
-                            const isEnabled = camp.status === 'ENABLED';
-                            const isMutating = mutatingCampaignId === campId;
-                            const dailyBudgetUsd = camp.budget_amount != null
-                              ? Number(camp.budget_amount).toFixed(2)
-                              : camp.budget_micros != null
-                              ? (Number(camp.budget_micros) / 1000000).toFixed(2)
-                              : Number(camp.budget || 0).toFixed(2);
-                            const spendUsd = camp.cost != null
-                              ? Number(camp.cost).toFixed(2)
-                              : camp.cost_micros != null
-                              ? (Number(camp.cost_micros) / 1000000).toFixed(2)
-                              : Number(camp.spend || 0).toFixed(2);
-
-                            return (
-                              <tr key={campId} className="hover:bg-slate-50/70 transition">
-                                <td className="py-3 px-4">
-                                  <div className="font-bold text-slate-900">{campName}</div>
-                                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {campId}</div>
-                                </td>
-                                <td className="py-3 px-3">
-                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    isEnabled
-                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                      : 'bg-amber-50 text-amber-700 border border-amber-200'
-                                  }`}>
-                                    <span className={`w-1.5 h-1.5 rounded-full ${isEnabled ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                                    {camp.status}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-slate-600 font-semibold uppercase text-[11px]">
-                                  {camp.advertising_channel_type || camp.channel_type || 'SEARCH'}
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                                  ${dailyBudgetUsd}/d
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono">
-                                  {Number(camp.impressions || 0).toLocaleString()}
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono">
-                                  {Number(camp.clicks || 0).toLocaleString()}
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                                  ${spendUsd}
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono text-purple-700 font-bold">
-                                  {Number(camp.conversions || 0).toLocaleString()}
-                                </td>
-                                <td className="py-3 px-4">
-                                  <div className="flex items-center justify-center gap-1.5">
-                                    {isEnabled ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => handlePauseCampaign(campId)}
-                                        disabled={isMutating}
-                                        title="Pause Campaign"
-                                        className="flex items-center gap-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
-                                      >
-                                        {isMutating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Pause className="w-3 h-3" />}
-                                        Pause
-                                      </button>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleResumeCampaign(campId)}
-                                        disabled={isMutating}
-                                        title="Resume / Activate Campaign"
-                                        className="flex items-center gap-1 px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
-                                      >
-                                        {isMutating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                                        Resume
-                                      </button>
-                                    )}
-
-                                    <button
-                                      type="button"
-                                      onClick={() => handleOpenBudgetModal({ ...camp, id: campId, name: campName })}
-                                      title="Update Daily Budget"
-                                      className="flex items-center gap-1 px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[11px] font-bold transition shadow-2xs"
-                                    >
-                                      <DollarSign className="w-3 h-3" />
-                                      Budget
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* SUBTAB 2: AD GROUPS */}
-              {adsSubTab === 'ad_groups' && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Ad Group Segments</h3>
-                    <p className="text-xs text-slate-500">Targeting groups, click-through rates & ad distribution</p>
-                  </div>
-
-                  {googleAdsAdGroups.length === 0 ? (
-                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                      <Layers className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm font-bold text-slate-700">No ad groups reported for this date range.</p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">Ad Group Name</th>
-                            <th className="py-3 px-3">Campaign</th>
-                            <th className="py-3 px-3">Status</th>
-                            <th className="py-3 px-3 text-right">Impressions</th>
-                            <th className="py-3 px-3 text-right">Clicks</th>
-                            <th className="py-3 px-3 text-right">CTR</th>
-                            <th className="py-3 px-3 text-right">Spend</th>
-                            <th className="py-3 px-4 text-right">Conv.</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                          {googleAdsAdGroups.map((adg) => {
-                            const imps = Number(adg.impressions || 0);
-                            const clks = Number(adg.clicks || 0);
-                            const ctr = imps > 0 ? ((clks / imps) * 100).toFixed(2) + '%' : '0.00%';
-                            const spend = adg.cost_micros
-                              ? (Number(adg.cost_micros) / 1000000).toFixed(2)
-                              : Number(adg.cost || adg.spend || 0).toFixed(2);
-
-                            return (
-                              <tr key={adg.id} className="hover:bg-slate-50/70 transition">
-                                <td className="py-3 px-4 font-bold text-slate-900">
-                                  {adg.name}
-                                  <div className="text-[10px] font-mono text-slate-400">ID: {adg.id}</div>
-                                </td>
-                                <td className="py-3 px-3 text-slate-600 font-semibold">{adg.campaign_name || adg.campaign_id}</td>
-                                <td className="py-3 px-3">
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                                    {adg.status}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono">{imps.toLocaleString()}</td>
-                                <td className="py-3 px-3 text-right font-mono">{clks.toLocaleString()}</td>
-                                <td className="py-3 px-3 text-right font-mono text-emerald-600 font-bold">{ctr}</td>
-                                <td className="py-3 px-3 text-right font-mono font-bold">${spend}</td>
-                                <td className="py-3 px-4 text-right font-mono text-purple-700 font-bold">
-                                  {Number(adg.conversions || 0).toLocaleString()}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* SUBTAB 3: KEYWORDS */}
-              {adsSubTab === 'keywords' && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Keyword Performance Analysis</h3>
-                    <p className="text-xs text-slate-500">Search query tokens, match types & quality diagnostics</p>
-                  </div>
-
-                  {googleAdsKeywords.length === 0 ? (
-                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                      <Tag className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm font-bold text-slate-700">No keyword records available for this query window.</p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">Keyword Text</th>
-                            <th className="py-3 px-3">Match Type</th>
-                            <th className="py-3 px-3">Ad Group</th>
-                            <th className="py-3 px-3">Status</th>
-                            <th className="py-3 px-3 text-right">Impressions</th>
-                            <th className="py-3 px-3 text-right">Clicks</th>
-                            <th className="py-3 px-3 text-right">Spend</th>
-                            <th className="py-3 px-4 text-right">Conv.</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                          {googleAdsKeywords.map((kw, i) => {
-                            const spend = kw.cost_micros
-                              ? (Number(kw.cost_micros) / 1000000).toFixed(2)
-                              : Number(kw.cost || kw.spend || 0).toFixed(2);
-
-                            return (
-                              <tr key={kw.id || i} className="hover:bg-slate-50/70 transition">
-                                <td className="py-3 px-4 font-bold text-slate-900 font-mono">
-                                  {kw.text || kw.keyword_text}
-                                </td>
-                                <td className="py-3 px-3">
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    kw.match_type === 'EXACT'
-                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                      : kw.match_type === 'PHRASE'
-                                      ? 'bg-purple-50 text-purple-700 border border-purple-200'
-                                      : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                  }`}>
-                                    {kw.match_type || 'EXACT'}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-slate-600">{kw.ad_group_name || kw.ad_group_id}</td>
-                                <td className="py-3 px-3">
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                                    {kw.status}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono">{Number(kw.impressions || 0).toLocaleString()}</td>
-                                <td className="py-3 px-3 text-right font-mono">{Number(kw.clicks || 0).toLocaleString()}</td>
-                                <td className="py-3 px-3 text-right font-mono font-bold">${spend}</td>
-                                <td className="py-3 px-4 text-right font-mono text-purple-700 font-bold">
-                                  {Number(kw.conversions || 0).toLocaleString()}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* SUBTAB 4: AUDIT LOGS */}
-              {adsSubTab === 'audit' && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Campaign Mutation Audit Trail</h3>
-                    <p className="text-xs text-slate-500">Immutable record of campaign status modifications and budget revisions</p>
-                  </div>
-
-                  {googleAdsAuditLogs.length === 0 ? (
-                    <div className="text-center py-16 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                      <History className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm font-bold text-slate-700">No mutation logs recorded yet.</p>
-                      <p className="text-xs text-slate-500 mt-1">Actions such as pausing, resuming or editing budgets will appear here.</p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">Timestamp</th>
-                            <th className="py-3 px-3">Action</th>
-                            <th className="py-3 px-3">Campaign ID</th>
-                            <th className="py-3 px-3">Change Summary</th>
-                            <th className="py-3 px-3">Status</th>
-                            <th className="py-3 px-4">User</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-medium text-slate-800 font-mono">
-                          {googleAdsAuditLogs.map((log) => {
-                            const isSuccess = log.status === 'SUCCESS';
-                            return (
-                              <tr key={log.id} className="hover:bg-slate-50/70 transition">
-                                <td className="py-3 px-4 text-slate-500 text-[11px]">
-                                  {new Date(log.created_at).toLocaleString()}
-                                </td>
-                                <td className="py-3 px-3">
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    log.action?.includes('PAUSE')
-                                      ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                                      : log.action?.includes('RESUME')
-                                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                      : 'bg-blue-50 text-blue-800 border border-blue-200'
-                                  }`}>
-                                    {log.action}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-slate-700 font-bold">{log.campaign_id}</td>
-                                <td className="py-3 px-3 text-slate-600">
-                                  {log.previous_value && log.new_value ? (
-                                    <span>
-                                      <span className="text-slate-400 line-through mr-1">{log.previous_value}</span>
-                                      &rarr;
-                                      <span className="text-slate-900 font-bold ml-1">{log.new_value}</span>
-                                    </span>
-                                  ) : (
-                                    log.notes || 'Status mutation applied'
-                                  )}
-                                </td>
-                                <td className="py-3 px-3">
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    isSuccess
-                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                      : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                  }`}>
-                                    {log.status}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-4 text-slate-500 text-[11px] truncate max-w-[150px]">
-                                  {log.user_email || 'System'}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* ── MODAL: UPDATE DAILY BUDGET ─────────────────────────────────── */}
-          {budgetModalOpen && selectedCampaignForBudget && (
-            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in-95 duration-150 space-y-4">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
-                      <DollarSign className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">Adjust Daily Campaign Budget</h3>
-                      <p className="text-[11px] text-slate-500 truncate max-w-[280px]">
-                        {selectedCampaignForBudget.name} (ID: {selectedCampaignForBudget.id})
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setBudgetModalOpen(false)}
-                    className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <form onSubmit={handleUpdateBudgetSubmit} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      New Daily Budget (USD $)
-                    </label>
-                    <div className="relative">
-                      <DollarSign className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="1.00"
-                        max="50000.00"
-                        value={newBudgetAmount}
-                        onChange={(e) => setNewBudgetAmount(e.target.value)}
-                        required
-                        className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      />
-                    </div>
-                    <p className="text-[11px] text-slate-500 mt-1">
-                      Mutates the Google Ads campaign budget object via GAQL adapter in real-time.
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => setBudgetModalOpen(false)}
-                      className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-50 transition"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={updatingBudget}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
-                    >
-                      {updatingBudget && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                      Save Daily Budget
-                    </button>
-                  </div>
-                </form>
-              </div>
+          {/* Sub-tab 4: Mutation Audit Logs */}
+          {adsSubTab === 'audit' && (
+            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="px-4 py-3">Operation & Resource</th>
+                    <th className="px-4 py-3">Target Name</th>
+                    <th className="px-4 py-3">Summary</th>
+                    <th className="px-4 py-3">User</th>
+                    <th className="px-4 py-3 text-right">Status & Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(adsData?.audit_logs || []).map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-3 font-mono font-bold text-amber-700">{log.operation_type}</td>
+                      <td className="px-4 py-3 font-bold text-slate-900">{log.resource_name}</td>
+                      <td className="px-4 py-3 text-slate-600 text-[11px] max-w-sm">{log.summary}</td>
+                      <td className="px-4 py-3 text-slate-500 text-[11px]">{log.actor_email || 'System'}</td>
+                      <td className="px-4 py-3 text-right">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          {log.status}
+                        </span>
+                        <div className="text-[10px] text-slate-400 mt-0.5">
+                          {new Date(log.created_at).toLocaleString()}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
       )}
 
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {/* SLIDE-OUT REALTIME API INSPECTOR DRAWER */}
-      {/* ─────────────────────────────────────────────────────────────── */}
-      {isInspectorOpen && (
-        <aside className="fixed top-0 right-0 h-full w-full max-w-lg bg-slate-900 text-slate-100 z-50 shadow-2xl border-l border-slate-800 flex flex-col animate-in slide-in-from-right duration-200">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
-            <div className="flex items-center gap-2">
-              <Terminal className="w-4 h-4 text-blue-400" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                Live CMS Gateway Telemetry
+      {/* ─────────────────────────────────────────────────────────────────── */}
+      {/* MODALS                                                              */}
+      {/* ─────────────────────────────────────────────────────────────────── */}
+
+      {/* Modal: Add or Edit CMS Page */}
+      {isCreatePageOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-bold text-slate-900">
+                {editingPage ? `Edit Page: ${editingPage.title}` : 'Add New Website Page / Article'}
               </h3>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={clearActivityLogs}
-                className="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800/80"
-              >
-                Clear
+              <button onClick={() => setIsCreatePageOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-5 h-5" />
               </button>
-              <button
-                onClick={() => setIsInspectorOpen(false)}
-                className="text-slate-400 hover:text-white p-1 rounded"
-              >
+            </div>
+
+            <form onSubmit={handleCreateOrUpdatePage} className="space-y-3.5 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Title</label>
+                  <input
+                    type="text"
+                    value={newPage.title}
+                    onChange={(e) => setNewPage({ ...newPage, title: e.target.value })}
+                    placeholder="e.g. Corporate Intelligence Platform"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Slug (URL Path Component)</label>
+                  <input
+                    type="text"
+                    value={newPage.slug}
+                    onChange={(e) => setNewPage({ ...newPage, slug: e.target.value })}
+                    placeholder="corporate-intelligence-platform"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Page ID</label>
+                  <input
+                    type="text"
+                    value={newPage.page_id}
+                    onChange={(e) => setNewPage({ ...newPage, page_id: e.target.value })}
+                    placeholder="PAGE-SOLUTIONS-001"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Page Type</label>
+                  <select
+                    value={newPage.page_type}
+                    onChange={(e) => setNewPage({ ...newPage, page_type: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+                  >
+                    <option value="PAGE">Web Page</option>
+                    <option value="ARTICLE">Blog Article</option>
+                    <option value="LANDING">Landing Page</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Status</label>
+                  <select
+                    value={newPage.status}
+                    onChange={(e) => setNewPage({ ...newPage, status: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+                  >
+                    <option value="PUBLISHED">Published</option>
+                    <option value="DRAFT">Draft</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Page Path</label>
+                  <input
+                    type="text"
+                    value={newPage.page_path}
+                    onChange={(e) => setNewPage({ ...newPage, page_path: e.target.value })}
+                    placeholder="/solutions/corporate-intelligence"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">GA Measurement ID for Page</label>
+                  <input
+                    type="text"
+                    value={newPage.ga_page_id}
+                    onChange={(e) => setNewPage({ ...newPage, ga_page_id: e.target.value })}
+                    placeholder="G-MKTINTEL01"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Summary / Excerpt</label>
+                <textarea
+                  rows="2"
+                  value={newPage.summary}
+                  onChange={(e) => setNewPage({ ...newPage, summary: e.target.value })}
+                  placeholder="Short description of this page..."
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Page Content (Markdown / HTML)</label>
+                <textarea
+                  rows="5"
+                  value={newPage.content}
+                  onChange={(e) => setNewPage({ ...newPage, content: e.target.value })}
+                  placeholder="# Page Content&#10;&#10;Write page content here..."
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newPage.include_in_sitemap}
+                    onChange={(e) => setNewPage({ ...newPage, include_in_sitemap: e.target.checked })}
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span className="font-medium text-slate-700">Include in XML Sitemap</span>
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500 font-medium">Priority:</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    max="1.0"
+                    value={newPage.sitemap_priority}
+                    onChange={(e) => setNewPage({ ...newPage, sitemap_priority: e.target.value })}
+                    className="w-16 px-2 py-1 bg-slate-50 border border-slate-200 rounded text-center font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreatePageOpen(false)}
+                  className="px-4 py-2 border border-slate-200 rounded-lg font-bold text-slate-700 hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingPage}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold transition disabled:opacity-50"
+                >
+                  {creatingPage ? 'Saving...' : editingPage ? 'Update Page' : 'Save Page'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Sitemap XML Inspector */}
+      {isSitemapModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-3xl max-h-[85vh] overflow-hidden p-6 shadow-xl flex flex-col space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Live XML Sitemap Preview</h3>
+                <p className="text-xs text-slate-500">
+                  Direct generated sitemap from published Market Intel CMS pages ({sitemapXmlData?.url_count || 0} URLs).
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => copyToClipboard(sitemapXmlData?.xml, 'Sitemap XML copied!')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-900 text-white rounded-md text-xs font-bold"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  Copy XML
+                </button>
+                <button onClick={() => setIsSitemapModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto bg-slate-950 text-emerald-400 font-mono text-[11px] p-4 rounded-xl border border-slate-800">
+              <pre className="whitespace-pre">
+                {loadingSitemapXml ? 'Generating live XML sitemap...' : sitemapXmlData?.xml || 'No sitemap data'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Record Analytics Stat */}
+      {isRecordStatOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Record Live Website Page Statistic</h3>
+              <button onClick={() => setIsRecordStatOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
                 <X className="w-4 h-4" />
               </button>
             </div>
-          </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            {activityLogs.length === 0 ? (
-              <div className="text-center py-16 text-slate-500 text-xs">
-                No requests captured yet. Perform actions in the CMS suite to stream real-time API logs.
+            <form onSubmit={handleRecordAnalyticsStat} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Page ID</label>
+                <input
+                  type="text"
+                  value={newStat.page_id}
+                  onChange={(e) => setNewStat({ ...newStat, page_id: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono"
+                  required
+                />
               </div>
-            ) : (
-              activityLogs.map((log) => {
-                const isSuccess = log.status >= 200 && log.status < 300;
-                return (
-                  <div
-                    key={log.id}
-                    className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs font-mono space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                            log.method === 'GET'
-                              ? 'bg-blue-900/60 text-blue-300'
-                              : log.method === 'POST'
-                              ? 'bg-emerald-900/60 text-emerald-300'
-                              : log.method === 'PATCH'
-                              ? 'bg-amber-900/60 text-amber-300'
-                              : 'bg-rose-900/60 text-rose-300'
-                          }`}
-                        >
-                          {log.method}
-                        </span>
-                        <span className="text-slate-300 truncate max-w-[220px]" title={log.path}>
-                          {log.path}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 text-[11px]">
-                        <span
-                          className={`font-bold ${isSuccess ? 'text-emerald-400' : 'text-rose-400'}`}
-                        >
-                          {log.status}
-                        </span>
-                        <span className="text-slate-500">{log.latency}ms</span>
-                      </div>
-                    </div>
 
-                    {log.responseData && (
-                      <pre className="text-[10px] p-2 bg-black/40 rounded text-slate-400 max-h-36 overflow-y-auto">
-                        {typeof log.responseData === 'object'
-                          ? JSON.stringify(log.responseData, null, 2)
-                          : log.responseData}
-                      </pre>
-                    )}
-                  </div>
-                );
-              })
-            )}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Page Title & Path</label>
+                <input
+                  type="text"
+                  value={newStat.page_title}
+                  onChange={(e) => setNewStat({ ...newStat, page_title: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg mb-2"
+                  placeholder="Page title"
+                  required
+                />
+                <input
+                  type="text"
+                  value={newStat.page_path}
+                  onChange={(e) => setNewStat({ ...newStat, page_path: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono"
+                  placeholder="/solutions/prospect-database"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Views</label>
+                  <input
+                    type="number"
+                    value={newStat.page_views}
+                    onChange={(e) => setNewStat({ ...newStat, page_views: parseInt(e.target.value) || 1 })}
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Visitors</label>
+                  <input
+                    type="number"
+                    value={newStat.unique_visitors}
+                    onChange={(e) => setNewStat({ ...newStat, unique_visitors: parseInt(e.target.value) || 1 })}
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Sessions</label>
+                  <input
+                    type="number"
+                    value={newStat.sessions}
+                    onChange={(e) => setNewStat({ ...newStat, sessions: parseInt(e.target.value) || 1 })}
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsRecordStatOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={recordingStat}
+                  className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold"
+                >
+                  {recordingStat ? 'Recording...' : 'Record Stat'}
+                </button>
+              </div>
+            </form>
           </div>
-        </aside>
+        </div>
+      )}
+
+      {/* Modal: Register GSC Domain */}
+      {isRegisterDomainOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Register Search Console Domain</h3>
+              <button onClick={() => setIsRegisterDomainOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRegisterDomain} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Domain Name or URL</label>
+                <input
+                  type="text"
+                  placeholder="e.g. marketintel.hikasimat.com"
+                  value={newDomain.domain}
+                  onChange={(e) => setNewDomain({ ...newDomain, domain: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Property Type</label>
+                  <select
+                    value={newDomain.property_type}
+                    onChange={(e) => setNewDomain({ ...newDomain, property_type: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+                  >
+                    <option value="DOMAIN">Domain Property</option>
+                    <option value="URL_PREFIX">URL Prefix</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Verification Method</label>
+                  <select
+                    value={newDomain.verification_method}
+                    onChange={(e) => setNewDomain({ ...newDomain, verification_method: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+                  >
+                    <option value="DNS_TXT">DNS TXT Record</option>
+                    <option value="HTML_META">HTML Meta Tag</option>
+                    <option value="HTML_FILE">HTML File</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsRegisterDomainOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={registeringDomain}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {registeringDomain ? 'Registering...' : 'Register Domain'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Submit GSC Sitemap */}
+      {isSubmitSitemapOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Submit Sitemap to Google</h3>
+              <button onClick={() => setIsSubmitSitemapOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitSitemap} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Sitemap URL</label>
+                <input
+                  type="url"
+                  value={sitemapUrlInput}
+                  onChange={(e) => setSitemapUrlInput(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsSubmitSitemapOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingSitemap}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {submittingSitemap ? 'Submitting...' : 'Submit Sitemap'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Edit Campaign Daily Budget */}
+      {budgetModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-sm p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Update Campaign Budget</h3>
+              <button onClick={() => setBudgetModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCampaignBudget} className="space-y-3 text-xs">
+              <p className="text-slate-600 font-semibold">{campaignForBudget?.name}</p>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">New Daily Budget ($/day)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="1"
+                  value={newBudgetVal}
+                  onChange={(e) => setNewBudgetVal(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-base font-bold text-slate-900 focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setBudgetModalOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingBudget}
+                  className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {updatingBudget ? 'Updating...' : 'Save Budget'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Create Campaign */}
+      {isCreateCampaignOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Create Google Ads Campaign</h3>
+              <button onClick={() => setIsCreateCampaignOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCampaign} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Campaign Name</label>
+                <input
+                  type="text"
+                  value={newCampaign.name}
+                  onChange={(e) => setNewCampaign({ ...newCampaign, name: e.target.value })}
+                  placeholder="e.g. Enterprise Search Q1"
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Channel Type</label>
+                  <select
+                    value={newCampaign.channel_type}
+                    onChange={(e) => setNewCampaign({ ...newCampaign, channel_type: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium"
+                  >
+                    <option value="SEARCH">Search</option>
+                    <option value="PERFORMANCE_MAX">Performance Max</option>
+                    <option value="DISPLAY">Display</option>
+                    <option value="VIDEO">Video / YouTube</option>
+                    <option value="DEMAND_GEN">Demand Gen</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Daily Budget ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="1"
+                    value={newCampaign.daily_budget}
+                    onChange={(e) => setNewCampaign({ ...newCampaign, daily_budget: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-bold"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Bidding Strategy</label>
+                <select
+                  value={newCampaign.bidding_strategy}
+                  onChange={(e) => setNewCampaign({ ...newCampaign, bidding_strategy: e.target.value })}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium"
+                >
+                  <option value="MAXIMIZE_CONVERSIONS">Maximize Conversions</option>
+                  <option value="MAXIMIZE_CLICKS">Maximize Clicks</option>
+                  <option value="TARGET_CPA">Target CPA</option>
+                  <option value="TARGET_ROAS">Target ROAS</option>
+                  <option value="MANUAL_CPC">Manual CPC</option>
+                </select>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateCampaignOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingCampaign}
+                  className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {creatingCampaign ? 'Creating...' : 'Create Campaign'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Google Ads Account Settings */}
+      {isAdsAccountConfigOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Google Ads Account Configuration</h3>
+              <button onClick={() => setIsAdsAccountConfigOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveAdsAccountConfig} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Customer ID</label>
+                <input
+                  type="text"
+                  value={adsAccountConfig.customer_id}
+                  onChange={(e) => setAdsAccountConfig({ ...adsAccountConfig, customer_id: e.target.value })}
+                  placeholder="742-891-3045"
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Account Descriptive Name</label>
+                <input
+                  type="text"
+                  value={adsAccountConfig.account_name}
+                  onChange={(e) => setAdsAccountConfig({ ...adsAccountConfig, account_name: e.target.value })}
+                  placeholder="Market Intel Growth Ads"
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Currency</label>
+                  <input
+                    type="text"
+                    value={adsAccountConfig.currency_code}
+                    onChange={(e) => setAdsAccountConfig({ ...adsAccountConfig, currency_code: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Time Zone</label>
+                  <input
+                    type="text"
+                    value={adsAccountConfig.time_zone}
+                    onChange={(e) => setAdsAccountConfig({ ...adsAccountConfig, time_zone: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAdsAccountConfigOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingAdsAccount}
+                  className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {savingAdsAccount ? 'Saving...' : 'Save Settings'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Create Ad Group */}
+      {isCreateAdGroupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Add New Ad Group</h3>
+              <button onClick={() => setIsCreateAdGroupOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateAdGroup} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Campaign</label>
+                <select
+                  value={newAdGroup.campaign_id}
+                  onChange={(e) => setNewAdGroup({ ...newAdGroup, campaign_id: e.target.value })}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                >
+                  <option value="">Select a Campaign</option>
+                  {(adsData?.campaigns || []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Ad Group Name</label>
+                <input
+                  type="text"
+                  value={newAdGroup.name}
+                  onChange={(e) => setNewAdGroup({ ...newAdGroup, name: e.target.value })}
+                  placeholder="e.g. Executive Outreach & M&A Data"
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Default Max CPC Bid ($)</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0.1"
+                  value={newAdGroup.cpc_bid}
+                  onChange={(e) => setNewAdGroup({ ...newAdGroup, cpc_bid: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-bold"
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateAdGroupOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingAdGroup}
+                  className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {creatingAdGroup ? 'Creating...' : 'Create Ad Group'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Create Keyword */}
+      {isCreateKeywordOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Add Keyword Criterion</h3>
+              <button onClick={() => setIsCreateKeywordOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateKeyword} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Target Ad Group</label>
+                <select
+                  value={newKeyword.ad_group_id}
+                  onChange={(e) => setNewKeyword({ ...newKeyword, ad_group_id: e.target.value })}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                >
+                  <option value="">Select Ad Group</option>
+                  {(adsData?.ad_groups || []).map((ag) => (
+                    <option key={ag.id} value={ag.id}>
+                      {ag.name} ({ag.campaign_name})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Keyword Text</label>
+                <input
+                  type="text"
+                  value={newKeyword.keyword_text}
+                  onChange={(e) => setNewKeyword({ ...newKeyword, keyword_text: e.target.value })}
+                  placeholder="e.g. corporate database software"
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Match Type</label>
+                  <select
+                    value={newKeyword.match_type}
+                    onChange={(e) => setNewKeyword({ ...newKeyword, match_type: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium"
+                  >
+                    <option value="EXACT">Exact Match</option>
+                    <option value="PHRASE">Phrase Match</option>
+                    <option value="BROAD">Broad Match</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">CPC Bid ($)</label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={newKeyword.cpc_bid}
+                    onChange={(e) => setNewKeyword({ ...newKeyword, cpc_bid: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateKeywordOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-slate-700 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingKeyword}
+                  className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold disabled:opacity-50"
+                >
+                  {creatingKeyword ? 'Adding...' : 'Add Keyword'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

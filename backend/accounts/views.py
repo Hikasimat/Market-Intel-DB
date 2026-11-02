@@ -627,16 +627,19 @@ class UserViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        # Prevent Manager from deleting ANY user account
         user = request.user
+        instance = self.get_object()
+        if instance.id == user.id:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You cannot delete your own account.")
         is_manager = (
             not user.is_superuser and
             hasattr(user, 'profile') and
             user.profile.role == 'MANAGER'
         )
-        if is_manager:
+        if is_manager and instance.is_superuser:
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Managers are not allowed to delete user accounts.")
+            raise PermissionDenied("Managers are not allowed to delete Super Admin accounts.")
         return super().destroy(request, *args, **kwargs)
 class _SuperOrManager(BasePermission):
     """Allows superuser or Manager role."""
@@ -938,6 +941,8 @@ class GmailMailboxViewSet(viewsets.ViewSet):
 
         # Handle Attachments
         files = request.FILES.getlist('attachments')
+        if not files and 'attachments[]' in request.FILES:
+            files = request.FILES.getlist('attachments[]')
         total_size = sum(f.size for f in files)
         if total_size > 25 * 1024 * 1024:
             return Response({'error': 'Total attachment size exceeds 25MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -949,33 +954,25 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             ext = f.name.split('.')[-1].lower() if '.' in f.name else ''
             if ext in ['exe', 'bat', 'cmd', 'js', 'ps1', 'vbs', 'scr']:
                 return Response({'error': f'File type .{ext} is not allowed.'}, status=status.HTTP_400_BAD_REQUEST)
-            mtype, _ = mimetypes.guess_type(f.name)
-            maintype, subtype = (mtype.split('/', 1)) if (mtype and '/' in mtype) else ('application', 'octet-stream')
-            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f.name)
+            mtype = getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
+            maintype, subtype = (mtype.split('/', 1)) if ('/' in mtype) else ('application', 'octet-stream')
+            f.seek(0)
+            file_bytes = f.read()
+            msg.add_attachment(file_bytes, maintype=maintype, subtype=subtype, filename=f.name)
             f.seek(0)
 
         thread_id = request.data.get('thread_id')
+        if thread_id in ('null', 'undefined', ''):
+            thread_id = None
         draft_id = request.data.get('draft_id')
+        if draft_id in ('null', 'undefined', ''):
+            draft_id = None
 
-        def send_via_gmail():
-            try:
-                GmailOAuthService.send_message(google_creds, msg.as_bytes(), thread_id=thread_id)
-                if draft_id:
-                    try:
-                        GmailOAuthService.delete_draft(google_creds, draft_id)
-                    except Exception:
-                        pass
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).error("Background Gmail send failed: %s", e)
-
-        import threading
-        t = threading.Thread(target=send_via_gmail)
-        t.start()
+        raw_msg_bytes = msg.as_bytes()
 
         # Create OutreachEmail tracking record for inbox email
         matched_prospect = None
-        from prospects.models import OutreachEmail, Prospect, ProspectContact, OutreachEmailRecipient
+        from prospects.models import OutreachEmail, Prospect, ProspectContact, OutreachEmailRecipient, EmailAttachment
         contact = ProspectContact.objects.filter(official_email__in=[t.lower() for t in to_list]).select_related('prospect').first()
         if contact and contact.prospect:
             matched_prospect = contact.prospect
@@ -1008,6 +1005,32 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             OutreachEmailRecipient.objects.create(outreach_email=outreach_email, email_address=addr, recipient_type='CC')
         for addr in bcc_list:
             OutreachEmailRecipient.objects.create(outreach_email=outreach_email, email_address=addr, recipient_type='BCC')
+
+        for f in files:
+            mtype = getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
+            EmailAttachment.objects.create(
+                outreach_email=outreach_email,
+                file=f,
+                original_filename=f.name,
+                mime_type=mtype,
+                size=f.size
+            )
+
+        def send_via_gmail():
+            try:
+                GmailOAuthService.send_message(google_creds, raw_msg_bytes, thread_id=thread_id)
+                if draft_id:
+                    try:
+                        GmailOAuthService.delete_draft(google_creds, draft_id)
+                    except Exception:
+                        pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error("Background Gmail send failed: %s", e)
+
+        import threading
+        t = threading.Thread(target=send_via_gmail)
+        t.start()
 
         if matched_prospect:
             from prospects.models import CommunicationActivity
@@ -1183,6 +1206,22 @@ class GmailMailboxViewSet(viewsets.ViewSet):
 
         html_body = html.escape(body).replace('\n', '<br>')
         msg.add_alternative(f'<div style="font-family: sans-serif;">{html_body}</div>', subtype='html')
+
+        import mimetypes
+        files = request.FILES.getlist('attachments')
+        if not files and 'attachments[]' in request.FILES:
+            files = request.FILES.getlist('attachments[]')
+        for f in files:
+            mtype = getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
+            maintype, subtype = (mtype.split('/', 1)) if ('/' in mtype) else ('application', 'octet-stream')
+            f.seek(0)
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f.name)
+            f.seek(0)
+
+        if draft_id in ('null', 'undefined', ''):
+            draft_id = None
+        if thread_id in ('null', 'undefined', ''):
+            thread_id = None
 
         try:
             res = GmailOAuthService.save_draft(google_creds, msg.as_bytes(), draft_id=draft_id, thread_id=thread_id)

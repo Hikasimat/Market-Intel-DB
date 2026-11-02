@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   CheckCircle,
   AlertTriangle,
   Phone,
@@ -54,11 +54,11 @@ const TimeSelect = ({ value, onChange, className }) => {
   return (
     <div className={`flex items-center gap-1 ${className || ''}`}>
       <select value={h} onChange={(e) => updateTime(e.target.value, m, ampm)} className="p-2 flex-1 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 text-center font-bold">
-        {Array.from({length: 12}, (_, i) => String(i+1).padStart(2, '0')).map(hr => <option key={hr} value={hr}>{hr}</option>)}
+        {Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0')).map(hr => <option key={hr} value={hr}>{hr}</option>)}
       </select>
       <span className="font-bold text-slate-700">:</span>
       <select value={m} onChange={(e) => updateTime(h, e.target.value, ampm)} className="p-2 flex-1 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 text-center font-bold">
-        {Array.from({length: 60}, (_, i) => String(i).padStart(2, '0')).map(min => <option key={min} value={min}>{min}</option>)}
+        {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(min => <option key={min} value={min}>{min}</option>)}
       </select>
       <select value={ampm} onChange={(e) => updateTime(h, m, e.target.value)} className="p-2 flex-1 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 text-center font-bold">
         <option value="AM">AM</option>
@@ -68,7 +68,7 @@ const TimeSelect = ({ value, onChange, className }) => {
   );
 };
 
-export default function LqWorkspaceModal({ 
+export default function LqWorkspaceModal({
   selectedLq,
   initialTab = 'verification',
   onClose,
@@ -84,7 +84,7 @@ export default function LqWorkspaceModal({
   const [activeTab, setActiveTab] = useState(initialTab);
   const dispatch = useDispatch();
   const { user } = useSelector(state => state.auth);
-  
+
   // Dynamic prospect and LQ state
   const [currentProspect, setCurrentProspect] = useState(selectedLq?.prospect || {});
   const [currentLq, setCurrentLq] = useState(selectedLq);
@@ -241,7 +241,7 @@ export default function LqWorkspaceModal({
   const [ivrExtension, setIvrExtension] = useState('');
   const [communicationOutcome, setCommunicationOutcome] = useState(selectedLq?.qualification_status === 'Lead Qualified' ? 'Lead Qualified' : '');
   const [callTranscriptNotes, setCallTranscriptNotes] = useState('');
-  
+
   // Key People selection for call
   const [selectedContactId, setSelectedContactId] = useState('');
   const [selectedContactData, setSelectedContactData] = useState(null);
@@ -257,7 +257,7 @@ export default function LqWorkspaceModal({
 
   useEffect(() => {
     if (requestedEmailConfirm && requestedEmailConfirm.trim()) {
-      const found = prospect?.key_contacts?.find(c => 
+      const found = prospect?.key_contacts?.find(c =>
         c.official_email && c.official_email.toLowerCase() === requestedEmailConfirm.toLowerCase()
       );
       if (found) {
@@ -280,13 +280,13 @@ export default function LqWorkspaceModal({
   const [sharedContactPhone, setSharedContactPhone] = useState('');
   const [sharedContactEmail, setSharedContactEmail] = useState('');
   const [attendedMeeting, setAttendedMeeting] = useState(false);
-  
+
   const [duplicateContact, setDuplicateContact] = useState(null);
   const [useDuplicateContact, setUseDuplicateContact] = useState(false);
 
   useEffect(() => {
     if ((sharedContactEmail && sharedContactEmail.trim()) || (sharedContactPhone && sharedContactPhone.trim())) {
-      const found = prospect?.key_contacts?.find(c => 
+      const found = prospect?.key_contacts?.find(c =>
         (sharedContactEmail && c.official_email && c.official_email.toLowerCase() === sharedContactEmail.toLowerCase()) ||
         (sharedContactPhone && c.phone_number && c.phone_number === sharedContactPhone)
       );
@@ -321,7 +321,7 @@ export default function LqWorkspaceModal({
   });
   const [inboundTime, setInboundTime] = useState(() => {
     const d = new Date();
-    return d.toTimeString().slice(0,5);
+    return d.toTimeString().slice(0, 5);
   });
 
   // Backend Outreach Logs State
@@ -338,14 +338,14 @@ export default function LqWorkspaceModal({
           setEmailCollapsed(freshStatus !== 'Not Sent');
         })
         .catch(err => console.error('Failed to fetch fresh LQ data', err));
-      
+
       // Also fetch outreach logs immediately on open (not just on tab switch)
       fetchOutreachLogs();
-        
+
       // Fetch sender mail account status
       api.get('/auth/mail-account/')
         .then(res => {
-          if(res.data && res.data.length > 0) {
+          if (res.data && res.data.length > 0) {
             setSenderMailStatus(res.data[0]);
           }
         }).catch(err => console.error('Failed to fetch mail account', err));
@@ -372,7 +372,7 @@ export default function LqWorkspaceModal({
 
     return () => clearInterval(interval);
   }, [selectedLq?.id, emailProgress, dispatch]);
-  
+
   const fetchOutreachLogs = async (contactId) => {
     try {
       const logs = await dispatch(fetchCommunications(prospect.id)).unwrap();
@@ -408,7 +408,7 @@ export default function LqWorkspaceModal({
       ? outreachLogs.filter(log => log.prospect_contact === contactId && log.activity_type === 'CALL')
       : outreachLogs.filter(log => !log.prospect_contact && log.activity_type === 'CALL');
     const latest = relevantLogs[0];
-    
+
     if (latest && (latest.outcome === 'Lead Qualified' || latest.outcome === 'Not Interested')) {
       return true;
     }
@@ -579,7 +579,7 @@ export default function LqWorkspaceModal({
     if (ccEmails.includes(email)) setCcEmails(ccEmails.filter(e => e !== email));
     else setCcEmails([...ccEmails, email]);
   };
-const handleAddCustomRecipient = (e) => {
+  const handleAddCustomRecipient = (e) => {
     e.preventDefault();
     const em = customRecipientInput.trim();
     if (em && !ccEmails.includes(em) && !toEmails.includes(em)) {
@@ -593,7 +593,7 @@ const handleAddCustomRecipient = (e) => {
     setAttachmentError('');
     let validFiles = [];
     let currentTotalSize = attachments.reduce((acc, file) => acc + file.size, 0);
-    
+
     for (const file of files) {
       if (file.size > 10 * 1024 * 1024) {
         setAttachmentError(`File ${file.name} exceeds the 10MB limit.`);
@@ -625,7 +625,7 @@ const handleAddCustomRecipient = (e) => {
     e.preventDefault();
     if (toEmails.length === 0 && ccEmails.length === 0) return;
     if (isSendingEmail) return;
-    
+
     setIsSendingEmail(true);
     try {
       const formData = new FormData();
@@ -638,7 +638,7 @@ const handleAddCustomRecipient = (e) => {
         formData.append('body_edited', String(!templateSelection.templateId || emailBody !== templateSelection.baseBody));
       }
       formData.append('open_tracking_enabled', String(openTrackingEnabled));
-      
+
       const recList = [
         ...toEmails.map(r => ({ email_address: r, recipient_type: 'TO' })),
         ...ccEmails.map(r => ({ email_address: r, recipient_type: 'CC' }))
@@ -648,13 +648,13 @@ const handleAddCustomRecipient = (e) => {
       attachments.forEach(file => {
         formData.append('attachments', file);
       });
-      
+
       const res = await dispatch(sendOutreachEmail(formData)).unwrap();
-      
+
       // Update UI explicitly on success
       setEmailProgress('Waiting for Response');
       setEmailCollapsed(true);
-      
+
       fetchOutreachLogs();
       toast.success("Email sent successfully!");
       notifyMailSent();
@@ -672,7 +672,7 @@ const handleAddCustomRecipient = (e) => {
     if (['Sent', 'Waiting for Response', 'Received Response'].includes(status)) {
       setEmailCollapsed(true);
     }
-    
+
     try {
       await api.patch(`/lq-pipeline/${selectedLq.id}/`, { email_status: status });
       // Depending on requirements, we can also manually create a CommunicationActivity here, 
@@ -692,14 +692,14 @@ const handleAddCustomRecipient = (e) => {
       setCallError('Notes are required for inbound communications.');
       return;
     }
-    
+
     setCallError('');
     setIsSubmittingActivity(true);
     try {
       const callPhone = selectedContactId
         ? (prospect?.key_contacts?.find(c => c.id === selectedContactId)?.phone_number || prospect.official_phone_number || '')
         : (prospect.official_phone_number || '');
-        
+
       await dispatch(recordCall({
         prospect: prospect.id,
         prospect_contact: selectedContactId || null,
@@ -733,7 +733,7 @@ const handleAddCustomRecipient = (e) => {
         setCallError('Please select a Communication Progress Outcome (Step 2).');
         return;
       }
-      
+
       // 1b. If calling general company line, must provide Person Contacted
       if (selectedContactId === '') {
         if (!generalCallSpokeTo.trim()) {
@@ -802,7 +802,7 @@ const handleAddCustomRecipient = (e) => {
       if (generalCallDesignation.trim()) spokeStr.push(`(${generalCallDesignation.trim()})`);
       detailsParts.push(`Spoke To: ${spokeStr.join(' ')}`);
     }
-    
+
     if (callStatus === 'Connected' && communicationOutcome) {
       if (communicationOutcome === 'Requested Email') detailsParts.push(`Outcome: Requested Email (Confirmed: ${requestedEmailConfirm})`);
       else if (communicationOutcome === 'Call Back Later') {
@@ -818,11 +818,11 @@ const handleAddCustomRecipient = (e) => {
         detailsParts.push(`Agenda: ${leadQualifiedDescription}`);
       }
     }
-    
+
     if (callTranscriptNotes.trim()) detailsParts.push(`Notes: ${callTranscriptNotes.trim()}`);
-    
+
     let callOutcome = communicationOutcome || '';
-    
+
     // Check if we need to create a new Requested Email contact
     if (callStatus === 'Connected' && communicationOutcome === 'Requested Email' && !duplicateRequestedEmailContact) {
       try {
@@ -840,7 +840,7 @@ const handleAddCustomRecipient = (e) => {
         return;
       }
     }
-    
+
     try {
       const callPhone = selectedContactId
         ? (prospect?.key_contacts?.find(c => c.id === selectedContactId)?.phone_number || prospect.official_phone_number || '')
@@ -854,7 +854,7 @@ const handleAddCustomRecipient = (e) => {
         ivr_extension: ivrExtension,
         notes: detailsParts.join(' | ')
       })).unwrap();
-      
+
       // If Invalid Number, report issue to PRE and close
       if (callStatus === 'Invalid Number') {
         try {
@@ -879,7 +879,7 @@ const handleAddCustomRecipient = (e) => {
       setCallError('Failed to save activity. Please try again.');
       return;
     }
-    
+
     setCallTranscriptNotes('');
     setCommunicationOutcome('');
     setCallError('');
@@ -891,7 +891,7 @@ const handleAddCustomRecipient = (e) => {
           const scheduled_datetime = localDateTimeToUTC(callbackDate, callbackTime, user?.timezone);
           api.post('/reminders/', { prospect: prospect.id, prospect_contact: selectedContactId || null, scheduled_datetime, description: callbackDescription || 'Call Back Later' });
           setCallbackDate(''); setCallbackTime(''); setCallbackDescription('');
-        } catch (e) {}
+        } catch (e) { }
       }
     }
 
@@ -951,16 +951,16 @@ const handleAddCustomRecipient = (e) => {
           }
         }
 
-        await api.patch(`/lq-pipeline/${selectedLq.id}/`, { 
-            qualification_status: 'Lead Qualified',
-            attended_meeting: attendedMeeting 
+        await api.patch(`/lq-pipeline/${selectedLq.id}/`, {
+          qualification_status: 'Lead Qualified',
+          attended_meeting: attendedMeeting
         });
 
         toast.success(
           savedMeeting?.meeting_provider === 'GOOGLE_MEET'
             ? (savedMeeting.conference_status === 'CONFIRMED'
-                ? 'Meeting scheduled with Google Meet! Link ready.'
-                : 'Meeting scheduled. Google Meet link is being generated.')
+              ? 'Meeting scheduled with Google Meet! Link ready.'
+              : 'Meeting scheduled. Google Meet link is being generated.')
             : 'Activity saved successfully. Lead Qualified!'
         );
       } catch (err) {
@@ -982,7 +982,7 @@ const handleAddCustomRecipient = (e) => {
       }
       return;
     }
-    
+
     toast.success("Activity saved successfully.");
   };
 
@@ -1030,8 +1030,8 @@ const handleAddCustomRecipient = (e) => {
   // Helper for automated issues
   const incorrectFields = Object.keys(verificationFields).filter(key => verificationFields[key] === 'Incorrect');
   const autoIssueCategory = incorrectFields.map(key => fieldNames[key]).join(', ');
-  const autoDetails = incorrectFields.length > 0 
-    ? `The following fields are incorrect and need to be fixed by PRE:\n${incorrectFields.map(k => `- ${fieldNames[k]}`).join('\n')}` 
+  const autoDetails = incorrectFields.length > 0
+    ? `The following fields are incorrect and need to be fixed by PRE:\n${incorrectFields.map(k => `- ${fieldNames[k]}`).join('\n')}`
     : '';
 
   return (
@@ -1056,18 +1056,16 @@ const handleAddCustomRecipient = (e) => {
           <div className="bg-slate-100 border-b border-slate-200 px-6 pt-3 flex items-center gap-2 shrink-0">
             <button
               onClick={() => setActiveTab('verification')}
-              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${
-                activeTab === 'verification' ? 'bg-white text-slate-900 border-t-2 border-sky-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-              }`}
+              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${activeTab === 'verification' ? 'bg-white text-slate-900 border-t-2 border-sky-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                }`}
             >
               <Shield className={`w-4 h-4 ${activeTab === 'verification' ? 'text-sky-600' : 'text-slate-400'}`} />
               <span>Field Verification & Data Details</span>
             </button>
             <button
               onClick={() => setActiveTab('outreach')}
-              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${
-                activeTab === 'outreach' ? 'bg-white text-slate-900 border-t-2 border-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-              }`}
+              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${activeTab === 'outreach' ? 'bg-white text-slate-900 border-t-2 border-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                }`}
             >
               {isVerified ? (
                 <Phone className={`w-4 h-4 ${activeTab === 'outreach' ? 'text-emerald-600' : 'text-slate-400'}`} />
@@ -1199,22 +1197,22 @@ const handleAddCustomRecipient = (e) => {
                   </div>
                 </div>
               </div>
-              
+
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-200">
                 {hasIncorrect ? (
                   <button onClick={handleSubmitIssue} className="px-5 py-2 text-sm font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition shadow-sm flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4" /> Submit Issue to PRE
                   </button>
                 ) : allCorrect ? (
-                  <button onClick={async () => { 
+                  <button onClick={async () => {
                     if (isConfirmingFixes) {
                       await dispatch(confirmReverification(selectedLq.id));
                     }
                     if (!localVerified) {
-                      await handleReadyForOutreach(true); 
+                      await handleReadyForOutreach(true);
                       setLocalVerified(true);
                     }
-                    setActiveTab('outreach'); 
+                    setActiveTab('outreach');
                   }} className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition shadow-sm flex items-center gap-2">
                     <CheckCircle className="w-4 h-4" /> {(selectedLq?.verification_status === 'Verified' || localVerified) ? 'Move back to Outreach' : 'Ready for Outreach'}
                   </button>
@@ -1261,13 +1259,12 @@ const handleAddCustomRecipient = (e) => {
                               <button
                                 type="button"
                                 onClick={() => handleOpenTrackingModal()}
-                                className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold uppercase border flex items-center gap-1 cursor-pointer transition hover:scale-105 ${
-                                  sentEmailData?.open_tracking_enabled === false
+                                className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold uppercase border flex items-center gap-1 cursor-pointer transition hover:scale-105 ${sentEmailData?.open_tracking_enabled === false
                                     ? 'bg-slate-800 text-slate-400 border-slate-700'
                                     : sentEmailData?.is_opened
                                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
                                       : 'bg-slate-700 text-slate-300 border-slate-600'
-                                }`}
+                                  }`}
                                 title={sentEmailData?.open_tracking_enabled === false ? 'Open tracking was disabled for deliverability' : 'Click to view detailed email tracking analytics'}
                               >
                                 {sentEmailData?.open_tracking_enabled === false
@@ -1349,7 +1346,7 @@ const handleAddCustomRecipient = (e) => {
                                 </label>
                               </div>
                             ))}
-                            
+
                             {prospect?.official_email_address && (
                               <div className={`flex flex-col gap-2 p-2.5 rounded-xl border transition ${ccEmails.includes(prospect.official_email_address) ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200'}`}>
                                 <label className="flex items-center gap-2.5 cursor-pointer">
@@ -1367,104 +1364,104 @@ const handleAddCustomRecipient = (e) => {
                               (prospect?.official_email_address && prospect.official_email_address.trim()) ||
                               (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
                             ) && currentLq?.pre_task_status === 'PRE_UPDATED' && (
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-emerald-50 border border-emerald-300 rounded-xl mb-1">
-                                <div className="flex items-center gap-2">
-                                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                                  <span className="text-xs font-bold text-emerald-950">
-                                    PRE updated the email address! Click confirm to finalize.
-                                  </span>
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-emerald-50 border border-emerald-300 rounded-xl mb-1">
+                                  <div className="flex items-center gap-2">
+                                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                                    <span className="text-xs font-bold text-emerald-950">
+                                      PRE updated the email address! Click confirm to finalize.
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={handleConfirmPreUpdate}
+                                    disabled={isConfirmingPreUpdate}
+                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shrink-0 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  >
+                                    <CheckCircle className="w-3.5 h-3.5" /> Confirm Fixes
+                                  </button>
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={handleConfirmPreUpdate}
-                                  disabled={isConfirmingPreUpdate}
-                                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shrink-0 flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                >
-                                  <CheckCircle className="w-3.5 h-3.5" /> Confirm Fixes
-                                </button>
-                              </div>
-                            )}
+                              )}
 
                             {/* Handling when NO emails are available */}
                             {!Boolean(
                               (prospect?.official_email_address && prospect.official_email_address.trim()) ||
                               (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
                             ) && (
-                              <div className="rounded-2xl border p-4 shadow-sm transition-all bg-white">
-                                {localIssueSent || currentLq?.pre_task_status === 'ISSUE_SENT_TO_PRE' ? (
-                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl">
-                                    <div className="flex items-start gap-3">
-                                      <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
-                                        <Clock className="w-4 h-4 animate-spin text-amber-600" />
-                                      </div>
-                                      <div>
-                                        <div className="flex items-center gap-2">
-                                          <span className="font-black text-amber-900 text-xs uppercase tracking-wide">Missing Email Task Sent to PRE</span>
-                                          <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-800 text-[10px] font-extrabold">In Progress</span>
+                                <div className="rounded-2xl border p-4 shadow-sm transition-all bg-white">
+                                  {localIssueSent || currentLq?.pre_task_status === 'ISSUE_SENT_TO_PRE' ? (
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl">
+                                      <div className="flex items-start gap-3">
+                                        <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
+                                          <Clock className="w-4 h-4 animate-spin text-amber-600" />
                                         </div>
-                                        <p className="text-xs text-amber-800 mt-1">
-                                          A task has been assigned to PRE to find and enter the missing email address. Once PRE completes this task, you will receive a confirmation here to proceed.
-                                        </p>
-                                      </div>
-                                    </div>
-                                    <button
-                                      type="button"
-                                      onClick={refreshProspectDetails}
-                                      className="px-3.5 py-1.5 bg-white border border-amber-300 hover:bg-amber-100/50 text-amber-900 font-extrabold text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer"
-                                    >
-                                      <RefreshCw className="w-3.5 h-3.5 text-amber-700" /> Check Status
-                                    </button>
-                                  </div>
-                                ) : currentLq?.pre_task_status === 'PRE_UPDATED' ? (
-                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl">
-                                    <div className="flex items-start gap-3">
-                                      <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
-                                        <CheckCircle className="w-4 h-4 text-emerald-600" />
-                                      </div>
-                                      <div>
-                                        <div className="flex items-center gap-2">
-                                          <span className="font-black text-emerald-950 text-xs uppercase tracking-wide">PRE Task Completed</span>
-                                          <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold">Ready to Confirm</span>
+                                        <div>
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-black text-amber-900 text-xs uppercase tracking-wide">Missing Email Task Sent to PRE</span>
+                                            <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-800 text-[10px] font-extrabold">In Progress</span>
+                                          </div>
+                                          <p className="text-xs text-amber-800 mt-1">
+                                            A task has been assigned to PRE to find and enter the missing email address. Once PRE completes this task, you will receive a confirmation here to proceed.
+                                          </p>
                                         </div>
-                                        <p className="text-xs text-emerald-800 mt-1">
-                                          PRE has updated the master data for this prospect. Please confirm to refresh and proceed with your email outreach.
-                                        </p>
                                       </div>
+                                      <button
+                                        type="button"
+                                        onClick={refreshProspectDetails}
+                                        className="px-3.5 py-1.5 bg-white border border-amber-300 hover:bg-amber-100/50 text-amber-900 font-extrabold text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer"
+                                      >
+                                        <RefreshCw className="w-3.5 h-3.5 text-amber-700" /> Check Status
+                                      </button>
                                     </div>
-                                    <button
-                                      type="button"
-                                      onClick={handleConfirmPreUpdate}
-                                      disabled={isConfirmingPreUpdate}
-                                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                                    >
-                                      <CheckCircle className="w-3.5 h-3.5" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed'}
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/50 border border-amber-200 rounded-xl">
-                                    <div className="flex items-start gap-3">
-                                      <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
-                                        <AlertTriangle className="w-4 h-4 text-amber-600" />
+                                  ) : currentLq?.pre_task_status === 'PRE_UPDATED' ? (
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl">
+                                      <div className="flex items-start gap-3">
+                                        <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
+                                          <CheckCircle className="w-4 h-4 text-emerald-600" />
+                                        </div>
+                                        <div>
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-black text-emerald-950 text-xs uppercase tracking-wide">PRE Task Completed</span>
+                                            <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold">Ready to Confirm</span>
+                                          </div>
+                                          <p className="text-xs text-emerald-800 mt-1">
+                                            PRE has updated the master data for this prospect. Please confirm to refresh and proceed with your email outreach.
+                                          </p>
+                                        </div>
                                       </div>
-                                      <div>
-                                        <span className="font-black text-amber-950 text-xs uppercase tracking-wide block">No Email Address Available</span>
-                                        <p className="text-xs text-amber-800 mt-1 leading-relaxed">
-                                          The email address was not entered for this prospect. You cannot send an introduction email without an email address. Send this to PRE as a task to find and enter the missing email.
-                                        </p>
-                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={handleConfirmPreUpdate}
+                                        disabled={isConfirmingPreUpdate}
+                                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                                      >
+                                        <CheckCircle className="w-3.5 h-3.5" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed'}
+                                      </button>
                                     </div>
-                                    <button
-                                      type="button"
-                                      onClick={handleSendMissingEmailToPre}
-                                      disabled={isReportingMissingEmail}
-                                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                                    >
-                                      <Send className="w-3.5 h-3.5" /> {isReportingMissingEmail ? 'Sending Task...' : 'Send Task to PRE'}
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                                  ) : (
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/50 border border-amber-200 rounded-xl">
+                                      <div className="flex items-start gap-3">
+                                        <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
+                                          <AlertTriangle className="w-4 h-4 text-amber-600" />
+                                        </div>
+                                        <div>
+                                          <span className="font-black text-amber-950 text-xs uppercase tracking-wide block">No Email Address Available</span>
+                                          <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                                            The email address was not entered for this prospect. You cannot send an introduction email without an email address. Send this to PRE as a task to find and enter the missing email.
+                                          </p>
+                                        </div>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={handleSendMissingEmailToPre}
+                                        disabled={isReportingMissingEmail}
+                                        className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                                      >
+                                        <Send className="w-3.5 h-3.5" /> {isReportingMissingEmail ? 'Sending Task...' : 'Send Task to PRE'}
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
                             {ccEmails.filter(email => email !== prospect?.official_email_address).map((email) => (
                               <label key={email} className="flex items-center gap-2.5 p-2.5 rounded-xl border transition cursor-pointer bg-slate-50 border-indigo-200 text-slate-800 font-bold">
@@ -1506,10 +1503,10 @@ const handleAddCustomRecipient = (e) => {
                         <div>
                           <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Attachments</label>
                           <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
-                            <input 
-                              type="file" 
-                              multiple 
-                              onChange={handleFileChange} 
+                            <input
+                              type="file"
+                              multiple
+                              onChange={handleFileChange}
                               disabled={isEmailSent}
                               className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             />
@@ -1531,10 +1528,10 @@ const handleAddCustomRecipient = (e) => {
                           </div>
                         </div>
                         <div className="py-2">
-                          <OpenTrackingToggle 
-                            checked={openTrackingEnabled} 
-                            onChange={setOpenTrackingEnabled} 
-                            disabled={isSendingEmail || isEmailSent} 
+                          <OpenTrackingToggle
+                            checked={openTrackingEnabled}
+                            onChange={setOpenTrackingEnabled}
+                            disabled={isSendingEmail || isEmailSent}
                           />
                         </div>
                         <div className="flex items-center justify-between border-t border-slate-200 pt-3">
@@ -1582,14 +1579,14 @@ const handleAddCustomRecipient = (e) => {
                     ) : (
                       <>
                         <div className="flex border-b border-slate-200">
-                          <button 
+                          <button
                             type="button"
                             onClick={() => setInboundMode(false)}
                             className={`flex-1 py-3 text-xs font-bold transition-all border-b-2 ${!inboundMode ? 'border-indigo-600 text-indigo-700 bg-indigo-50/30' : 'border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
                           >
                             Outbound Call
                           </button>
-                          <button 
+                          <button
                             type="button"
                             onClick={() => setInboundMode(true)}
                             className={`flex-1 py-3 text-xs font-bold transition-all border-b-2 ${inboundMode ? 'border-emerald-600 text-emerald-700 bg-emerald-50/30' : 'border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
@@ -1597,344 +1594,343 @@ const handleAddCustomRecipient = (e) => {
                             Inbound Call/Message
                           </button>
                         </div>
-                      <form onSubmit={inboundMode ? handleSaveInbound : handleLogCallOutcome} className="p-5 space-y-5 text-xs">
-                        {/* Key People Dropdown + Phone Display */}
-                        <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
-                          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-                            <div className="flex-1">
-                              <label className="block font-extrabold text-slate-700 text-[10px] uppercase tracking-wider mb-1.5">Select Key Person</label>
-                              <select
-                                value={selectedContactId}
-                                onChange={(e) => {
-                                  const id = e.target.value;
-                                  setSelectedContactId(id);
-                                  const contact = prospect?.key_contacts?.find(c => c.id === id);
-                                  setSelectedContactData(contact || null);
-                                  setCallStatus('Connected');
-                                  setCommunicationOutcome('');
-                                  setCallTranscriptNotes('');
-                                  // Load existing logs for this contact
-                                  const relevantLogs = id
-                                    ? outreachLogs.filter(log => log.prospect_contact === id && log.activity_type === 'CALL')
-                                    : outreachLogs.filter(log => !log.prospect_contact && log.activity_type === 'CALL');
-                                  const latestCall = relevantLogs[0];
-                                  if (latestCall) {
-                                    setCallStatus(latestCall.status || 'Connected');
-                                    setCommunicationOutcome(latestCall.outcome || '');
-                                  }
-                                }}
-                                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all cursor-pointer"
-                              >
-                                <option value="">
-                                  Company Official Number (General) {getGeneralLatestCall() ? ` - ${getGeneralLatestCall()}` : ''}
-                                </option>
-                                {prospect?.key_contacts?.map(contact => {
-                                  const callStatusStr = getContactLatestCall(contact.id);
-                                  return (
-                                    <option key={contact.id} value={contact.id}>
-                                      {contact.contact_name}{contact.designation ? ` - ${contact.designation}` : ''}
-                                      {callStatusStr ? ` - ${callStatusStr}` : ''}
-                                    </option>
-                                  );
-                                })}
-                              </select>
+                        <form onSubmit={inboundMode ? handleSaveInbound : handleLogCallOutcome} className="p-5 space-y-5 text-xs">
+                          {/* Key People Dropdown + Phone Display */}
+                          <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
+                            <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                              <div className="flex-1">
+                                <label className="block font-extrabold text-slate-700 text-[10px] uppercase tracking-wider mb-1.5">Select Key Person</label>
+                                <select
+                                  value={selectedContactId}
+                                  onChange={(e) => {
+                                    const id = e.target.value;
+                                    setSelectedContactId(id);
+                                    const contact = prospect?.key_contacts?.find(c => c.id === id);
+                                    setSelectedContactData(contact || null);
+                                    setCallStatus('Connected');
+                                    setCommunicationOutcome('');
+                                    setCallTranscriptNotes('');
+                                    // Load existing logs for this contact
+                                    const relevantLogs = id
+                                      ? outreachLogs.filter(log => log.prospect_contact === id && log.activity_type === 'CALL')
+                                      : outreachLogs.filter(log => !log.prospect_contact && log.activity_type === 'CALL');
+                                    const latestCall = relevantLogs[0];
+                                    if (latestCall) {
+                                      setCallStatus(latestCall.status || 'Connected');
+                                      setCommunicationOutcome(latestCall.outcome || '');
+                                    }
+                                  }}
+                                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all cursor-pointer"
+                                >
+                                  <option value="">
+                                    Company Official Number (General) {getGeneralLatestCall() ? ` - ${getGeneralLatestCall()}` : ''}
+                                  </option>
+                                  {prospect?.key_contacts?.map(contact => {
+                                    const callStatusStr = getContactLatestCall(contact.id);
+                                    return (
+                                      <option key={contact.id} value={contact.id}>
+                                        {contact.contact_name}{contact.designation ? ` - ${contact.designation}` : ''}
+                                        {callStatusStr ? ` - ${callStatusStr}` : ''}
+                                      </option>
+                                    );
+                                  })}
+                                </select>
+                              </div>
+                              {!inboundMode && (
+                                <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                                  <label className="text-xs font-bold text-slate-700 whitespace-nowrap">IVR Ext:</label>
+                                  <input type="text" value={ivrExtension} onChange={(e) => setIvrExtension(e.target.value)} placeholder="e.g. Ext. 104" className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-extrabold text-slate-900 w-28 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                                </div>
+                              )}
                             </div>
-                            {!inboundMode && (
-                              <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-                                <label className="text-xs font-bold text-slate-700 whitespace-nowrap">IVR Ext:</label>
-                                <input type="text" value={ivrExtension} onChange={(e) => setIvrExtension(e.target.value)} placeholder="e.g. Ext. 104" className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-extrabold text-slate-900 w-28 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
-                            <Phone className="w-4 h-4 text-slate-500 shrink-0" />
-                            {selectedContactId && selectedContactData ? (
-                              <div className="flex items-center gap-2 w-full">
-                                <span className="font-extrabold text-slate-800 text-xs">
-                                  {selectedContactData.contact_name}: <span className="text-slate-600 font-medium">{selectedContactData.phone_number || 'No phone on record'}</span>
-                                </span>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col w-full gap-3">
-                                <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
+                              <Phone className="w-4 h-4 text-slate-500 shrink-0" />
+                              {selectedContactId && selectedContactData ? (
+                                <div className="flex items-center gap-2 w-full">
                                   <span className="font-extrabold text-slate-800 text-xs">
-                                    Official Company Number: <span className="text-slate-600 font-medium">{prospect.official_phone_number || 'No phone'}</span>
+                                    {selectedContactData.contact_name}: <span className="text-slate-600 font-medium">{selectedContactData.phone_number || 'No phone on record'}</span>
                                   </span>
                                 </div>
-                                <div className="mt-1 pt-3 border-t border-slate-100">
-                                  <label className="block text-[10px] font-bold text-slate-700 mb-1.5 uppercase tracking-wider">Person Contacted * <span className="font-normal text-slate-500 normal-case tracking-normal">Who did you speak to?</span></label>
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                    <input 
-                                      type="text" 
-                                      value={generalCallSpokeTo} 
-                                      onChange={(e) => setGeneralCallSpokeTo(e.target.value)} 
-                                      placeholder="Name (e.g. John, Unknown)" 
-                                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
-                                    />
-                                    <input 
-                                      type="text" 
-                                      value={generalCallDesignation} 
-                                      onChange={(e) => setGeneralCallDesignation(e.target.value)} 
-                                      placeholder="Designation (Optional)" 
-                                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
-                                    />
+                              ) : (
+                                <div className="flex flex-col w-full gap-3">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-extrabold text-slate-800 text-xs">
+                                      Official Company Number: <span className="text-slate-600 font-medium">{prospect.official_phone_number || 'No phone'}</span>
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 pt-3 border-t border-slate-100">
+                                    <label className="block text-[10px] font-bold text-slate-700 mb-1.5 uppercase tracking-wider">Person Contacted * <span className="font-normal text-slate-500 normal-case tracking-normal">Who did you speak to?</span></label>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                      <input
+                                        type="text"
+                                        value={generalCallSpokeTo}
+                                        onChange={(e) => setGeneralCallSpokeTo(e.target.value)}
+                                        placeholder="Name (e.g. John, Unknown)"
+                                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
+                                      />
+                                      <input
+                                        type="text"
+                                        value={generalCallDesignation}
+                                        onChange={(e) => setGeneralCallDesignation(e.target.value)}
+                                        placeholder="Designation (Optional)"
+                                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
+                                      />
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                        {!inboundMode && (
-                          <div className="pt-2">
-                            <label className="block font-extrabold text-slate-700 mb-2.5 uppercase tracking-wider text-[10px]">1. Record Call Status Outcome</label>
-                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                              {[
-                                { label: 'Connected',      active: 'bg-emerald-50 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
-                                { label: 'No Answer',      active: 'bg-amber-50 border-amber-500 text-amber-900 shadow-sm ring-1 ring-amber-500/20',   idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
-                                { label: 'Busy',           active: 'bg-orange-50 border-orange-500 text-orange-900 shadow-sm ring-1 ring-orange-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
-                                { label: 'Switched Off',   active: 'bg-rose-50 border-rose-500 text-rose-900 shadow-sm ring-1 ring-rose-500/20',       idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
-                                { label: 'Invalid Number', active: 'bg-slate-100 border-slate-500 text-slate-900 shadow-sm ring-1 ring-slate-500/20',    idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
-                              ].map(({ label, active, idle }) => (
-                                <button
-                                  key={label}
-                                  type="button"
-                                  disabled={isContactLockedCheck(selectedContactId)}
-                                  onClick={() => setCallStatus(label)}
-                                  className={`p-2.5 rounded-lg border text-center font-extrabold text-xs transition-all ${callStatus === label ? active : idle} ${isContactLockedCheck(selectedContactId) ? 'opacity-50 cursor-not-allowed bg-slate-50' : ''}`}
-                                >
-                                  {label}
-                                </button>
-                              ))}
+                              )}
                             </div>
                           </div>
-                        )}
-                        {!inboundMode && callStatus === 'Connected' && (
-                          <div className="space-y-4 pt-4 border-t border-slate-100">
-                            <div>
-                              <label className="block font-extrabold text-slate-700 mb-2.5 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
-                                <TrendingUp className="w-3.5 h-3.5 text-sky-600" />
-                                <span>2. Record Communication Progress Outcome</span>
-                              </label>
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                {['Requested Email', 'Call Back Later', 'Call Transferred', 'Shared Another Contact', 'Not Interested', 'Lead Qualified'].map(out => (
-                                  <button key={out} type="button" disabled={isContactLockedCheck(selectedContactId)} onClick={() => setCommunicationOutcome(out)} className={`p-2.5 rounded-lg border text-left font-bold text-xs transition flex items-center justify-between ${
-                                    communicationOutcome === out ?
-                                      out === 'Not Interested' ? 'bg-rose-50 border-rose-500 text-rose-900 shadow-sm ring-1 ring-rose-500/20' :
-                                      out === 'Lead Qualified' ? 'bg-emerald-50 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-500/20' :
-                                      'bg-sky-50 border-sky-500 text-sky-900 shadow-sm ring-1 ring-sky-500/20'
-                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200'
-                                  } ${isContactLockedCheck(selectedContactId) ? 'opacity-50 cursor-not-allowed hover:bg-transparent bg-slate-50' : ''}`}>
-                                    <span>{out}</span>{communicationOutcome === out && <CheckCircle className={`w-4 h-4 ${out === 'Not Interested' ? 'text-rose-500' : out === 'Lead Qualified' ? 'text-emerald-500' : 'text-sky-500'}`} />}
+                          {!inboundMode && (
+                            <div className="pt-2">
+                              <label className="block font-extrabold text-slate-700 mb-2.5 uppercase tracking-wider text-[10px]">1. Record Call Status Outcome</label>
+                              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                                {[
+                                  { label: 'Connected', active: 'bg-emerald-50 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
+                                  { label: 'No Answer', active: 'bg-amber-50 border-amber-500 text-amber-900 shadow-sm ring-1 ring-amber-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
+                                  { label: 'Busy', active: 'bg-orange-50 border-orange-500 text-orange-900 shadow-sm ring-1 ring-orange-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
+                                  { label: 'Switched Off', active: 'bg-rose-50 border-rose-500 text-rose-900 shadow-sm ring-1 ring-rose-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
+                                  { label: 'Invalid Number', active: 'bg-slate-100 border-slate-500 text-slate-900 shadow-sm ring-1 ring-slate-500/20', idle: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200' },
+                                ].map(({ label, active, idle }) => (
+                                  <button
+                                    key={label}
+                                    type="button"
+                                    disabled={isContactLockedCheck(selectedContactId)}
+                                    onClick={() => setCallStatus(label)}
+                                    className={`p-2.5 rounded-lg border text-center font-extrabold text-xs transition-all ${callStatus === label ? active : idle} ${isContactLockedCheck(selectedContactId) ? 'opacity-50 cursor-not-allowed bg-slate-50' : ''}`}
+                                  >
+                                    {label}
                                   </button>
                                 ))}
                               </div>
                             </div>
-                            
-                            {/* Dynamic forms */}
-                            {communicationOutcome === 'Requested Email' && (
-                              <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-3 shadow-sm">
-                                <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✉️ Prospect Requested Info Email</span>
-                                <div>
-                                  <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Confirm Email Address:</label>
-                                  <input type="email" value={requestedEmailConfirm} onChange={(e) => setRequestedEmailConfirm(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" placeholder="e.g. contact@company.com" />
-                                </div>
-                                
-                                {requestedEmailConfirm && requestedEmailConfirm.trim() && (
-                                  <>
-                                    {duplicateRequestedEmailContact ? (
-                                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
-                                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                                        <div>
-                                          <p className="text-[11px] font-extrabold text-amber-900">Email Already Exists</p>
-                                          <p className="text-[10px] font-medium text-amber-800 mt-0.5">
-                                            This email belongs to <span className="font-bold">{duplicateRequestedEmailContact.contact_name}</span> ({duplicateRequestedEmailContact.designation}). No new contact will be created.
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="space-y-2 pt-2 border-t border-sky-200/50">
-                                        <p className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                                          <Shield className="w-3.5 h-3.5 text-indigo-500" /> New Email Detected: Please register contact
-                                        </p>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                          <div>
-                                            <label className="block text-[10px] font-bold text-slate-700 mb-1">Key Person Name <span className="text-red-500">*</span></label>
-                                            <input type="text" value={newRequestedContactName} onChange={(e) => setNewRequestedContactName(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="Name" />
-                                          </div>
-                                          <div>
-                                            <label className="block text-[10px] font-bold text-slate-700 mb-1">Mobile Number</label>
-                                            <input type="text" value={newRequestedContactMobile} onChange={(e) => setNewRequestedContactMobile(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="Optional" />
-                                          </div>
-                                          <div className="sm:col-span-2">
-                                            <label className="block text-[10px] font-bold text-slate-700 mb-1">Designation/Role <span className="text-red-500">*</span></label>
-                                            <input type="text" value={newRequestedContactDesignation} onChange={(e) => setNewRequestedContactDesignation(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="e.g. IT Director" />
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </>
-                                )}
-                              </div>
-                            )}
-                            {communicationOutcome === 'Call Back Later' && (
-                              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
-                                <span className="font-extrabold text-amber-950 block text-xs">⏰ Prospect Requested Call Back Later</span>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Date <span className="text-red-500">*</span></label>
-                                    <input type="date" max="9999-12-31" required value={callbackDate} onChange={(e) => setCallbackDate(e.target.value)} className="w-full p-2 bg-white border border-amber-300 rounded-xl text-xs font-semibold" />
-                                  </div>
-                                  <div>
-                                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Time <span className="text-red-500">*</span></label>
-                                    <TimeSelect value={callbackTime} onChange={setCallbackTime} />
-                                  </div>
-                                </div>
-                                <div>
-                                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Description</label>
-                                  <textarea rows={2} value={callbackDescription} onChange={(e) => setCallbackDescription(e.target.value)} placeholder="Any specific context for this callback..." className="w-full p-2 bg-white border border-amber-300 rounded-xl text-xs font-semibold resize-none" />
-                                </div>
-                              </div>
-                            )}
-                            {communicationOutcome === 'Call Transferred' && (
-                              <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-xl space-y-3">
-                                <span className="font-extrabold text-indigo-950 text-xs">🔄 Call Transferred to Decision Maker</span>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-0.5">Person Name:</label><input type="text" value={transferredPersonName} onChange={(e) => setTransferredPersonName(e.target.value)} className="w-full p-2 bg-white border border-indigo-300 rounded-xl" /></div>
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-0.5">Designation:</label><input type="text" value={transferredDesignation} onChange={(e) => setTransferredDesignation(e.target.value)} className="w-full p-2 bg-white border border-indigo-300 rounded-xl" /></div>
-                                </div>
-                              </div>
-                            )}
-                            {communicationOutcome === 'Shared Another Contact' && (
-                              <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
-                                <span className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">👤 Shared Another Contact Information</span>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Name:</label><input type="text" value={sharedContactName} onChange={(e) => setSharedContactName(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Designation:</label><input type="text" value={sharedContactDesignation} onChange={(e) => setSharedContactDesignation(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Phone:</label><input type="text" value={sharedContactPhone} onChange={(e) => setSharedContactPhone(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
-                                  <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Email:</label><input type="email" value={sharedContactEmail} onChange={(e) => setSharedContactEmail(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
-                                </div>
-                                {duplicateContact && (
-                                  <div className="mt-2 p-2 bg-amber-100 border border-amber-300 rounded text-amber-900 text-xs flex flex-col sm:flex-row items-center justify-between gap-2">
-                                    <span>⚠️ This key contact already exists: <strong>{duplicateContact.contact_name} {duplicateContact.designation ? `(${duplicateContact.designation})` : ''}</strong></span>
-                                    <button 
-                                      type="button" 
-                                      onClick={() => {
-                                        setSharedContactName(duplicateContact.contact_name || '');
-                                        setSharedContactDesignation(duplicateContact.designation || '');
-                                        setSharedContactEmail(duplicateContact.official_email || '');
-                                        setSharedContactPhone(duplicateContact.phone_number || '');
-                                        setUseDuplicateContact(true);
-                                      }}
-                                      className="px-2 py-1 bg-amber-200 hover:bg-amber-300 text-amber-900 rounded font-bold transition whitespace-nowrap"
-                                    >
-                                      Select this contact
+                          )}
+                          {!inboundMode && callStatus === 'Connected' && (
+                            <div className="space-y-4 pt-4 border-t border-slate-100">
+                              <div>
+                                <label className="block font-extrabold text-slate-700 mb-2.5 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                                  <TrendingUp className="w-3.5 h-3.5 text-sky-600" />
+                                  <span>2. Record Communication Progress Outcome</span>
+                                </label>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                  {['Requested Email', 'Call Back Later', 'Call Transferred', 'Shared Another Contact', 'Not Interested', 'Lead Qualified'].map(out => (
+                                    <button key={out} type="button" disabled={isContactLockedCheck(selectedContactId)} onClick={() => setCommunicationOutcome(out)} className={`p-2.5 rounded-lg border text-left font-bold text-xs transition flex items-center justify-between ${communicationOutcome === out ?
+                                        out === 'Not Interested' ? 'bg-rose-50 border-rose-500 text-rose-900 shadow-sm ring-1 ring-rose-500/20' :
+                                          out === 'Lead Qualified' ? 'bg-emerald-50 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-500/20' :
+                                            'bg-sky-50 border-sky-500 text-sky-900 shadow-sm ring-1 ring-sky-500/20'
+                                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-200'
+                                      } ${isContactLockedCheck(selectedContactId) ? 'opacity-50 cursor-not-allowed hover:bg-transparent bg-slate-50' : ''}`}>
+                                      <span>{out}</span>{communicationOutcome === out && <CheckCircle className={`w-4 h-4 ${out === 'Not Interested' ? 'text-rose-500' : out === 'Lead Qualified' ? 'text-emerald-500' : 'text-sky-500'}`} />}
                                     </button>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                            {communicationOutcome === 'Not Interested' && (
-                              <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
-                                <span className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">🚫 Company Not Interested — <span className="text-rose-600 font-semibold">Outreach will be closed after saving</span></span>
-                                <div>
-                                  <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Reason for Disinterest <span className="text-rose-500">*</span></label>
-                                  <input
-                                    type="text"
-                                    value={notInterestedReason}
-                                    onChange={(e) => setNotInterestedReason(e.target.value)}
-                                    placeholder="e.g. Budget frozen, not the right time..."
-                                    className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${notInterestedReason.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`}
-                                  />
+                                  ))}
                                 </div>
-                                <p className="text-[10px] text-slate-500 font-semibold flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-rose-500" /> Prospect Status will be set to <strong className="text-slate-700">Lead Freeze</strong>. The Outreach button will be disabled.</p>
                               </div>
-                            )}
-                            {communicationOutcome === 'Lead Qualified' && (
-                              <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
-                                <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✅ Lead Qualified & Schedule Meeting</span>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                              {/* Dynamic forms */}
+                              {communicationOutcome === 'Requested Email' && (
+                                <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-3 shadow-sm">
+                                  <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✉️ Prospect Requested Info Email</span>
                                   <div>
-                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Date *</label>
-                                    <input type="date" max="9999-12-31" required value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Confirm Email Address:</label>
+                                    <input type="email" value={requestedEmailConfirm} onChange={(e) => setRequestedEmailConfirm(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" placeholder="e.g. contact@company.com" />
+                                  </div>
+
+                                  {requestedEmailConfirm && requestedEmailConfirm.trim() && (
+                                    <>
+                                      {duplicateRequestedEmailContact ? (
+                                        <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
+                                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                                          <div>
+                                            <p className="text-[11px] font-extrabold text-amber-900">Email Already Exists</p>
+                                            <p className="text-[10px] font-medium text-amber-800 mt-0.5">
+                                              This email belongs to <span className="font-bold">{duplicateRequestedEmailContact.contact_name}</span> ({duplicateRequestedEmailContact.designation}). No new contact will be created.
+                                            </p>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div className="space-y-2 pt-2 border-t border-sky-200/50">
+                                          <p className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                                            <Shield className="w-3.5 h-3.5 text-indigo-500" /> New Email Detected: Please register contact
+                                          </p>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            <div>
+                                              <label className="block text-[10px] font-bold text-slate-700 mb-1">Key Person Name <span className="text-red-500">*</span></label>
+                                              <input type="text" value={newRequestedContactName} onChange={(e) => setNewRequestedContactName(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="Name" />
+                                            </div>
+                                            <div>
+                                              <label className="block text-[10px] font-bold text-slate-700 mb-1">Mobile Number</label>
+                                              <input type="text" value={newRequestedContactMobile} onChange={(e) => setNewRequestedContactMobile(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="Optional" />
+                                            </div>
+                                            <div className="sm:col-span-2">
+                                              <label className="block text-[10px] font-bold text-slate-700 mb-1">Designation/Role <span className="text-red-500">*</span></label>
+                                              <input type="text" value={newRequestedContactDesignation} onChange={(e) => setNewRequestedContactDesignation(e.target.value)} className="w-full p-2 bg-white border border-sky-300 rounded-xl text-xs font-semibold" placeholder="e.g. IT Director" />
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                              {communicationOutcome === 'Call Back Later' && (
+                                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
+                                  <span className="font-extrabold text-amber-950 block text-xs">⏰ Prospect Requested Call Back Later</span>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Date <span className="text-red-500">*</span></label>
+                                      <input type="date" max="9999-12-31" required value={callbackDate} onChange={(e) => setCallbackDate(e.target.value)} className="w-full p-2 bg-white border border-amber-300 rounded-xl text-xs font-semibold" />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Time <span className="text-red-500">*</span></label>
+                                      <TimeSelect value={callbackTime} onChange={setCallbackTime} />
+                                    </div>
                                   </div>
                                   <div>
-                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Time *</label>
-                                    <TimeSelect value={meetingTime} onChange={setMeetingTime} />
+                                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Description</label>
+                                    <textarea rows={2} value={callbackDescription} onChange={(e) => setCallbackDescription(e.target.value)} placeholder="Any specific context for this callback..." className="w-full p-2 bg-white border border-amber-300 rounded-xl text-xs font-semibold resize-none" />
                                   </div>
                                 </div>
-                                <div>
-                                  <MeetingProviderPicker
-                                    calendarStatus={calendarStatus}
-                                    calendarLoading={calendarLoading}
-                                    onConnectCalendar={handleConnectCalendar}
-                                    isCreating={isCreatingMeeting}
-                                  />
-                                  {createdMeeting && (
-                                    <div className="mt-3">
-                                      <CreatedMeetingCard
-                                        meeting={createdMeeting}
-                                        onDismiss={() => setCreatedMeeting(null)}
-                                        onRefresh={handleRefreshMeetLink}
-                                        isRefreshing={isRefreshingMeet}
-                                      />
+                              )}
+                              {communicationOutcome === 'Call Transferred' && (
+                                <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-xl space-y-3">
+                                  <span className="font-extrabold text-indigo-950 text-xs">🔄 Call Transferred to Decision Maker</span>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-0.5">Person Name:</label><input type="text" value={transferredPersonName} onChange={(e) => setTransferredPersonName(e.target.value)} className="w-full p-2 bg-white border border-indigo-300 rounded-xl" /></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-0.5">Designation:</label><input type="text" value={transferredDesignation} onChange={(e) => setTransferredDesignation(e.target.value)} className="w-full p-2 bg-white border border-indigo-300 rounded-xl" /></div>
+                                  </div>
+                                </div>
+                              )}
+                              {communicationOutcome === 'Shared Another Contact' && (
+                                <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
+                                  <span className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">👤 Shared Another Contact Information</span>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Name:</label><input type="text" value={sharedContactName} onChange={(e) => setSharedContactName(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Designation:</label><input type="text" value={sharedContactDesignation} onChange={(e) => setSharedContactDesignation(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Phone:</label><input type="text" value={sharedContactPhone} onChange={(e) => setSharedContactPhone(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-700 mb-1.5">Email:</label><input type="email" value={sharedContactEmail} onChange={(e) => setSharedContactEmail(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" /></div>
+                                  </div>
+                                  {duplicateContact && (
+                                    <div className="mt-2 p-2 bg-amber-100 border border-amber-300 rounded text-amber-900 text-xs flex flex-col sm:flex-row items-center justify-between gap-2">
+                                      <span>⚠️ This key contact already exists: <strong>{duplicateContact.contact_name} {duplicateContact.designation ? `(${duplicateContact.designation})` : ''}</strong></span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setSharedContactName(duplicateContact.contact_name || '');
+                                          setSharedContactDesignation(duplicateContact.designation || '');
+                                          setSharedContactEmail(duplicateContact.official_email || '');
+                                          setSharedContactPhone(duplicateContact.phone_number || '');
+                                          setUseDuplicateContact(true);
+                                        }}
+                                        className="px-2 py-1 bg-amber-200 hover:bg-amber-300 text-amber-900 rounded font-bold transition whitespace-nowrap"
+                                      >
+                                        Select this contact
+                                      </button>
                                     </div>
                                   )}
                                 </div>
-                                <div>
-                                  <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Agenda *</label>
-                                  <textarea rows={2} value={leadQualifiedDescription} onChange={(e) => setLeadQualifiedDescription(e.target.value)} className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold resize-none focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${leadQualifiedDescription.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`} />
+                              )}
+                              {communicationOutcome === 'Not Interested' && (
+                                <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
+                                  <span className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">🚫 Company Not Interested — <span className="text-rose-600 font-semibold">Outreach will be closed after saving</span></span>
+                                  <div>
+                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Reason for Disinterest <span className="text-rose-500">*</span></label>
+                                    <input
+                                      type="text"
+                                      value={notInterestedReason}
+                                      onChange={(e) => setNotInterestedReason(e.target.value)}
+                                      placeholder="e.g. Budget frozen, not the right time..."
+                                      className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${notInterestedReason.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`}
+                                    />
+                                  </div>
+                                  <p className="text-[10px] text-slate-500 font-semibold flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-rose-500" /> Prospect Status will be set to <strong className="text-slate-700">Lead Freeze</strong>. The Outreach button will be disabled.</p>
                                 </div>
-                                <div className="flex items-center gap-2 mt-2">
-                                  <input type="checkbox" id="attendedMeeting" checked={attendedMeeting} onChange={(e) => setAttendedMeeting(e.target.checked)} className="w-4 h-4 text-sky-600 rounded border-slate-200 focus:ring-sky-500" />
-                                  <label htmlFor="attendedMeeting" className="text-[11px] font-bold text-slate-700 cursor-pointer">Prospect Attended Meeting</label>
+                              )}
+                              {communicationOutcome === 'Lead Qualified' && (
+                                <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
+                                  <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✅ Lead Qualified & Schedule Meeting</span>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Date *</label>
+                                      <input type="date" max="9999-12-31" required value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Time *</label>
+                                      <TimeSelect value={meetingTime} onChange={setMeetingTime} />
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <MeetingProviderPicker
+                                      calendarStatus={calendarStatus}
+                                      calendarLoading={calendarLoading}
+                                      onConnectCalendar={handleConnectCalendar}
+                                      isCreating={isCreatingMeeting}
+                                    />
+                                    {createdMeeting && (
+                                      <div className="mt-3">
+                                        <CreatedMeetingCard
+                                          meeting={createdMeeting}
+                                          onDismiss={() => setCreatedMeeting(null)}
+                                          onRefresh={handleRefreshMeetLink}
+                                          isRefreshing={isRefreshingMeet}
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Agenda *</label>
+                                    <textarea rows={2} value={leadQualifiedDescription} onChange={(e) => setLeadQualifiedDescription(e.target.value)} className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold resize-none focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${leadQualifiedDescription.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`} />
+                                  </div>
+                                  <div className="flex items-center gap-2 mt-2">
+                                    <input type="checkbox" id="attendedMeeting" checked={attendedMeeting} onChange={(e) => setAttendedMeeting(e.target.checked)} className="w-4 h-4 text-sky-600 rounded border-slate-200 focus:ring-sky-500" />
+                                    <label htmlFor="attendedMeeting" className="text-[11px] font-bold text-slate-700 cursor-pointer">Prospect Attended Meeting</label>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {inboundMode && (
-                          <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl mt-4">
-                            <span className="font-extrabold text-emerald-900 text-xs mb-3 block uppercase tracking-wider">📅 Inbound Data Entry Details</span>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                              <div>
-                                <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Date Received *</label>
-                                <input type="date" value={inboundDate} onChange={(e) => setInboundDate(e.target.value)} className="w-full p-2.5 bg-white border border-emerald-300 rounded-xl text-xs font-semibold focus:outline-none" required />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Time Received *</label>
-                                <TimeSelect value={inboundTime} onChange={setInboundTime} />
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Hide transcript when a structured outcome form is already capturing detail */}
-                        {(inboundMode || !['Requested Email', 'Call Back Later', 'Call Transferred', 'Shared Another Contact', 'Not Interested', 'Lead Qualified'].includes(communicationOutcome)) && (
-                          <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-2 shadow-sm mt-4">
-                            <label className="block font-extrabold text-slate-700 mb-1.5 text-[10px] uppercase tracking-wider">{inboundMode ? 'Inbound Message / Notes *' : 'Call Transcript & Discussion Summary'}</label>
-                            <textarea rows={3} value={callTranscriptNotes} onChange={(e) => setCallTranscriptNotes(e.target.value)} placeholder={inboundMode ? "Enter notes regarding the inbound message..." : "Enter notes from call conversation..."} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all resize-none" />
-                          </div>
-                        )}
-                        <div className="flex flex-col gap-2 pt-1">
-                          {callError && (
-                            <div className="flex items-center gap-2 p-2.5 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs font-bold">
-                              <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
-                              <span>{callError}</span>
+                              )}
                             </div>
                           )}
-                          <div className="flex justify-end">
-                            {(() => {
-                              const isContactInvalid = !inboundMode && isContactLockedCheck(selectedContactId);
-                              const isDisabled = isContactInvalid || isSubmittingActivity;
-                              return (
-                                <button type="submit" disabled={isDisabled} className={`px-5 py-2.5 font-extrabold text-xs rounded-xl transition shadow-sm flex items-center gap-2 ${isDisabled ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'}`}>
-                                  <Phone className="w-4 h-4" /><span>{isSubmittingActivity ? 'Saving...' : (inboundMode ? 'Record Inbound Activity' : 'Record Call Outcome & Save Activity')}</span>
-                                </button>
-                              );
-                            })()}
+                          {inboundMode && (
+                            <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl mt-4">
+                              <span className="font-extrabold text-emerald-900 text-xs mb-3 block uppercase tracking-wider">📅 Inbound Data Entry Details</span>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                  <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Date Received *</label>
+                                  <input type="date" value={inboundDate} onChange={(e) => setInboundDate(e.target.value)} className="w-full p-2.5 bg-white border border-emerald-300 rounded-xl text-xs font-semibold focus:outline-none" required />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] font-bold text-slate-700 mb-1.5">Time Received *</label>
+                                  <TimeSelect value={inboundTime} onChange={setInboundTime} />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Hide transcript when a structured outcome form is already capturing detail */}
+                          {(inboundMode || !['Requested Email', 'Call Back Later', 'Call Transferred', 'Shared Another Contact', 'Not Interested', 'Lead Qualified'].includes(communicationOutcome)) && (
+                            <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-2 shadow-sm mt-4">
+                              <label className="block font-extrabold text-slate-700 mb-1.5 text-[10px] uppercase tracking-wider">{inboundMode ? 'Inbound Message / Notes *' : 'Call Transcript & Discussion Summary'}</label>
+                              <textarea rows={3} value={callTranscriptNotes} onChange={(e) => setCallTranscriptNotes(e.target.value)} placeholder={inboundMode ? "Enter notes regarding the inbound message..." : "Enter notes from call conversation..."} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all resize-none" />
+                            </div>
+                          )}
+                          <div className="flex flex-col gap-2 pt-1">
+                            {callError && (
+                              <div className="flex items-center gap-2 p-2.5 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs font-bold">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                                <span>{callError}</span>
+                              </div>
+                            )}
+                            <div className="flex justify-end">
+                              {(() => {
+                                const isContactInvalid = !inboundMode && isContactLockedCheck(selectedContactId);
+                                const isDisabled = isContactInvalid || isSubmittingActivity;
+                                return (
+                                  <button type="submit" disabled={isDisabled} className={`px-5 py-2.5 font-extrabold text-xs rounded-xl transition shadow-sm flex items-center gap-2 ${isDisabled ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'}`}>
+                                    <Phone className="w-4 h-4" /><span>{isSubmittingActivity ? 'Saving...' : (inboundMode ? 'Record Inbound Activity' : 'Record Call Outcome & Save Activity')}</span>
+                                  </button>
+                                );
+                              })()}
+                            </div>
                           </div>
-                        </div>
-                      </form>
+                        </form>
                       </>
                     )}
                   </div>
@@ -1956,7 +1952,7 @@ const handleAddCustomRecipient = (e) => {
                                 <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-bold">Contact: {log.contact_name || prospect?.company_name}</span>
                               </div>
                               <span className="text-[10px] text-slate-400 font-semibold flex items-center gap-1">
-                                {new Date(log.created_at).toLocaleString()} 
+                                {new Date(log.created_at).toLocaleString()}
                                 <span className="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded ml-1">{log.created_by_name}</span>
                               </span>
                             </div>
@@ -2001,11 +1997,10 @@ const handleAddCustomRecipient = (e) => {
                           Tracking Disabled
                         </span>
                       ) : (
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${
-                          activeEmailTracking?.is_opened
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${activeEmailTracking?.is_opened
                             ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
                             : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
-                        }`}>
+                          }`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${activeEmailTracking?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
                           {activeEmailTracking?.is_opened ? `Viewed (${activeEmailTracking?.open_count || 1}x)` : 'Awaiting Open'}
                         </span>
@@ -2046,9 +2041,8 @@ const handleAddCustomRecipient = (e) => {
                       </span>
                       <span className="text-[10px] text-slate-400 ml-1">times</span>
                     </div>
-                    <span className={`text-[10px] font-bold mt-1 ${
-                      (activeEmailTracking?.open_count || 0) > 1 ? 'text-indigo-600' : activeEmailTracking?.is_opened ? 'text-emerald-600' : 'text-slate-400'
-                    }`}>
+                    <span className={`text-[10px] font-bold mt-1 ${(activeEmailTracking?.open_count || 0) > 1 ? 'text-indigo-600' : activeEmailTracking?.is_opened ? 'text-emerald-600' : 'text-slate-400'
+                      }`}>
                       {(activeEmailTracking?.open_count || 0) > 2 ? '🔥 Highly Engaged' : activeEmailTracking?.is_opened ? 'Opened & Seen' : 'Not opened yet'}
                     </span>
                   </div>
@@ -2108,13 +2102,12 @@ const handleAddCustomRecipient = (e) => {
                   </div>
                   {/* Visual meter */}
                   <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden flex">
-                    <div className={`h-full transition-all duration-500 ${
-                      !activeEmailTracking?.is_opened ? 'w-0' :
-                      (activeEmailTracking?.open_count >= 3 || (activeEmailTracking?.total_seconds_spent || 0) >= 60) ? 'w-full bg-gradient-to-r from-indigo-500 to-emerald-500' :
-                      (activeEmailTracking?.open_count >= 2 || (activeEmailTracking?.total_seconds_spent || 0) >= 15) ? 'w-2/3 bg-indigo-600' :
-                      'w-1/3 bg-amber-500'
-                    }`} />
-                  </div>
+                    <div className={`h-full transition-all duration-500 ${!activeEmailTracking?.is_opened ? 'w-0' :
+                        (activeEmailTracking?.open_count >= 3 || (activeEmailTracking?.total_seconds_spent || 0) >= 60) ? 'w-full bg-gradient-to-r from-indigo-500 to-emerald-500' :
+                          (activeEmailTracking?.open_count >= 2 || (activeEmailTracking?.total_seconds_spent || 0) >= 15) ? 'w-2/3 bg-indigo-600' :
+                            'w-1/3 bg-amber-500'
+                      }`} />
+                    t                  </div>
                   <div className="flex items-center justify-between text-[10px] text-slate-400 font-semibold pt-0.5">
                     <span>Skimmed (&lt;10s)</span>
                     <span>Read in Detail (10s - 45s)</span>
