@@ -91,7 +91,7 @@ def set_cached_qr(session_name: str, qr_data: dict) -> None:
     if not isinstance(qr_data, dict):
         return
     qr = qr_data.get("qr") or qr_data.get("value") or qr_data.get("raw")
-    qr_base64 = qr_data.get("qrBase64") or ""
+    qr_base64 = qr_data.get("qrBase64") or qr_data.get("data") or ""
     if not qr_base64 and qr and str(qr).startswith("data:image/"):
         qr_base64 = qr
     if qr_base64 and not qr_base64.startswith("data:image/"):
@@ -101,6 +101,7 @@ def set_cached_qr(session_name: str, qr_data: dict) -> None:
         "qr": qr or qr_base64,
         "qrBase64": qr_base64,
         "value": qr or qr_base64,
+        "data": qr_base64,
         "session": session_name,
         "timestamp": timezone.now().isoformat(),
     }
@@ -541,13 +542,14 @@ def process_webhook_event(
 # ---------------------------------------------------------------------------
 
 def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
-    qr = event_data.get("qr") or event_data.get("value")
-    qr_base64 = event_data.get("qrBase64") or ""
+    qr = event_data.get("qr") or event_data.get("value") or event_data.get("data")
+    qr_base64 = event_data.get("qrBase64") or event_data.get("data") or ""
     if qr or qr_base64:
         set_cached_qr(session_name, {
             "qr": qr or qr_base64,
             "qrBase64": qr_base64,
             "value": qr or qr_base64,
+            "data": qr_base64,
         })
         WhatsAppSession.objects.filter(session_name=session_name).update(
             status=WhatsAppSession.Status.QR_REQUIRED

@@ -443,7 +443,7 @@ class WhatsAppQRView(APIView):
         # If we already have a valid active QR code, return it immediately (0.001s)
         # to prevent thread blocking, keep QR stable, and avoid flickering.
         cached_qr = get_cached_qr(session_name) if not force_restart else None
-        if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
+        if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64") or cached_qr.get("data")):
             # Fast check if already connected in DB
             if session_obj.status == WhatsAppSession.Status.READY and session_obj.phone_number:
                 clear_cached_qr(session_name)
@@ -455,7 +455,11 @@ class WhatsAppQRView(APIView):
                     "message": "WhatsApp is connected and ready.",
                 })
 
-            qr_base64 = cached_qr.get("qrBase64") or ""
+            qr_base64 = cached_qr.get("qrBase64") or cached_qr.get("data") or ""
+            if not qr_base64:
+                qr_val = cached_qr.get("qr") or cached_qr.get("value")
+                if qr_val and str(qr_val).startswith("data:image/"):
+                    qr_base64 = qr_val
             if qr_base64 and not qr_base64.startswith("data:image/"):
                 qr_base64 = f"data:image/png;base64,{qr_base64}"
             return Response({
@@ -529,7 +533,7 @@ class WhatsAppQRView(APIView):
             if not isinstance(qr_data, dict):
                 qr_data = {"qr": str(qr_data)}
 
-            qr_base64 = qr_data.get("qrBase64") or ""
+            qr_base64 = qr_data.get("qrBase64") or qr_data.get("data") or ""
             if not qr_base64:
                 qr_val = qr_data.get("qr") or qr_data.get("value") or qr_data.get("raw")
                 if qr_val and str(qr_val).startswith("data:image/"):
@@ -539,22 +543,18 @@ class WhatsAppQRView(APIView):
 
             if qr_base64 or qr_data.get("qr") or qr_data.get("value"):
                 qr_data["qrBase64"] = qr_base64
+                qr_data["qr"] = qr_data.get("qr") or qr_base64
+                qr_data["value"] = qr_data.get("value") or qr_base64
                 qr_data["status"] = "SCAN_QR_CODE"
                 qr_data["connected"] = False
                 qr_data["session_name"] = session_name
                 set_cached_qr(session_name, qr_data)
                 return Response(qr_data)
-
-            # QR not ready in WAHA yet; request dispatch
-            try:
-                client.dispatch_qr(session_name)
-            except Exception:
-                pass
         except Exception as exc:
-            pass
+            logger.debug("Live get_qr failed for %s: %s", session_name, exc)
 
-        if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
-            qr_base64 = cached_qr.get("qrBase64") or ""
+        if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64") or cached_qr.get("data")):
+            qr_base64 = cached_qr.get("qrBase64") or cached_qr.get("data") or ""
             if not qr_base64:
                 qr_val = cached_qr.get("qr") or cached_qr.get("value")
                 if qr_val and str(qr_val).startswith("data:image/"):
@@ -600,6 +600,17 @@ class WhatsAppPairingCodeView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         try:
+            # Ensure WAHA session is active before requesting pairing code
+            try:
+                status_info = client.get_session_status(session_name)
+                if status_info.get("status") in ("STOPPED", "FAILED", "UNKNOWN", None):
+                    client.start_session(session_name)
+            except Exception:
+                try:
+                    client.start_session(session_name)
+                except Exception:
+                    pass
+
             res = client.request_code(session_name, clean_phone)
             if isinstance(res, dict):
                 code = res.get("code") or res.get("pairingCode") or res.get("raw")

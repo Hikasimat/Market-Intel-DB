@@ -353,8 +353,11 @@ export default function WhatsappPage() {
   }, [fetchSessions]);
 
   // Fetch live QR or Connection state for current user's session
+  const isFetchingQRRef = useRef(false);
+
   const fetchQR = useCallback(async (forceRestart = false) => {
-    // Only trigger full spinner if we don't already have a valid QR code displayed
+    if (isFetchingQRRef.current && !forceRestart) return;
+    isFetchingQRRef.current = true;
     if (forceRestart) {
       setLoadingQR(true);
     }
@@ -374,39 +377,41 @@ export default function WhatsappPage() {
           phone_number: data.phone_number || prev?.phone_number
         }));
       } else if (data.status === 'SCAN_QR_CODE') {
-        const qr = data.qrBase64 || data.qr || data.value;
+        const qr = data.qrBase64 || data.qr || data.value || data.data;
         if (qr) {
           setQrCodeData(qr);
           setQrExpired(false);
         }
       }
-      // If data.status is 'STARTING' or another intermediate state, keep existing qrCodeData visible
     } catch (err) {
       console.error('Failed to get QR code status:', err);
-      // Retain existing QR code so it never disappears on temporary network glitches
     } finally {
+      isFetchingQRRef.current = false;
       setLoadingQR(false);
     }
   }, []);
 
-  // QR Polling: Keep QR visible and stable for scanning, poll to detect when phone connects
+  // QR Polling: Sequential polling prevents request piling and worker thread starvation
   useEffect(() => {
     const isReady = selectedSession?.status === 'READY';
-    if (isReady) {
-      if (qrPollTimerRef.current) clearInterval(qrPollTimerRef.current);
-      return;
-    }
+    if (isReady) return;
 
-    // Initial QR request
-    fetchQR(false);
+    let active = true;
+    let timerId = null;
 
-    // Poll every 5 seconds to detect connection without restarting the session
-    qrPollTimerRef.current = setInterval(() => {
-      fetchQR(false);
-    }, 5000);
+    const poll = async () => {
+      if (!active) return;
+      await fetchQR(false);
+      if (active && selectedSession?.status !== 'READY') {
+        timerId = setTimeout(poll, 4000);
+      }
+    };
+
+    poll();
 
     return () => {
-      if (qrPollTimerRef.current) clearInterval(qrPollTimerRef.current);
+      active = false;
+      if (timerId) clearTimeout(timerId);
     };
   }, [selectedSession?.status, fetchQR]);
 

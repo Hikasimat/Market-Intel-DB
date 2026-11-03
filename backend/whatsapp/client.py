@@ -299,13 +299,31 @@ class WAHAClient:
         return body if isinstance(body, list) else []
 
     def get_qr(self, session_name: str = "default") -> dict:
-        """Get the QR code for a session (as image bytes or data URL)."""
-        _status, body = self._request(
-            "GET",
-            f"/api/{session_name}/auth/qr",
-            timeout=3.0,
-        )
-        return body
+        """Get the QR code for a session (as base64 or raw string)."""
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/{session_name}/auth/qr",
+                timeout=2.5,
+            )
+            if isinstance(body, dict):
+                # 1. WAHA JSON format: {"mimetype": "image/png", "data": "base64..."}
+                b64 = body.get("data") or body.get("qrBase64") or ""
+                if b64:
+                    mimetype = body.get("mimetype") or "image/png"
+                    prefix = f"data:{mimetype};base64," if not str(b64).startswith("data:") else ""
+                    body["qrBase64"] = f"{prefix}{b64}"
+                    body["qr"] = f"{prefix}{b64}"
+                    body["value"] = body.get("value") or f"{prefix}{b64}"
+                # 2. WAHA raw value: {"value": "2@..."}
+                elif body.get("value"):
+                    val = str(body["value"])
+                    body["qr"] = val
+                    body["qrBase64"] = val if val.startswith("data:") else ""
+            return body if isinstance(body, dict) else {}
+        except Exception as exc:
+            logger.debug("WAHA get_qr error for %s: %s", session_name, exc)
+            return {}
 
     def request_code(self, session_name: str, phone_number: str) -> dict:
         """Request 8-character pairing code for phone-number linking."""
@@ -318,13 +336,8 @@ class WAHAClient:
         return body
 
     def dispatch_qr(self, session_name: str = "default") -> dict:
-        """Force re-dispatch of QR code via webhook."""
-        _status, body = self._request(
-            "POST",
-            f"/api/{session_name}/auth/qr/dispatch",
-            timeout=3.0,
-        )
-        return body
+        """Safe no-op helper for backward compatibility."""
+        return {}
 
     # -- Messaging -----------------------------------------------------------
 
