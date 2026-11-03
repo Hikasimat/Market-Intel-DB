@@ -315,7 +315,7 @@ ALLOWED_EVENT_TYPES = frozenset([
 ])
 
 # Valid WhatsApp chat ID pattern.
-VALID_CHAT_ID_RE = re.compile(r"^[0-9a-zA-Z_\-]+@(c\.us|g\.us|lid|s\.whatsapp\.net)$")
+VALID_CHAT_ID_RE = re.compile(r"^[0-9a-zA-Z_\-\.]+@(c\.us|g\.us|lid|s\.whatsapp\.net)$")
 PHONE_DIGITS_RE = re.compile(r"^\d{7,25}$")
 
 
@@ -592,13 +592,57 @@ def _handle_incoming_message(
     """
     Handle an incoming or sync WhatsApp message event.
     """
-    raw_from = str(event_data.get("from") or "")
-    raw_to = str(event_data.get("to") or "")
+    _data = event_data.get("_data") or {}
+    key = _data.get("key") or event_data.get("key") or {}
+
+    raw_from = str(event_data.get("from") or "").strip()
+    raw_to = str(event_data.get("to") or "").strip()
     raw_body = str(event_data.get("body") or "")
     waha_message_id = str(event_data.get("id") or "")
     is_from_me = bool(event_data.get("fromMe", False))
 
-    target_chat_id = raw_to if is_from_me else raw_from
+    # 1. Resolve Group Chat ID (@g.us) if this message belongs to a WhatsApp Group
+    group_chat_id = None
+    for candidate in (
+        event_data.get("chatId"),
+        key.get("remoteJid"),
+        event_data.get("to"),
+        event_data.get("from"),
+        _data.get("chatId"),
+        (_data.get("chat") or {}).get("id"),
+    ):
+        if candidate and str(candidate).endswith("@g.us"):
+            group_chat_id = str(candidate).strip()
+            break
+
+    # If payload contains participant or author, it is definitively a group message
+    if not group_chat_id:
+        has_participant = bool(
+            event_data.get("participant")
+            or key.get("participant")
+            or event_data.get("author")
+            or _data.get("participant")
+        )
+        if has_participant:
+            for candidate in (
+                event_data.get("chatId"),
+                key.get("remoteJid"),
+                event_data.get("to"),
+                event_data.get("from"),
+            ):
+                if candidate and "@g.us" in str(candidate):
+                    group_chat_id = str(candidate).strip()
+                    break
+
+    if group_chat_id:
+        target_chat_id = group_chat_id
+    else:
+        # Standard 1-on-1 direct message
+        raw_chat_id = str(event_data.get("chatId") or key.get("remoteJid") or "").strip()
+        if raw_chat_id and not raw_chat_id.endswith("@broadcast"):
+            target_chat_id = raw_chat_id
+        else:
+            target_chat_id = raw_to if is_from_me else raw_from
 
     # -----------------------------------------------------------------------
     # CRITICAL: Ignore WhatsApp status updates, stories, and broadcast media.
@@ -668,10 +712,21 @@ def _handle_incoming_message(
         or ""
     ).strip()
 
+    if is_group and not group_name:
+        try:
+            from .client import get_waha_client
+            client = get_waha_client()
+            g_info = client.get_group_info(session_name, target_chat_id)
+            group_name = (g_info.get("subject") or g_info.get("name") or "").strip()
+        except Exception:
+            pass
+
     group_author = (
         event_data.get("author")
         or event_data.get("participant")
         or key.get("participant")
+        or _data.get("participant")
+        or (raw_from if raw_from != target_chat_id else "")
         or ""
     )
     group_author_name = extracted_name or (group_author.split("@")[0].split(":")[0] if group_author else "")
@@ -920,6 +975,15 @@ def _handle_incoming_message(
             target=_fetch_contact_profile_picture_bg,
             args=(conversation.pk, session_name, target_chat_id)
         ).start()
+
+    # Self-healing: if any messages for this group were previously saved into another conversation by mistake, reassign them
+    if is_group and conversation:
+        try:
+            WhatsAppMessage.objects.filter(
+                waha_message_id__icontains=target_chat_id
+            ).exclude(conversation=conversation).update(conversation=conversation)
+        except Exception:
+            pass
 
     _write_audit_log(
         action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,

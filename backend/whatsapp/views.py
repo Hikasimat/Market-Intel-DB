@@ -793,14 +793,15 @@ class WhatsAppSendMessageView(APIView):
                                     break
 
                     phone_formatted = f"+{digits}" if digits else None
+                    is_grp = raw_chat_id.endswith("@g.us")
                     target_conv = WhatsAppConversation.objects.create(
                         session=user_session,
                         chat_id=raw_chat_id,
-                        phone_number=phone_formatted,
-                        prospect_contact=matched_contact,
+                        phone_number=phone_formatted if not is_grp else None,
+                        prospect_contact=matched_contact if not is_grp else None,
                         prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
-                        is_matched=matched_contact is not None or (existing_any.is_matched if existing_any else False),
-                        whatsapp_name=matched_contact.contact_name if matched_contact else (existing_any.whatsapp_name if existing_any else ""),
+                        is_matched=matched_contact is not None or (existing_any.is_matched if existing_any else False) or is_grp,
+                        whatsapp_name=matched_contact.contact_name if matched_contact else (existing_any.whatsapp_name if existing_any else ("WhatsApp Group" if is_grp else "")),
                     )
 
                 if target_conv.is_deleted:
@@ -1516,14 +1517,15 @@ class WhatsAppSendMediaView(APIView):
         user_session = _get_user_session(request.user, create=True)
         session_name = user_session.session_name if user_session else (existing_conv.session.session_name if existing_conv and existing_conv.session else "default")
 
+        is_grp_media = chat_id.endswith("@g.us")
         target_conv, _ = WhatsAppConversation.objects.get_or_create(
             session=user_session,
             chat_id=chat_id,
             defaults={
                 "prospect_contact": existing_conv.prospect_contact if existing_conv else None,
                 "prospect": existing_conv.prospect if existing_conv else None,
-                "is_matched": existing_conv.is_matched if existing_conv else False,
-                "whatsapp_name": existing_conv.whatsapp_name if existing_conv else "",
+                "is_matched": (existing_conv.is_matched if existing_conv else False) or is_grp_media,
+                "whatsapp_name": existing_conv.whatsapp_name if existing_conv else ("WhatsApp Group" if is_grp_media else ""),
             }
         )
         if target_conv.is_deleted:
