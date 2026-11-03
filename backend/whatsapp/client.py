@@ -325,8 +325,6 @@ class WAHAClient:
             timeout=3.0,
         )
         return body
-        )
-        return body
 
     # -- Messaging -----------------------------------------------------------
 
