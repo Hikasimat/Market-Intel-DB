@@ -158,23 +158,20 @@ def _validate_session_name(name: str) -> tuple[bool, str]:
 
 def _get_user_session(user, create=True) -> WhatsAppSession:
     """
-    Resolve the active WhatsApp session belonging to the given user.
-    Enforces per-user isolated sessions:
-    - User 15 (LQ) retains session 'default'.
-    - Other users get deterministic session 'user_{user.id}'.
+    Resolve the active WhatsApp session.
+    The primary WAHA service operates the 'default' session for Market Intel.
+    All authorized users (PRE, LQ, Manager, Super Admin) connect through this active session.
     """
     if not user or not user.is_authenticated:
         return None
 
-    # 1. Existing active session owned by this user
-    session = WhatsAppSession.objects.filter(owner=user, is_active=True).first()
-    if session:
-        return session
-
-    # 2. If user is User 15 (LQ) or session 'default' belongs to this user / unowned
-    default_sess = WhatsAppSession.objects.filter(session_name="default", is_active=True).first()
-    if default_sess and (default_sess.owner == user or (default_sess.owner is None and user.id == 15)):
-        if default_sess.owner != user:
+    # Retrieve or create the primary 'default' session
+    default_sess = WhatsAppSession.objects.filter(session_name="default").first()
+    if default_sess:
+        if not default_sess.is_active:
+            default_sess.is_active = True
+            default_sess.save(update_fields=["is_active"])
+        if default_sess.owner is None:
             default_sess.owner = user
             default_sess.save(update_fields=["owner"])
         return default_sess
@@ -182,35 +179,31 @@ def _get_user_session(user, create=True) -> WhatsAppSession:
     if not create:
         return None
 
-    # 3. Create isolated per-user session
-    session_name = f"user_{user.id}"
     session, _ = WhatsAppSession.objects.get_or_create(
-        session_name=session_name,
+        session_name="default",
         defaults={
             "owner": user,
             "status": WhatsAppSession.Status.DISCONNECTED,
             "is_active": True,
         }
     )
-    if session.owner != user:
-        session.owner = user
-        session.save(update_fields=["owner"])
     return session
 
 
 def _get_owned_session(request, session_id=None, session_name=None):
     """
     Retrieve an active WhatsAppSession for the requesting user.
-    Superusers may access any session; normal users access only their own.
+    Superusers and authorized staff (PRE, LQ, Manager) can access the active default session.
     """
     qs = WhatsAppSession.objects.filter(is_active=True)
-    if not request.user.is_superuser:
-        qs = qs.filter(owner=request.user)
-
     if session_id:
-        return qs.filter(pk=session_id).first()
+        sess = qs.filter(pk=session_id).first()
+        if sess and (request.user.is_superuser or sess.owner == request.user or sess.session_name == "default"):
+            return sess
     if session_name:
-        return qs.filter(session_name=session_name).first()
+        sess = qs.filter(session_name=session_name).first()
+        if sess and (request.user.is_superuser or sess.owner == request.user or sess.session_name == "default"):
+            return sess
 
     return _get_user_session(request.user, create=True)
 
@@ -546,9 +539,17 @@ class WhatsAppQRView(APIView):
         # 6. Fetch live QR from WAHA if available
         try:
             qr_data = client.get_qr(session_name)
+            if not isinstance(qr_data, dict):
+                qr_data = {"qr": str(qr_data)}
+
             qr_base64 = qr_data.get("qrBase64") or ""
+            if not qr_base64:
+                qr_val = qr_data.get("qr") or qr_data.get("value") or qr_data.get("raw")
+                if qr_val and str(qr_val).startswith("data:image/"):
+                    qr_base64 = qr_val
             if qr_base64 and not qr_base64.startswith("data:image/"):
                 qr_base64 = f"data:image/png;base64,{qr_base64}"
+
             qr_data["qrBase64"] = qr_base64
             qr_data["status"] = "SCAN_QR_CODE"
             qr_data["connected"] = False
@@ -556,13 +557,13 @@ class WhatsAppQRView(APIView):
 
             # Cache the received QR so subsequent polls return it immediately without restarting
             LATEST_QR_CACHE[session_name] = {
-                "qr": qr_data.get("qr") or qr_data.get("value"),
+                "qr": qr_data.get("qr") or qr_data.get("value") or qr_base64,
                 "qrBase64": qr_base64,
                 "session": session_name,
                 "timestamp": timezone.now().isoformat(),
             }
             return Response(qr_data)
-        except WAHAServiceError as exc:
+        except Exception as exc:
             # Check cached QR one more time
             if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
                 qr_base64 = cached_qr.get("qrBase64") or ""
@@ -596,6 +597,8 @@ class WhatsAppPairingCodeView(APIView):
 
     def post(self, request):
         session_name = (request.data.get("session_name") or "default").strip()
+        if not session_name or session_name.startswith("user_"):
+            session_name = "default"
         phone_number = (request.data.get("phone_number") or "").strip()
         if not phone_number:
             return Response({"detail": "Phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -608,6 +611,10 @@ class WhatsAppPairingCodeView(APIView):
         client = get_waha_client()
         try:
             res = client.request_code(session_name, clean_phone)
+            if isinstance(res, dict):
+                code = res.get("code") or res.get("pairingCode") or res.get("raw")
+                if code:
+                    res["code"] = str(code)
             return Response(res, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to request pairing code for %s: %s", session_name, exc)

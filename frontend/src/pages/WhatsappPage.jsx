@@ -417,7 +417,7 @@ export default function WhatsappPage() {
     }
     setRequestingCode(true);
     try {
-      const sessionName = selectedSession?.session_name || '';
+      const sessionName = selectedSession?.session_name || 'default';
       const res = await api.post('/whatsapp/pair-code/', {
         session_name: sessionName,
         phone_number: clean,

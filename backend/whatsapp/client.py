@@ -129,9 +129,32 @@ class WAHAClient:
 
         try:
             with urlopen(request, timeout=self._timeout) as response:
-                raw = response.read().decode("utf-8")
-                parsed = json.loads(raw) if raw.strip() else {}
-                return response.status, parsed
+                content_type = (response.headers.get("Content-Type") or "").lower()
+                raw_bytes = response.read()
+
+                # If WAHA returns an image binary stream (e.g. GET /api/{session}/auth/qr returning image/png)
+                if "image/" in content_type:
+                    import base64
+                    clean_ct = content_type.split(";")[0].strip() or "image/png"
+                    b64 = base64.b64encode(raw_bytes).decode("ascii")
+                    return response.status, {
+                        "qrBase64": f"data:{clean_ct};base64,{b64}",
+                        "qr": f"data:{clean_ct};base64,{b64}",
+                        "format": "image",
+                    }
+
+                try:
+                    raw = raw_bytes.decode("utf-8")
+                    parsed = json.loads(raw) if raw.strip() else {}
+                    return response.status, parsed
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    import base64
+                    b64 = base64.b64encode(raw_bytes).decode("ascii")
+                    return response.status, {
+                        "qrBase64": f"data:image/png;base64,{b64}",
+                        "qr": f"data:image/png;base64,{b64}",
+                        "format": "image",
+                    }
 
         except HTTPError as exc:
             raw = exc.read().decode("utf-8") if exc.fp else ""
