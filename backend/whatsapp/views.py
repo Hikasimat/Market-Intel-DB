@@ -158,51 +158,49 @@ def _validate_session_name(name: str) -> tuple[bool, str]:
 
 def _get_user_session(user, create=True) -> WhatsAppSession:
     """
-    Resolve the active WhatsApp session.
-    The primary WAHA service operates the 'default' session for Market Intel.
-    All authorized users (PRE, LQ, Manager, Super Admin) connect through this active session.
+    Resolve the isolated active WhatsApp session for this specific user.
+    Each user has their own distinct WAHA session (e.g. 'user_1', 'user_2').
     """
     if not user or not user.is_authenticated:
         return None
 
-    # Retrieve or create the primary 'default' session
-    default_sess = WhatsAppSession.objects.filter(session_name="default").first()
-    if default_sess:
-        if not default_sess.is_active:
-            default_sess.is_active = True
-            default_sess.save(update_fields=["is_active"])
-        if default_sess.owner is None:
-            default_sess.owner = user
-            default_sess.save(update_fields=["owner"])
-        return default_sess
+    # 1. First check if the user already has an active session owned by them
+    user_sess = WhatsAppSession.objects.filter(owner=user, is_active=True).first()
+    if user_sess:
+        return user_sess
 
     if not create:
         return None
 
+    # 2. Automatically create an isolated per-user session
+    session_name = f"user_{user.id}"
     session, _ = WhatsAppSession.objects.get_or_create(
-        session_name="default",
+        session_name=session_name,
         defaults={
             "owner": user,
             "status": WhatsAppSession.Status.DISCONNECTED,
             "is_active": True,
         }
     )
+    if session.owner != user:
+        session.owner = user
+        session.save(update_fields=["owner"])
     return session
 
 
 def _get_owned_session(request, session_id=None, session_name=None):
     """
     Retrieve an active WhatsAppSession for the requesting user.
-    Superusers and authorized staff (PRE, LQ, Manager) can access the active default session.
+    Strictly enforces session ownership: users only access their own session.
     """
     qs = WhatsAppSession.objects.filter(is_active=True)
     if session_id:
         sess = qs.filter(pk=session_id).first()
-        if sess and (request.user.is_superuser or sess.owner == request.user or sess.session_name == "default"):
+        if sess and (request.user.is_superuser or sess.owner == request.user):
             return sess
     if session_name:
         sess = qs.filter(session_name=session_name).first()
-        if sess and (request.user.is_superuser or sess.owner == request.user or sess.session_name == "default"):
+        if sess and (request.user.is_superuser or sess.owner == request.user):
             return sess
 
     return _get_user_session(request.user, create=True)
@@ -211,7 +209,7 @@ def _get_owned_session(request, session_id=None, session_name=None):
 def _get_owned_conversation(request, conversation_id):
     """
     Retrieve a WhatsAppConversation.
-    Returns (conversation, error_response).
+    Strictly verifies ownership so users only access their own conversations.
     """
     try:
         conv = WhatsAppConversation.objects.select_related(
@@ -220,6 +218,11 @@ def _get_owned_conversation(request, conversation_id):
     except WhatsAppConversation.DoesNotExist:
         return None, Response(
             {"detail": "Conversation not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    if not request.user.is_superuser and conv.session and conv.session.owner and conv.session.owner != request.user:
+        return None, Response(
+            {"detail": "Conversation not found or not owned by you."},
             status=status.HTTP_404_NOT_FOUND,
         )
     return conv, None
@@ -584,9 +587,8 @@ class WhatsAppPairingCodeView(APIView):
     permission_classes = [IsAuthenticated, CanManageOwnWhatsAppSession]
 
     def post(self, request):
-        session_name = (request.data.get("session_name") or "default").strip()
-        if not session_name or session_name.startswith("user_"):
-            session_name = "default"
+        user_sess = _get_user_session(request.user, create=True)
+        session_name = (request.data.get("session_name") or (user_sess.session_name if user_sess else "default")).strip()
         phone_number = (request.data.get("phone_number") or "").strip()
         if not phone_number:
             return Response({"detail": "Phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -880,6 +882,33 @@ class WhatsAppConversationsView(APIView):
         qs = WhatsAppConversation.objects.select_related(
             "prospect_contact", "prospect", "session"
         ).filter(is_deleted=False)
+
+        # Opportunistically sync chats & groups from WAHA for this user's active session
+        if user_session and user_session.status == WhatsAppSession.Status.READY:
+            try:
+                from .client import get_waha_client
+                client = get_waha_client()
+                waha_chats = client.get_chats(user_session.session_name, limit=60)
+                for wc in waha_chats:
+                    c_id = wc.get("id")
+                    if not c_id:
+                        continue
+                    is_grp = c_id.endswith("@g.us")
+                    w_name = wc.get("name") or ("WhatsApp Group" if is_grp else "")
+                    conv_obj, created = WhatsAppConversation.objects.get_or_create(
+                        session=user_session,
+                        chat_id=c_id,
+                        defaults={
+                            "whatsapp_name": w_name,
+                            "unread_count": wc.get("unreadCount", 0),
+                            "is_matched": is_grp,
+                        }
+                    )
+                    if not created and is_grp and w_name and conv_obj.whatsapp_name != w_name:
+                        conv_obj.whatsapp_name = w_name
+                        conv_obj.save(update_fields=["whatsapp_name"])
+            except Exception as e:
+                logger.debug("Failed to sync live WAHA chats for %s: %s", user_session.session_name, e)
 
         if user.is_superuser and session_id:
             qs = qs.filter(session_id=session_id)
@@ -1965,3 +1994,51 @@ class WhatsAppConversationAvatarView(APIView):
         conv.custom_avatar_url = None
         conv.save(update_fields=["custom_avatar_url"])
         return Response({"detail": "Custom avatar removed."}, status=status.HTTP_200_OK)
+
+
+class WhatsAppGroupCreateView(APIView):
+    """
+    Create a new WhatsApp group chat for the user's active session.
+    POST /api/whatsapp/groups/create/
+    Body: {"name": "Market Leads", "participants": ["919876543210", ...]}
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request):
+        name = (request.data.get("name") or "").strip()
+        participants = request.data.get("participants") or []
+
+        if not name:
+            return Response({"detail": "Group name is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not participants or not isinstance(participants, list):
+            return Response({"detail": "At least one participant is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_session = _get_user_session(request.user, create=True)
+        session_name = user_session.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            res = client.create_group(session_name, name, participants)
+            chat_id = res.get("id") or (res.get("gid") or "")
+            if not chat_id and isinstance(res, dict):
+                chat_id = res.get("chatId") or res.get("groupJid") or ""
+
+            conv = None
+            if chat_id:
+                conv, _ = WhatsAppConversation.objects.get_or_create(
+                    session=user_session,
+                    chat_id=chat_id,
+                    defaults={
+                        "whatsapp_name": name,
+                        "is_matched": True,
+                    }
+                )
+
+            return Response({
+                "group": res,
+                "conversation": WhatsAppConversationSerializer(conv).data if conv else None,
+            }, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            logger.error("Failed to create WhatsApp group: %s", exc)
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

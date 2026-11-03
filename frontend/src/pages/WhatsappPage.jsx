@@ -26,6 +26,7 @@ import {
   AlertCircle,
   ExternalLink,
   User,
+  Users,
   MessageSquare,
   LogOut,
   ArrowLeft,
@@ -136,6 +137,8 @@ function ContactAvatar({ chat, size = "md", avatarVersion }) {
       <div className="relative z-0 flex items-center justify-center w-full h-full">
         {initials ? (
           <span>{initials}</span>
+        ) : (chat?.is_group || chat?.chat_id?.endsWith('@g.us')) ? (
+          <Users className={`${iconSizes} text-white/90`} />
         ) : (
           <User className={`${iconSizes} text-white/90`} />
         )}
@@ -291,9 +294,13 @@ export default function WhatsappPage() {
   // Media Lightbox Modal
   const [lightboxMedia, setLightboxMedia] = useState(null);
 
-  // New Chat Modal
+  // New Chat Modal & Group State
   const [showNewChatModal, setShowNewChatModal] = useState(false);
+  const [newChatTab, setNewChatTab] = useState('direct'); // 'direct' | 'group'
   const [newChatPhone, setNewChatPhone] = useState('');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [selectedGroupParticipants, setSelectedGroupParticipants] = useState([]);
+  const [creatingGroup, setCreatingGroup] = useState(false);
   const [keyPeople, setKeyPeople] = useState([]);
   const [loadingKeyPeople, setLoadingKeyPeople] = useState(false);
 
@@ -953,6 +960,10 @@ export default function WhatsappPage() {
 
   const getContactDisplayName = (chat) => {
     if (!chat) return 'Contact';
+    const isGroup = chat.is_group || chat.chat_id?.endsWith('@g.us');
+    if (isGroup) {
+      return chat.whatsapp_name || chat.contact_name || 'WhatsApp Group';
+    }
     // 1. CRM Key Person Name (e.g. "Mohanraj")
     if (chat.contact_name) return chat.contact_name;
 
@@ -973,6 +984,9 @@ export default function WhatsappPage() {
 
   const getContactSubtext = (chat) => {
     if (!chat) return '';
+    if (chat.is_group || chat.chat_id?.endsWith('@g.us')) {
+      return 'WhatsApp Group';
+    }
     const rawPhone = chat.phone_number || chat.prospect_phone || formatPhone(chat.chat_id);
     const phone = rawPhone ? (rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`) : '';
 
@@ -993,7 +1007,8 @@ export default function WhatsappPage() {
   // Filter conversations
   const filteredChats = chats.filter(chat => {
     if (chatFilter === 'unread' && chat.unread_count === 0) return false;
-    if (chatFilter === 'key' && !chat.is_matched) return false;
+    if (chatFilter === 'key' && (!chat.is_matched || chat.is_group || chat.chat_id?.endsWith('@g.us'))) return false;
+    if (chatFilter === 'groups' && !(chat.is_group || chat.chat_id?.endsWith('@g.us'))) return false;
 
     if (!searchQuery) return true;
     const name = getContactDisplayName(chat).toLowerCase();
@@ -1006,6 +1021,44 @@ export default function WhatsappPage() {
 
   // Check if session is authenticated
   const isConnected = selectedSession?.status === 'READY' || sessionStatus?.status === 'WORKING';
+
+  // Create New WhatsApp Group
+  const handleCreateGroup = async () => {
+    if (!newGroupName.trim()) {
+      showToast('Please enter a group name.', 'error');
+      return;
+    }
+    if (selectedGroupParticipants.length === 0) {
+      showToast('Please select at least one contact for the group.', 'error');
+      return;
+    }
+    setCreatingGroup(true);
+    try {
+      const res = await api.post('/whatsapp/groups/create/', {
+        name: newGroupName.trim(),
+        participants: selectedGroupParticipants,
+      });
+      showToast(`Group "${newGroupName.trim()}" created successfully!`, 'success');
+      setShowNewChatModal(false);
+      setNewGroupName('');
+      setSelectedGroupParticipants([]);
+      if (res.data?.conversation) {
+        setChats(prev => [res.data.conversation, ...prev.filter(c => c.id !== res.data.conversation.id)]);
+        setSelectedChat(res.data.conversation);
+      }
+      fetchConversations(false);
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to create group.', 'error');
+    } finally {
+      setCreatingGroup(false);
+    }
+  };
+
+  const toggleGroupParticipant = (phone) => {
+    setSelectedGroupParticipants(prev =>
+      prev.includes(phone) ? prev.filter(p => p !== phone) : [...prev, phone]
+    );
+  };
 
   // ===================================================================
   // RENDER: UNCONNECTED / QR CODE SCREEN
@@ -1309,6 +1362,14 @@ export default function WhatsappPage() {
               Unread
             </button>
             <button
+              onClick={() => setChatFilter('groups')}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition ${
+                chatFilter === 'groups' ? 'bg-[#00a884] text-white' : 'bg-[#f0f2f5] text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              Groups
+            </button>
+            <button
               onClick={() => setChatFilter('key')}
               className={`px-3 py-1 rounded-full text-xs font-medium transition ${
                 chatFilter === 'key' ? 'bg-[#00a884] text-white' : 'bg-[#f0f2f5] text-slate-600 hover:bg-slate-200'
@@ -1358,7 +1419,11 @@ export default function WhatsappPage() {
                     <div className="flex justify-between items-baseline mb-0.5">
                       <h3 className="font-semibold text-slate-800 text-sm truncate flex items-center gap-1.5">
                         <span className="truncate">{name}</span>
-                        {chat.is_matched && (
+                        {chat.is_group || chat.chat_id?.endsWith('@g.us') ? (
+                          <span className="px-1.5 py-0.2 text-[10px] bg-blue-100 text-blue-700 rounded font-normal flex items-center gap-1">
+                            <Users className="w-2.5 h-2.5" /> Group
+                          </span>
+                        ) : chat.is_matched && (
                           <span className="px-1.5 py-0.2 text-[10px] bg-emerald-100 text-emerald-700 rounded font-normal">
                             CRM
                           </span>
@@ -1553,6 +1618,13 @@ export default function WhatsappPage() {
                                 </div>
                               )}
                             </div>
+                          )}
+
+                          {/* Group Message Participant Name */}
+                          {!isMe && (selectedChat?.is_group || selectedChat?.chat_id?.endsWith('@g.us')) && msg.performed_by_name && (
+                            <span className="text-[11px] font-bold text-emerald-700 block mb-0.5">
+                              {msg.performed_by_name}
+                            </span>
                           )}
 
                           {/* Message Text Body */}
@@ -2132,61 +2204,169 @@ export default function WhatsappPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Start with Phone Number (with Country Code)
-                </label>
-                <div className="flex gap-2">
+            {/* Modal Tabs: Direct Chat vs Create Group */}
+            <div className="flex border-b border-slate-200 bg-slate-50 px-5 pt-3 gap-4">
+              <button
+                onClick={() => setNewChatTab('direct')}
+                className={`pb-2 text-xs font-bold transition flex items-center gap-1.5 border-b-2 ${
+                  newChatTab === 'direct'
+                    ? 'border-[#00a884] text-[#00a884]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <User className="w-4 h-4" /> Direct Chat
+              </button>
+              <button
+                onClick={() => setNewChatTab('group')}
+                className={`pb-2 text-xs font-bold transition flex items-center gap-1.5 border-b-2 ${
+                  newChatTab === 'group'
+                    ? 'border-[#00a884] text-[#00a884]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Users className="w-4 h-4" /> Create Group
+              </button>
+            </div>
+
+            {newChatTab === 'direct' ? (
+              <div className="p-5 space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
+                    Start with Phone Number (with Country Code)
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newChatPhone}
+                      onChange={e => setNewChatPhone(e.target.value)}
+                      placeholder="e.g. 919003619221"
+                      className="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                    />
+                    <button
+                      onClick={() => {
+                        if (newChatPhone.trim()) {
+                          handleStartNewChat(newChatPhone, newChatPhone, 'Direct WhatsApp');
+                          setNewChatPhone('');
+                        }
+                      }}
+                      className="bg-[#00a884] hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      Start Chat
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100">
+                  <span className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">
+                    Or select CRM Key Person:
+                  </span>
+
+                  <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                    {loadingKeyPeople ? (
+                      <div className="p-4 text-center text-xs text-slate-400">Loading contacts...</div>
+                    ) : keyPeople.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-slate-400">No CRM contacts found with phone numbers.</div>
+                    ) : (
+                      keyPeople.filter(kp => kp.phone_number).map(kp => (
+                        <div
+                          key={kp.id}
+                          onClick={() => handleStartNewChat(kp.phone_number, kp.contact_name, kp.prospect_name, kp.id)}
+                          className="p-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between transition"
+                        >
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">{kp.contact_name}</p>
+                            <p className="text-[11px] text-slate-500">{kp.prospect_name || 'CRM Lead'}</p>
+                          </div>
+                          <span className="text-xs font-mono text-emerald-600 font-semibold">{kp.phone_number}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-5 space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
+                    Group Name / Subject
+                  </label>
                   <input
                     type="text"
-                    value={newChatPhone}
-                    onChange={e => setNewChatPhone(e.target.value)}
-                    placeholder="e.g. 919003619221"
-                    className="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                    value={newGroupName}
+                    onChange={e => setNewGroupName(e.target.value)}
+                    placeholder="e.g. Marketing Leads Team"
+                    className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   />
+                </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                      Select Group Participants ({selectedGroupParticipants.length} selected)
+                    </label>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                    {loadingKeyPeople ? (
+                      <div className="p-4 text-center text-xs text-slate-400">Loading contacts...</div>
+                    ) : keyPeople.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-slate-400">No CRM contacts found with phone numbers.</div>
+                    ) : (
+                      keyPeople.filter(kp => kp.phone_number).map(kp => {
+                        const isSelected = selectedGroupParticipants.includes(kp.phone_number);
+                        return (
+                          <div
+                            key={kp.id}
+                            onClick={() => toggleGroupParticipant(kp.phone_number)}
+                            className={`p-3 cursor-pointer flex items-center justify-between transition ${
+                              isSelected ? 'bg-emerald-50/80' : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {}}
+                                className="rounded text-[#00a884] focus:ring-[#00a884] h-4 w-4 pointer-events-none"
+                              />
+                              <div>
+                                <p className="text-xs font-bold text-slate-800">{kp.contact_name}</p>
+                                <p className="text-[11px] text-slate-500">{kp.prospect_name || 'CRM Lead'}</p>
+                              </div>
+                            </div>
+                            <span className="text-xs font-mono text-slate-600">{kp.phone_number}</span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
                   <button
-                    onClick={() => {
-                      if (newChatPhone.trim()) {
-                        handleStartNewChat(newChatPhone, newChatPhone, 'Direct WhatsApp');
-                        setNewChatPhone('');
-                      }
-                    }}
-                    className="bg-[#00a884] hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-xl transition"
+                    onClick={() => setShowNewChatModal(false)}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition"
                   >
-                    Start Chat
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateGroup}
+                    disabled={creatingGroup || !newGroupName.trim() || selectedGroupParticipants.length === 0}
+                    className="bg-[#00a884] hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold px-5 py-2 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  >
+                    {creatingGroup ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Creating Group...
+                      </>
+                    ) : (
+                      <>
+                        <Users className="w-3.5 h-3.5" /> Create Group
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
-
-              <div className="pt-2 border-t border-slate-100">
-                <span className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">
-                  Or select CRM Key Person:
-                </span>
-
-                <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
-                  {loadingKeyPeople ? (
-                    <div className="p-4 text-center text-xs text-slate-400">Loading contacts...</div>
-                  ) : keyPeople.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-400">No CRM contacts found with phone numbers.</div>
-                  ) : (
-                    keyPeople.filter(kp => kp.phone_number).map(kp => (
-                      <div
-                        key={kp.id}
-                        onClick={() => handleStartNewChat(kp.phone_number, kp.contact_name, kp.prospect_name, kp.id)}
-                        className="p-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between transition"
-                      >
-                        <div>
-                          <p className="text-xs font-bold text-slate-800">{kp.contact_name}</p>
-                          <p className="text-[11px] text-slate-500">{kp.prospect_name || 'CRM Lead'}</p>
-                        </div>
-                        <span className="text-xs font-mono text-emerald-600 font-semibold">{kp.phone_number}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       )}

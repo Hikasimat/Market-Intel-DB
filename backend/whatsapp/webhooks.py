@@ -314,7 +314,7 @@ ALLOWED_EVENT_TYPES = frozenset([
 ])
 
 # Valid WhatsApp chat ID pattern.
-VALID_CHAT_ID_RE = re.compile(r"^\d{7,25}@(c\.us|g\.us|lid)$")
+VALID_CHAT_ID_RE = re.compile(r"^[0-9a-zA-Z_\-]+@(c\.us|g\.us|lid|s\.whatsapp\.net)$")
 PHONE_DIGITS_RE = re.compile(r"^\d{7,25}$")
 
 
@@ -641,7 +641,8 @@ def _handle_incoming_message(
     # -----------------------------------------------------------------------
     # Find or create conversation record.
     # -----------------------------------------------------------------------
-    is_matched = False
+    is_group = target_chat_id.endswith("@g.us")
+    is_matched = is_group
     prospect_contact = None
     
     # Extract name from WAHA payload (Baileys puts pushName in _data.pushName or top-level)
@@ -656,6 +657,22 @@ def _handle_incoming_message(
         or event_data.get("sender", {}).get("name")
         or ""
     ).strip()
+
+    group_name = (
+        event_data.get("chatName")
+        or (_data.get("chat") or {}).get("name")
+        or _data.get("subject")
+        or (event_data.get("chat") or {}).get("name")
+        or ""
+    ).strip()
+
+    group_author = (
+        event_data.get("author")
+        or event_data.get("participant")
+        or key.get("participant")
+        or ""
+    )
+    group_author_name = extracted_name or (group_author.split("@")[0].split(":")[0] if group_author else "")
 
     # Extract real phone number (Baileys senderPn/participantPn for @lid messages)
     resolved_phone = None
@@ -691,8 +708,15 @@ def _handle_incoming_message(
             conversation.phone_number = resolved_phone
             conv_updates.append("phone_number")
 
-        # Opportunistically update the name if we got one and it was missing
-        if extracted_name and (not conversation.whatsapp_name or conversation.whatsapp_name.startswith("+") or "@" in conversation.whatsapp_name):
+        # For groups, update the group subject/name if received
+        if is_group:
+            if not conversation.is_matched:
+                conversation.is_matched = True
+                conv_updates.append("is_matched")
+            if group_name and conversation.whatsapp_name != group_name:
+                conversation.whatsapp_name = group_name
+                conv_updates.append("whatsapp_name")
+        elif extracted_name and (not conversation.whatsapp_name or conversation.whatsapp_name.startswith("+") or "@" in conversation.whatsapp_name):
             conversation.whatsapp_name = extracted_name
             conv_updates.append("whatsapp_name")
             
@@ -770,15 +794,22 @@ def _handle_incoming_message(
                 except Exception:
                     pass
 
-            final_name = extracted_name or (matched_contact.contact_name if matched_contact else "")
-            final_phone = resolved_phone or (matched_contact.phone_number if matched_contact else None)
+            if is_group:
+                final_name = group_name or extracted_name or "WhatsApp Group"
+                final_phone = None
+                matched_status = True
+            else:
+                final_name = extracted_name or (matched_contact.contact_name if matched_contact else "")
+                final_phone = resolved_phone or (matched_contact.phone_number if matched_contact else None)
+                matched_status = matched_contact is not None
+
             conversation = WhatsAppConversation.objects.create(
                 chat_id=target_chat_id,
                 phone_number=final_phone,
                 prospect_contact=matched_contact,
                 prospect=matched_contact.prospect if matched_contact else None,
                 session=session_obj,
-                is_matched=matched_contact is not None,
+                is_matched=matched_status,
                 whatsapp_name=final_name,
             )
 
@@ -844,6 +875,7 @@ def _handle_incoming_message(
                 has_media=has_media,
                 media_url=_media_url,
                 media_mime_type=_mime_type,
+                error_code=(group_author_name or "")[:50] if (is_group and not is_from_me) else None,
             )
 
             # Update conversation metadata.

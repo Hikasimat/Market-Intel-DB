@@ -125,12 +125,14 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
     contact_designation = serializers.SerializerMethodField()
     contact_email = serializers.SerializerMethodField()
     prospect_id = serializers.SerializerMethodField()
+    is_group = serializers.SerializerMethodField()
 
     class Meta:
         model = WhatsAppConversation
         fields = [
             "id",
             "chat_id",
+            "is_group",
             "phone_number",
             "is_matched",
             "whatsapp_name",
@@ -150,7 +152,12 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def get_is_group(self, obj):
+        return bool(obj.chat_id and obj.chat_id.endswith("@g.us"))
+
     def get_contact_name(self, obj):
+        if obj.chat_id and obj.chat_id.endswith("@g.us"):
+            return getattr(obj, "whatsapp_name", None) or "WhatsApp Group"
         if obj.prospect_contact and obj.prospect_contact.contact_name:
             return obj.prospect_contact.contact_name
         if getattr(obj, "whatsapp_name", None):
@@ -223,6 +230,8 @@ class WhatsAppMessageSerializer(serializers.ModelSerializer):
     def get_performed_by_name(self, obj):
         if obj.performed_by:
             return obj.performed_by.get_full_name() or obj.performed_by.username
+        if obj.error_code and obj.direction == "INBOUND":
+            return obj.error_code
         return None
 
 

@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 # Regex for valid WhatsApp chat IDs.
-VALID_CHAT_ID_RE = re.compile(r"^\d{7,25}@(c\.us|g\.us|lid)$")
+VALID_CHAT_ID_RE = re.compile(r"^[0-9a-zA-Z_\-]+@(c\.us|g\.us|lid|s\.whatsapp\.net)$")
 
 # Opt-out keywords (case-insensitive).
 OPT_OUT_KEYWORDS = frozenset([

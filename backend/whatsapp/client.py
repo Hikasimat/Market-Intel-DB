@@ -494,6 +494,57 @@ class WAHAClient:
         )
         return body
 
+    # -- Groups --------------------------------------------------------------
+
+    def create_group(self, session_name: str, name: str, participants: list) -> dict:
+        """Create a WhatsApp group with participants."""
+        formatted_participants = []
+        for p in participants:
+            digits = re.sub(r"\D+", "", str(p))
+            if digits:
+                formatted_participants.append({"id": f"{digits}@c.us"})
+
+        payload = {
+            "name": name,
+            "participants": formatted_participants,
+        }
+        # WAHA supports /api/{session}/groups and /api/groups
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/{session_name}/groups",
+                payload=payload,
+                timeout=8.0,
+            )
+            return body
+        except Exception:
+            payload["session"] = session_name
+            _status, body = self._request(
+                "POST",
+                "/api/groups",
+                payload=payload,
+                timeout=8.0,
+            )
+            return body
+
+    def get_group_info(self, session_name: str, group_id: str) -> dict:
+        """Get group details and participants from WAHA."""
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/{session_name}/groups/{group_id}",
+                timeout=4.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception:
+            _status, body = self._request(
+                "GET",
+                f"/api/groups/{group_id}",
+                query={"session": session_name},
+                timeout=4.0,
+            )
+            return body if isinstance(body, dict) else {}
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton accessor
