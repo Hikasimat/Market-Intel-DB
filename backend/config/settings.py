@@ -172,33 +172,46 @@ SIMPLE_JWT = {
 }
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-CORS_ALLOWED_ORIGINS = [
+_default_cors_origins = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://marketinteldbapp.hikasimat.com',
+    'https://marketintel.hikasimat.com',
+]
+_env_cors = [
     origin.strip()
-    for origin in os.getenv(
-        'CORS_ALLOWED_ORIGINS',
-        'http://localhost:5173,http://127.0.0.1:5173,https://marketinteldbapp.hikasimat.com'
-    ).split(',')
+    for origin in os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
     if origin.strip()
 ]
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(_default_cors_origins + _env_cors))
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http://localhost(:[0-9]+)?$",
     r"^http://127\.0\.0\.1(:[0-9]+)?$",
     r"^https://.*\.hikasimat\.com$",
 ]
+CORS_ORIGIN_REGEX_WHITELIST = CORS_ALLOWED_ORIGIN_REGEXES
 
 # Allow cookies (JWT access/refresh) to be sent cross-origin
 CORS_ALLOW_CREDENTIALS = True
 
 # ── CSRF ──────────────────────────────────────────────────────────────────────
-CSRF_TRUSTED_ORIGINS = [
+_default_csrf_origins = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://marketinteldbapp.hikasimat.com',
+    'https://marketintel.hikasimat.com',
+]
+_env_csrf = [
     origin.strip()
-    for origin in os.getenv(
-        'CSRF_TRUSTED_ORIGINS',
-        'http://localhost:5173,http://127.0.0.1:5173,https://marketinteldbapp.hikasimat.com,https://marketintel.hikasimat.com'
-    ).split(',')
+    for origin in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',')
     if origin.strip()
 ]
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(_default_csrf_origins + _env_csrf))
 
 if not DEBUG:
     SESSION_COOKIE_SECURE = True

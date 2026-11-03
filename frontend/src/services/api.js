@@ -3,11 +3,8 @@ import { store } from '../app/store';
 import { tokenRefreshed, logout } from '../features/auth/authSlice';
 
 const getBaseUrl = () => {
-  // Local development: always use Vite's proxy (/api -> http://127.0.0.1:8000)
-  if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '5173')) {
-    return '/api';
-  }
   const envUrl = import.meta.env.VITE_API_BASE_URL;
+  // If explicitly configured in .env (e.g. https://marketintel.hikasimat.com/api)
   if (envUrl && envUrl.trim() && envUrl.trim() !== '/api') {
     const clean = envUrl.trim().replace(/\/+$/, '');
     return clean.endsWith('/api') ? clean : `${clean}/api`;
@@ -16,6 +13,7 @@ const getBaseUrl = () => {
   if (typeof window !== 'undefined' && window.location.hostname.includes('marketinteldbapp.hikasimat.com')) {
     return 'https://marketintel.hikasimat.com/api';
   }
+  // Local development default (Vite proxy: /api -> http://127.0.0.1:8000)
   return '/api';
 };
 
