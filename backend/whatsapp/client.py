@@ -119,7 +119,7 @@ class WAHAClient:
         headers = {
             # WAHA expects X-Api-Key with the plaintext key.
             "X-Api-Key": self._api_key,
-            "Accept": "application/json",
+            "Accept": "application/json, image/*, */*",
         }
 
         body = None

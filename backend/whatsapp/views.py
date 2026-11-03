@@ -534,33 +534,45 @@ class WhatsAppQRView(APIView):
             if qr_base64 and not qr_base64.startswith("data:image/"):
                 qr_base64 = f"data:image/png;base64,{qr_base64}"
 
-            qr_data["qrBase64"] = qr_base64
-            qr_data["status"] = "SCAN_QR_CODE"
-            qr_data["connected"] = False
-            qr_data["session_name"] = session_name
+            if qr_base64 or qr_data.get("qr") or qr_data.get("value"):
+                qr_data["qrBase64"] = qr_base64
+                qr_data["status"] = "SCAN_QR_CODE"
+                qr_data["connected"] = False
+                qr_data["session_name"] = session_name
+                set_cached_qr(session_name, qr_data)
+                return Response(qr_data)
 
-            set_cached_qr(session_name, qr_data)
-            return Response(qr_data)
+            # QR not ready in WAHA yet; request dispatch
+            try:
+                client.dispatch_qr(session_name)
+            except Exception:
+                pass
         except Exception as exc:
-            if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
-                qr_base64 = cached_qr.get("qrBase64") or ""
-                if qr_base64 and not qr_base64.startswith("data:image/"):
-                    qr_base64 = f"data:image/png;base64,{qr_base64}"
-                return Response({
-                    "status": "SCAN_QR_CODE",
-                    "connected": False,
-                    "session_name": session_name,
-                    "qr": cached_qr.get("qr") or cached_qr.get("value"),
-                    "qrBase64": qr_base64,
-                    "value": cached_qr.get("value") or cached_qr.get("qr"),
-                })
+            pass
 
+        if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
+            qr_base64 = cached_qr.get("qrBase64") or ""
+            if not qr_base64:
+                qr_val = cached_qr.get("qr") or cached_qr.get("value")
+                if qr_val and str(qr_val).startswith("data:image/"):
+                    qr_base64 = qr_val
+            if qr_base64 and not qr_base64.startswith("data:image/"):
+                qr_base64 = f"data:image/png;base64,{qr_base64}"
             return Response({
-                "status": "STARTING",
+                "status": "SCAN_QR_CODE",
                 "connected": False,
                 "session_name": session_name,
-                "message": "Generating WhatsApp QR code...",
+                "qr": cached_qr.get("qr") or cached_qr.get("value") or qr_base64,
+                "qrBase64": qr_base64,
+                "value": cached_qr.get("value") or cached_qr.get("qr") or qr_base64,
             })
+
+        return Response({
+            "status": "STARTING",
+            "connected": False,
+            "session_name": session_name,
+            "message": "Generating WhatsApp QR code...",
+        })
 
 
 class WhatsAppPairingCodeView(APIView):

@@ -304,6 +304,9 @@ ALLOWED_EVENT_TYPES = frozenset([
     "session.disconnected",
     "auth.qr",
     "auth.pairing_code",
+    "qrcode",
+    "qr",
+    "scan.qr",
     "presence.update",
     "group.v2.participants",
     "group.v2.update",
@@ -510,7 +513,7 @@ def process_webhook_event(
             _handle_session_connected(event_data, session_name, event_record)
         elif event_type == "session.disconnected":
             _handle_session_disconnected(event_data, session_name, event_record)
-        elif event_type == "auth.qr":
+        elif event_type in ("auth.qr", "qrcode", "qr", "scan.qr"):
             _handle_auth_qr(event_data, session_name, event_record)
 
         # Mark as processed.
@@ -1007,9 +1010,20 @@ def _handle_session_status(
         if phone:
             session.phone_number = phone
 
-        if mapped_status == WhatsAppSession.Status.READY and old_status != WhatsAppSession.Status.READY:
-            session.reconnect_count += 1
-            session.started_at = timezone.now()
+        qr = event_data.get("qr") or event_data.get("value")
+        qr_base64 = event_data.get("qrBase64") or ""
+        if qr or qr_base64:
+            set_cached_qr(session_name, {
+                "qr": qr or qr_base64,
+                "qrBase64": qr_base64,
+                "value": qr or qr_base64,
+            })
+
+        if mapped_status == WhatsAppSession.Status.READY:
+            clear_cached_qr(session_name)
+            if old_status != WhatsAppSession.Status.READY:
+                session.reconnect_count += 1
+                session.started_at = timezone.now()
 
         if mapped_status == WhatsAppSession.Status.DISCONNECTED and old_status == WhatsAppSession.Status.READY:
             session.disconnect_count += 1
