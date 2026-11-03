@@ -16,11 +16,21 @@ SECRET_KEY = os.getenv('SECRET_KEY', _default_key)
 if not DEBUG and SECRET_KEY == _default_key:
     raise ValueError("SECRET_KEY must be set in production!")
 
-ALLOWED_HOSTS = [
+_default_allowed_hosts = [
+    '127.0.0.1',
+    'localhost',
+    'host.docker.internal',
+    'marketintel.hikasimat.com',
+    'marketinteldbapp.hikasimat.com',
+    '.hikasimat.com',
+    'accepting-chef-shoulder-identical.trycloudflare.com',
+]
+_env_allowed = [
     h.strip()
-    for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,host.docker.internal,accepting-chef-shoulder-identical.trycloudflare.com').split(',')
+    for h in os.getenv('ALLOWED_HOSTS', '').split(',')
     if h.strip()
 ]
+ALLOWED_HOSTS = list(dict.fromkeys(_default_allowed_hosts + _env_allowed))
 
 # Trust the proxy (Nginx) HTTPS header so request.is_secure() works correctly.
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

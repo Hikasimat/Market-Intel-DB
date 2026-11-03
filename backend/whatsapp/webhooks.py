@@ -53,12 +53,74 @@ from .services import (
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache for the latest QR code pushed by WAHA
+# Shared file-based + in-memory cache for the latest QR code pushed by WAHA
 LATEST_QR_CACHE: dict = {}
 
+def _qr_cache_file(session_name: str) -> str:
+    import tempfile
+    clean = re.sub(r'[^a-zA-Z0-9_\-]', '', session_name) or "default"
+    return os.path.join(tempfile.gettempdir(), f"waha_qr_{clean}.json")
+
 def get_cached_qr(session_name: str = "default") -> Optional[dict]:
-    """Return the most recently received QR code for a session."""
-    return LATEST_QR_CACHE.get(session_name)
+    """Return the most recently received QR code for a session, shared across all worker processes."""
+    cached = LATEST_QR_CACHE.get(session_name)
+    if cached and (cached.get("qr") or cached.get("qrBase64")):
+        return cached
+
+    cache_path = _qr_cache_file(session_name)
+    try:
+        if os.path.exists(cache_path):
+            age = timezone.now().timestamp() - os.path.getmtime(cache_path)
+            if age <= 180:  # Valid for up to 3 minutes
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and (data.get("qr") or data.get("qrBase64")):
+                        LATEST_QR_CACHE[session_name] = data
+                        return data
+            else:
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+    except Exception as e:
+        logger.debug("Failed to read shared QR cache file: %s", e)
+    return None
+
+def set_cached_qr(session_name: str, qr_data: dict) -> None:
+    """Persist QR code to memory and disk so all Gunicorn workers see it immediately."""
+    if not isinstance(qr_data, dict):
+        return
+    qr = qr_data.get("qr") or qr_data.get("value") or qr_data.get("raw")
+    qr_base64 = qr_data.get("qrBase64") or ""
+    if not qr_base64 and qr and str(qr).startswith("data:image/"):
+        qr_base64 = qr
+    if qr_base64 and not qr_base64.startswith("data:image/"):
+        qr_base64 = f"data:image/png;base64,{qr_base64}"
+
+    payload = {
+        "qr": qr or qr_base64,
+        "qrBase64": qr_base64,
+        "value": qr or qr_base64,
+        "session": session_name,
+        "timestamp": timezone.now().isoformat(),
+    }
+    LATEST_QR_CACHE[session_name] = payload
+    try:
+        cache_path = _qr_cache_file(session_name)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception as e:
+        logger.debug("Failed to write shared QR cache file: %s", e)
+
+def clear_cached_qr(session_name: str) -> None:
+    """Clear cached QR code across memory and disk."""
+    LATEST_QR_CACHE.pop(session_name, None)
+    try:
+        cache_path = _qr_cache_file(session_name)
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+    except OSError:
+        pass
 
 
 def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
@@ -478,13 +540,12 @@ def process_webhook_event(
 def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
     qr = event_data.get("qr") or event_data.get("value")
     qr_base64 = event_data.get("qrBase64") or ""
-    if qr:
-        LATEST_QR_CACHE[session_name] = {
-            "qr": qr,
+    if qr or qr_base64:
+        set_cached_qr(session_name, {
+            "qr": qr or qr_base64,
             "qrBase64": qr_base64,
-            "session": session_name,
-            "timestamp": timezone.now().isoformat(),
-        }
+            "value": qr or qr_base64,
+        })
         WhatsAppSession.objects.filter(session_name=session_name).update(
             status=WhatsAppSession.Status.QR_REQUIRED
         )
@@ -492,7 +553,7 @@ def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppE
 
 
 def _handle_session_connected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
-    LATEST_QR_CACHE.pop(session_name, None)
+    clear_cached_qr(session_name)
     me = event_data.get("me") or {}
     phone = me.get("phone") or (me.get("id", "").split(":")[0] if ":" in me.get("id", "") else me.get("id", "").split("@")[0])
     name = me.get("name") or ""
@@ -508,7 +569,7 @@ def _handle_session_connected(event_data: dict, session_name: str, event_record:
 
 
 def _handle_session_disconnected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
-    LATEST_QR_CACHE.pop(session_name, None)
+    clear_cached_qr(session_name)
     is_logged_out = bool(event_data.get("isLoggedOut", False))
     new_status = WhatsAppSession.Status.FAILED if is_logged_out else WhatsAppSession.Status.DISCONNECTED
     WhatsAppSession.objects.filter(session_name=session_name).update(

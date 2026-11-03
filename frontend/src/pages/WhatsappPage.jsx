@@ -373,14 +373,10 @@ export default function WhatsappPage() {
           setQrExpired(false);
         }
       }
-      // If data.status is 'STARTING' and qrCodeData is already present, do not clear it
+      // If data.status is 'STARTING' or another intermediate state, keep existing qrCodeData visible
     } catch (err) {
       console.error('Failed to get QR code status:', err);
-      // Only set expired if error occurred and no QR exists
-      setQrCodeData(prev => {
-        if (!prev) setQrExpired(true);
-        return prev;
-      });
+      // Retain existing QR code so it never disappears on temporary network glitches
     } finally {
       setLoadingQR(false);
     }
@@ -405,7 +401,7 @@ export default function WhatsappPage() {
     return () => {
       if (qrPollTimerRef.current) clearInterval(qrPollTimerRef.current);
     };
-  }, [selectedSession?.session_name, selectedSession?.status, fetchQR]);
+  }, [selectedSession?.status, fetchQR]);
 
   // Request 8-digit Pairing Code via Phone Number
   const handleRequestPairingCode = async (e) => {

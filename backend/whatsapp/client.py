@@ -91,9 +91,9 @@ class WAHAClient:
     @staticmethod
     def _get_timeout() -> int:
         try:
-            return max(5, int(os.environ.get("WHATSAPP_SERVICE_TIMEOUT", "30")))
+            return max(2, min(int(os.environ.get("WHATSAPP_SERVICE_TIMEOUT", "4")), 10))
         except ValueError:
-            return 30
+            return 4
 
     def _request(
         self,
@@ -101,6 +101,7 @@ class WAHAClient:
         path: str,
         payload: Optional[dict] = None,
         query: Optional[dict] = None,
+        timeout: Optional[float] = None,
     ) -> tuple[int, Any]:
         """
         Execute an authenticated HTTP request to WAHA.
@@ -108,6 +109,7 @@ class WAHAClient:
         Returns (status_code, response_body).
         Raises WAHAServiceError on network or HTTP errors.
         """
+        effective_timeout = timeout if timeout is not None else self._timeout
         url = urljoin(self._base_url + "/", path.lstrip("/"))
 
         if query:
@@ -128,7 +130,7 @@ class WAHAClient:
         request = Request(url=url, method=method, data=body, headers=headers)
 
         try:
-            with urlopen(request, timeout=self._timeout) as response:
+            with urlopen(request, timeout=effective_timeout) as response:
                 content_type = (response.headers.get("Content-Type") or "").lower()
                 raw_bytes = response.read()
 
@@ -188,6 +190,31 @@ class WAHAClient:
             )
 
         except URLError as exc:
+            # Fallback for Docker container accessing host WAHA
+            reason_str = str(exc.reason).lower()
+            if ("connection refused" in reason_str or "errno 111" in reason_str) and ("localhost:3000" in url or "127.0.0.1:3000" in url):
+                for fallback_host in ("host.docker.internal:3000", "172.17.0.1:3000"):
+                    try:
+                        alt_url = url.replace("localhost:3000", fallback_host).replace("127.0.0.1:3000", fallback_host)
+                        alt_req = Request(url=alt_url, method=method, data=body, headers=headers)
+                        with urlopen(alt_req, timeout=min(2.0, effective_timeout)) as alt_resp:
+                            logger.info("WAHA fallback succeeded on %s", fallback_host)
+                            raw_bytes = alt_resp.read()
+                            ct = (alt_resp.headers.get("Content-Type") or "").lower()
+                            if "image/" in ct:
+                                import base64
+                                clean_ct = ct.split(";")[0].strip() or "image/png"
+                                b64 = base64.b64encode(raw_bytes).decode("ascii")
+                                return alt_resp.status, {"qrBase64": f"data:{clean_ct};base64,{b64}", "qr": f"data:{clean_ct};base64,{b64}", "format": "image"}
+                            try:
+                                return alt_resp.status, json.loads(raw_bytes.decode("utf-8"))
+                            except Exception:
+                                import base64
+                                b64 = base64.b64encode(raw_bytes).decode("ascii")
+                                return alt_resp.status, {"qrBase64": f"data:image/png;base64,{b64}", "qr": f"data:image/png;base64,{b64}", "format": "image"}
+                    except Exception:
+                        pass
+
             logger.error(
                 "WAHA unreachable: method=%s path=%s reason=%s",
                 method,
@@ -204,10 +231,10 @@ class WAHAClient:
                 "WAHA request timeout: method=%s path=%s timeout=%ds",
                 method,
                 path,
-                self._timeout,
+                effective_timeout,
             )
             raise WAHAServiceError(
-                f"WAHA request timed out after {self._timeout}s.",
+                f"WAHA request timed out after {effective_timeout}s.",
                 status_code=504,
             )
 
@@ -217,7 +244,7 @@ class WAHAClient:
 
     def health(self) -> dict:
         """Check WAHA health (unauthenticated endpoint)."""
-        _status, body = self._request("GET", "/health")
+        _status, body = self._request("GET", "/health", timeout=2.0)
         return body
 
     # -- Session management --------------------------------------------------
@@ -227,6 +254,7 @@ class WAHAClient:
         _status, body = self._request(
             "POST",
             f"/api/sessions/{session_name}/start",
+            timeout=3.5,
         )
         return body
 
@@ -235,6 +263,7 @@ class WAHAClient:
         _status, body = self._request(
             "POST",
             f"/api/sessions/{session_name}/stop",
+            timeout=3.5,
         )
         return body
 
@@ -243,6 +272,7 @@ class WAHAClient:
         _status, body = self._request(
             "POST",
             f"/api/sessions/{session_name}/logout",
+            timeout=3.5,
         )
         return body
 
@@ -251,6 +281,7 @@ class WAHAClient:
         self._request(
             "DELETE",
             f"/api/sessions/{session_name}",
+            timeout=3.0,
         )
 
     def get_session_status(self, session_name: str = "default") -> dict:
@@ -258,12 +289,13 @@ class WAHAClient:
         _status, body = self._request(
             "GET",
             f"/api/sessions/{session_name}",
+            timeout=2.5,
         )
         return body
 
     def get_all_sessions(self) -> list:
         """List all WAHA sessions."""
-        _status, body = self._request("GET", "/api/sessions")
+        _status, body = self._request("GET", "/api/sessions", timeout=2.5)
         return body if isinstance(body, list) else []
 
     def get_qr(self, session_name: str = "default") -> dict:
@@ -271,6 +303,7 @@ class WAHAClient:
         _status, body = self._request(
             "GET",
             f"/api/{session_name}/auth/qr",
+            timeout=3.0,
         )
         return body
 
@@ -280,6 +313,7 @@ class WAHAClient:
             "POST",
             f"/api/{session_name}/auth/request-code",
             payload={"phoneNumber": phone_number},
+            timeout=4.0,
         )
         return body
 
@@ -288,6 +322,9 @@ class WAHAClient:
         _status, body = self._request(
             "POST",
             f"/api/{session_name}/auth/qr/dispatch",
+            timeout=3.0,
+        )
+        return body
         )
         return body
 
