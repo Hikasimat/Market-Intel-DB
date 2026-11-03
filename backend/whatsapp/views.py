@@ -426,11 +426,25 @@ class WhatsAppQRView(APIView):
         session_name = session_obj.session_name
 
         from .client import get_waha_client, WAHAServiceError
-        from .webhooks import get_cached_qr
+        from .webhooks import get_cached_qr, LATEST_QR_CACHE
         import time
         client = get_waha_client()
 
-        # Check live WAHA session status first
+        force_restart = request.query_params.get("force_restart", "").lower() in ("1", "true", "yes")
+
+        # 1. If user explicitly requested a forced restart (e.g. clicked Reload QR Code)
+        if force_restart:
+            try:
+                client.delete_session(session_name)
+            except Exception:
+                pass
+            LATEST_QR_CACHE.pop(session_name, None)
+            try:
+                client.start_session(session_name)
+            except Exception as start_err:
+                logger.warning("Force restart WAHA session %s: %s", session_name, start_err)
+
+        # Check live WAHA session status
         waha_status = "UNKNOWN"
         me_info = {}
         try:
@@ -438,10 +452,11 @@ class WhatsAppQRView(APIView):
             waha_status = waha_info.get("status")
             me_info = waha_info.get("me") or {}
         except Exception as e:
-            logger.warning("Could not query WAHA session status for %s: %s", session_name, e)
+            logger.debug("Could not query WAHA session status for %s: %s", session_name, e)
 
-        # 1. If session is already authenticated and WORKING
+        # 2. If session is already authenticated and WORKING
         if waha_status == "WORKING":
+            LATEST_QR_CACHE.pop(session_name, None)
             phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
             if session_obj.status != "READY" or (phone and session_obj.phone_number != phone):
                 session_obj.status = WhatsAppSession.Status.READY
@@ -458,27 +473,35 @@ class WhatsAppQRView(APIView):
                 "message": "WhatsApp is connected and ready.",
             })
 
-        # 2. If session is FAILED or UNKNOWN or not in WAHA, auto-start it
-        if waha_status in ("FAILED", "UNKNOWN") or not waha_status:
-            try:
-                client.delete_session(session_name)
-            except Exception:
-                pass
-            try:
-                client.start_session(session_name)
-                waha_status = "STARTING"
-            except Exception as start_err:
-                logger.warning("Auto-start WAHA session %s: %s", session_name, start_err)
-        elif waha_status == "STOPPED":
-            try:
-                client.start_session(session_name)
-                waha_status = "STARTING"
-            except Exception as start_err:
-                logger.warning("Start WAHA session %s: %s", session_name, start_err)
+        # 3. If session does not exist or is STOPPED, start it gracefully (DO NOT delete on regular poll)
+        if not force_restart:
+            if waha_status == "STOPPED":
+                try:
+                    client.start_session(session_name)
+                    waha_status = "STARTING"
+                except Exception as start_err:
+                    logger.warning("Start WAHA session %s: %s", session_name, start_err)
+            elif waha_status == "FAILED":
+                try:
+                    client.start_session(session_name)
+                    waha_status = "STARTING"
+                except Exception:
+                    try:
+                        client.delete_session(session_name)
+                        client.start_session(session_name)
+                        waha_status = "STARTING"
+                    except Exception as start_err:
+                        logger.warning("Restart failed WAHA session %s: %s", session_name, start_err)
+            elif waha_status in ("UNKNOWN", None):
+                try:
+                    client.start_session(session_name)
+                    waha_status = "STARTING"
+                except Exception:
+                    pass
 
-        # 3. If STARTING, poll WAHA briefly (up to 3 seconds) for SCAN_QR_CODE or WORKING
+        # 4. If STARTING, poll WAHA briefly (up to 1.5s) for SCAN_QR_CODE or WORKING
         if waha_status == "STARTING":
-            for _ in range(6):
+            for _ in range(3):
                 time.sleep(0.5)
                 try:
                     waha_info = client.get_session_status(session_name)
@@ -490,6 +513,7 @@ class WhatsAppQRView(APIView):
                     pass
 
         if waha_status == "WORKING":
+            LATEST_QR_CACHE.pop(session_name, None)
             phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
             session_obj.status = WhatsAppSession.Status.READY
             if phone:
@@ -504,7 +528,7 @@ class WhatsAppQRView(APIView):
                 "message": "WhatsApp is connected and ready.",
             })
 
-        # 4. Check for cached QR event from webhook first
+        # 5. Check in-memory QR cache first (persists QR so it doesn't flicker or expire prematurely)
         cached_qr = get_cached_qr(session_name)
         if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
             qr_base64 = cached_qr.get("qrBase64") or ""
@@ -519,7 +543,7 @@ class WhatsAppQRView(APIView):
                 "value": cached_qr.get("value") or cached_qr.get("qr"),
             })
 
-        # 5. Fetch live QR from WAHA
+        # 6. Fetch live QR from WAHA if available
         try:
             qr_data = client.get_qr(session_name)
             qr_base64 = qr_data.get("qrBase64") or ""
@@ -529,13 +553,36 @@ class WhatsAppQRView(APIView):
             qr_data["status"] = "SCAN_QR_CODE"
             qr_data["connected"] = False
             qr_data["session_name"] = session_name
+
+            # Cache the received QR so subsequent polls return it immediately without restarting
+            LATEST_QR_CACHE[session_name] = {
+                "qr": qr_data.get("qr") or qr_data.get("value"),
+                "qrBase64": qr_base64,
+                "session": session_name,
+                "timestamp": timezone.now().isoformat(),
+            }
             return Response(qr_data)
         except WAHAServiceError as exc:
+            # Check cached QR one more time
+            if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64")):
+                qr_base64 = cached_qr.get("qrBase64") or ""
+                if qr_base64 and not qr_base64.startswith("data:image/"):
+                    qr_base64 = f"data:image/png;base64,{qr_base64}"
+                return Response({
+                    "status": "SCAN_QR_CODE",
+                    "connected": False,
+                    "session_name": session_name,
+                    "qr": cached_qr.get("qr") or cached_qr.get("value"),
+                    "qrBase64": qr_base64,
+                    "value": cached_qr.get("value") or cached_qr.get("qr"),
+                })
+
             return Response({
                 "status": waha_status if waha_status in ("STARTING", "SCAN_QR_CODE") else "STARTING",
                 "connected": False,
                 "session_name": session_name,
                 "detail": str(exc),
+                "message": "Generating WhatsApp QR code...",
             }, status=status.HTTP_200_OK)
 
 

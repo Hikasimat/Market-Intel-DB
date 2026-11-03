@@ -176,9 +176,15 @@ CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         'CORS_ALLOWED_ORIGINS',
-        'http://localhost:5173'
+        'http://localhost:5173,http://127.0.0.1:5173,https://marketinteldbapp.hikasimat.com'
     ).split(',')
     if origin.strip()
+]
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^http://localhost(:[0-9]+)?$",
+    r"^http://127\.0\.0\.1(:[0-9]+)?$",
+    r"^https://.*\.hikasimat\.com$",
 ]
 
 # Allow cookies (JWT access/refresh) to be sent cross-origin
@@ -189,7 +195,7 @@ CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         'CSRF_TRUSTED_ORIGINS',
-        'http://localhost:5173'
+        'http://localhost:5173,http://127.0.0.1:5173,https://marketinteldbapp.hikasimat.com,https://marketintel.hikasimat.com'
     ).split(',')
     if origin.strip()
 ]

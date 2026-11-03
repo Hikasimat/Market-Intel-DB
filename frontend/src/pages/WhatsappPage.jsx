@@ -346,10 +346,14 @@ export default function WhatsappPage() {
   }, [fetchSessions]);
 
   // Fetch live QR or Connection state for current user's session
-  const fetchQR = useCallback(async () => {
-    setLoadingQR(true);
+  const fetchQR = useCallback(async (forceRestart = false) => {
+    // Only trigger full spinner if we don't already have a valid QR code displayed
+    if (forceRestart) {
+      setLoadingQR(true);
+    }
     try {
-      const res = await api.get('/whatsapp/qr/');
+      const url = forceRestart ? '/whatsapp/qr/?force_restart=true' : '/whatsapp/qr/';
+      const res = await api.get(url);
       const data = res.data;
       setSessionStatus(data);
 
@@ -364,33 +368,44 @@ export default function WhatsappPage() {
         }));
       } else if (data.status === 'SCAN_QR_CODE') {
         const qr = data.qrBase64 || data.qr || data.value;
-        setQrCodeData(qr);
-        setQrExpired(false);
+        if (qr) {
+          setQrCodeData(qr);
+          setQrExpired(false);
+        }
       }
+      // If data.status is 'STARTING' and qrCodeData is already present, do not clear it
     } catch (err) {
       console.error('Failed to get QR code status:', err);
-      setQrExpired(true);
+      // Only set expired if error occurred and no QR exists
+      setQrCodeData(prev => {
+        if (!prev) setQrExpired(true);
+        return prev;
+      });
     } finally {
       setLoadingQR(false);
     }
   }, []);
 
-  // QR Polling: Auto-refresh QR and auto-detect when phone connects
+  // QR Polling: Keep QR visible and stable for scanning, poll to detect when phone connects
   useEffect(() => {
-    const isReady = selectedSession?.status === 'READY' || sessionStatus?.status === 'WORKING';
-    if (!isReady) {
-      fetchQR();
-      qrPollTimerRef.current = setInterval(() => {
-        fetchQR();
-      }, 3000);
-    } else {
+    const isReady = selectedSession?.status === 'READY';
+    if (isReady) {
       if (qrPollTimerRef.current) clearInterval(qrPollTimerRef.current);
+      return;
     }
+
+    // Initial QR request
+    fetchQR(false);
+
+    // Poll every 5 seconds to detect connection without restarting the session
+    qrPollTimerRef.current = setInterval(() => {
+      fetchQR(false);
+    }, 5000);
 
     return () => {
       if (qrPollTimerRef.current) clearInterval(qrPollTimerRef.current);
     };
-  }, [selectedSession?.status, sessionStatus?.status, fetchQR]);
+  }, [selectedSession?.session_name, selectedSession?.status, fetchQR]);
 
   // Request 8-digit Pairing Code via Phone Number
   const handleRequestPairingCode = async (e) => {
@@ -1124,7 +1139,7 @@ export default function WhatsappPage() {
                         <AlertCircle className="w-10 h-10 text-amber-500" />
                         <span className="text-sm font-semibold text-slate-700">QR code expired</span>
                         <button
-                          onClick={fetchQR}
+                          onClick={() => fetchQR(true)}
                           className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition"
                         >
                           <RefreshCw className="w-3.5 h-3.5" /> Reload QR Code
@@ -1138,7 +1153,7 @@ export default function WhatsappPage() {
                     <span className="text-sm font-semibold text-slate-700">Connecting to WhatsApp...</span>
                     <span className="text-xs text-slate-500">Generating live QR code</span>
                     <button
-                      onClick={fetchQR}
+                      onClick={() => fetchQR(true)}
                       className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition"
                     >
                       <RefreshCw className="w-3.5 h-3.5" /> Refresh

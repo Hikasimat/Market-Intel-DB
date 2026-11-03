@@ -211,14 +211,22 @@ const CmsPage = () => {
 
   const fetchPages = useCallback(async () => {
     setLoadingPages(true);
-    const res = await cmsService.getPages({
-      status: pageFilter !== 'ALL' ? pageFilter : undefined,
-      search: pageSearch || undefined,
-    });
-    if (res.ok) {
-      setPages(res.data.pages || []);
+    try {
+      const res = await cmsService.getPages({
+        status: pageFilter !== 'ALL' ? pageFilter : undefined,
+        search: pageSearch || undefined,
+      });
+      if (res.ok) {
+        setPages(res.data.pages || []);
+      } else {
+        toast.error(res.error || 'Failed to load CMS pages');
+      }
+    } catch (err) {
+      console.error('Failed to load CMS pages:', err);
+      toast.error('Failed to load CMS pages');
+    } finally {
+      setLoadingPages(false);
     }
-    setLoadingPages(false);
   }, [pageFilter, pageSearch]);
 
   const fetchAnalytics = useCallback(async () => {
@@ -860,7 +868,11 @@ const CmsPage = () => {
           </button>
 
           <a
-            href="/api/digital-marketing/cms/sitemap.xml"
+            href={
+              typeof window !== 'undefined' && window.location.hostname.includes('marketinteldbapp.hikasimat.com')
+                ? 'https://marketintel.hikasimat.com/api/digital-marketing/cms/sitemap.xml'
+                : '/api/digital-marketing/cms/sitemap.xml'
+            }
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition shadow-xs"
