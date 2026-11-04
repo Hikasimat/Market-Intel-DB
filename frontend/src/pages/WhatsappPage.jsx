@@ -440,82 +440,87 @@ export default function WhatsappPage() {
     playbackBlobUrl: null,
   });
 
-  // Calling device pairing states
+  // Unified WhatsApp VoIP & Incoming Call Management
   const [isCallingPaired, setIsCallingPaired] = useState(false);
-  const [showCallingPairModal, setShowCallingPairModal] = useState(false);
-  const [callingPairQR, setCallingPairQR] = useState(null);
-  const [isCallingPairLoading, setIsCallingPairLoading] = useState(false);
-  const callingPollTimerRef = useRef(null);
+  const [incomingCall, setIncomingCall] = useState(null); // { call_id, caller_name, caller_phone, session_name, is_video }
 
   const checkCallingStatus = useCallback(async () => {
     try {
       const res = await api.get('/whatsapp/calls/status/');
-      if (res.data?.calling?.paired || res.data?.paired) {
+      if (res.data?.calling?.paired || res.data?.paired || res.data?.connected) {
         setIsCallingPaired(true);
       } else {
         setIsCallingPaired(false);
       }
+
+      const incoming = res.data?.incoming_call;
+      if (incoming && incoming.call_id) {
+        if (!callState.active || callState.callId !== incoming.call_id) {
+          setIncomingCall(prev => {
+            if (prev?.call_id === incoming.call_id) return prev;
+            return incoming;
+          });
+        }
+      } else {
+        setIncomingCall(null);
+      }
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, []);
+  }, [callState.active, callState.callId]);
 
   useEffect(() => {
     checkCallingStatus();
+    const interval = setInterval(checkCallingStatus, 2500);
+    return () => clearInterval(interval);
   }, [checkCallingStatus]);
 
-  const handleOpenCallingPair = useCallback(async () => {
-    setShowCallingPairModal(true);
-    setIsCallingPairLoading(true);
-    setCallingPairQR(null);
+  // Answer Incoming WhatsApp Voice Call
+  const handleAcceptIncomingCall = useCallback(async () => {
+    if (!incomingCall) return;
+    const currentIncoming = incomingCall;
+    const callId = currentIncoming.call_id;
+    const sessionToUse = currentIncoming.session_name || selectedSession?.session_name || 'default';
+
+    setIncomingCall(null);
+    setCallState({
+      active: true,
+      status: 'connected',
+      callId: callId,
+      peerName: currentIncoming.caller_name || 'WhatsApp Contact',
+      peerPhone: currentIncoming.caller_phone || '',
+      duration: 0,
+      isMuted: false,
+      error: null,
+      sessionName: sessionToUse,
+    });
 
     try {
-      const res = await api.post('/whatsapp/calls/pair/');
-      const qrData = res.data?.qrBase64 || res.data?.qr;
-      if (qrData) {
-        setCallingPairQR(qrData.startsWith('data:image') ? qrData : `data:image/png;base64,${qrData}`);
-      }
-      if (res.data?.paired) {
-        setIsCallingPaired(true);
-        setShowCallingPairModal(false);
-        showToast('WhatsApp voice calling is already linked and ready!', 'success');
-        return;
-      }
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`);
+    } catch (acceptErr) {
+      console.warn('Accept call error (may already be accepted):', acceptErr);
+    }
+
+    try {
+      await initWebRTCAudioChannel(callId, sessionToUse);
+    } catch (audioErr) {
+      console.error('WebRTC Audio connect error:', audioErr);
+      showToast('Connected, but audio channel initialization failed.', 'error');
+    }
+  }, [incomingCall, selectedSession?.session_name, initWebRTCAudioChannel, showToast]);
+
+  // Reject / Decline Incoming WhatsApp Voice Call
+  const handleRejectIncomingCall = useCallback(async () => {
+    if (!incomingCall) return;
+    const callId = incomingCall.call_id;
+    setIncomingCall(null);
+    try {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`);
+      showToast('Call declined', 'info');
     } catch (err) {
-      console.warn('Initiate calling pair failed:', err);
-    } finally {
-      setIsCallingPairLoading(false);
+      console.warn('Decline call error:', err);
     }
-
-    if (callingPollTimerRef.current) clearInterval(callingPollTimerRef.current);
-    callingPollTimerRef.current = setInterval(async () => {
-      try {
-        const checkRes = await api.get('/whatsapp/calls/pair/');
-        const isPaired = checkRes.data?.paired || checkRes.data?.calling_status?.paired;
-        if (isPaired) {
-          clearInterval(callingPollTimerRef.current);
-          callingPollTimerRef.current = null;
-          setIsCallingPaired(true);
-          setShowCallingPairModal(false);
-          showToast('WhatsApp voice calling device linked successfully!', 'success');
-          return;
-        }
-        const qrData = checkRes.data?.qrBase64 || checkRes.data?.qr;
-        if (qrData) {
-          setCallingPairQR(qrData.startsWith('data:image') ? qrData : `data:image/png;base64,${qrData}`);
-        }
-      } catch (_) {}
-    }, 2000);
-  }, []);
-
-  const handleCloseCallingPair = useCallback(() => {
-    if (callingPollTimerRef.current) {
-      clearInterval(callingPollTimerRef.current);
-      callingPollTimerRef.current = null;
-    }
-    setShowCallingPairModal(false);
-    checkCallingStatus();
-  }, [checkCallingStatus]);
+  }, [incomingCall, showToast]);
 
   useEffect(() => {
     return () => {
@@ -774,8 +779,7 @@ export default function WhatsappPage() {
       const isNotPaired = err.response?.data?.error === 'calling_not_paired' || (err.response?.data?.detail || '').includes('calling device') || (err.response?.data?.error || '').includes('not paired');
       if (isNotPaired) {
         cleanupCallSession();
-        handleOpenCallingPair();
-        showToast('WhatsApp voice calling is not linked yet. Please scan the QR code to link.', 'info');
+        showToast('Voice calling is initializing with your connected WhatsApp session. Please try again.', 'info');
         return;
       }
       setCallState((prev) => ({
@@ -787,7 +791,7 @@ export default function WhatsappPage() {
         cleanupCallSession();
       }, 4000);
     }
-  }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession, handleOpenCallingPair]);
+  }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession, showToast]);
 
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
@@ -1775,20 +1779,11 @@ export default function WhatsappPage() {
                   <span className="w-2 h-2 rounded-full bg-emerald-500" />
                   <span className="text-xs text-slate-500 font-mono">{currentUserPhone || 'Online'}</span>
                 </div>
-                {isCallingPaired ? (
+                {isConnected && (
                   <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200" title="WhatsApp Voice VoIP Active">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                     VoIP Ready
                   </span>
-                ) : (
-                  <button
-                    onClick={handleOpenCallingPair}
-                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition cursor-pointer"
-                    title="Click to link WhatsApp VoIP calling"
-                  >
-                    <PhoneCall className="w-2.5 h-2.5" />
-                    Link Calling
-                  </button>
                 )}
               </div>
             </div>
@@ -1911,6 +1906,15 @@ export default function WhatsappPage() {
             >
               CRM Contacts
             </button>
+            {chatFilter === 'groups' && (
+              <button
+                onClick={() => { fetchConversations(false); showToast('Syncing groups from WhatsApp...', 'info'); }}
+                className="ml-auto px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1 transition cursor-pointer"
+                title="Sync active groups from WhatsApp"
+              >
+                <RefreshCw className="w-3 h-3" /> Sync Groups
+              </button>
+            )}
           </div>
         </div>
 
@@ -1923,14 +1927,38 @@ export default function WhatsappPage() {
             </div>
           ) : filteredChats.length === 0 ? (
             <div className="p-8 text-center text-slate-400">
-              <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-30" />
-              <p className="text-sm font-medium text-slate-600">No conversations found</p>
-              <button
-                onClick={() => { setShowNewChatModal(true); fetchKeyPeople(); }}
-                className="mt-3 text-xs text-emerald-600 hover:underline font-semibold"
-              >
-                + Start a new conversation
-              </button>
+              {chatFilter === 'groups' ? (
+                <>
+                  <Users className="w-12 h-12 mx-auto mb-2 opacity-30 text-emerald-600" />
+                  <p className="text-sm font-medium text-slate-700">No WhatsApp groups found</p>
+                  <p className="text-xs text-slate-500 mt-1 mb-3">Create a new group or sync groups directly from your phone.</p>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      onClick={() => { setNewChatTab('group'); setShowNewChatModal(true); fetchKeyPeople(); }}
+                      className="px-3 py-1.5 bg-[#00a884] hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+                    >
+                      + Create New Group
+                    </button>
+                    <button
+                      onClick={() => { fetchConversations(false); showToast('Syncing groups from WhatsApp...', 'info'); }}
+                      className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition"
+                    >
+                      Sync from Phone
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-30" />
+                  <p className="text-sm font-medium text-slate-600">No conversations found</p>
+                  <button
+                    onClick={() => { setShowNewChatModal(true); fetchKeyPeople(); }}
+                    className="mt-3 text-xs text-emerald-600 hover:underline font-semibold"
+                  >
+                    + Start a new conversation
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             filteredChats.map(chat => {
@@ -3158,86 +3186,56 @@ export default function WhatsappPage() {
         </div>
       )}
 
-      {/* WhatsApp Voice Calling Device Pairing Modal */}
-      {showCallingPairModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
-            {/* Modal Header */}
-            <div className="px-6 py-4 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-white/20 backdrop-blur-xs">
-                  <PhoneCall className="w-5 h-5 text-white" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-base leading-tight">Link WhatsApp Voice Calling</h3>
-                  <p className="text-emerald-100 text-xs">Scan QR code to enable real-time VoIP voice calling</p>
-                </div>
+      {/* Incoming WhatsApp Call Modal */}
+      {incomingCall && !callState.active && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-slate-900 text-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden border border-slate-700 p-8 flex flex-col items-center text-center relative">
+            {/* Pulsing Ring Animation */}
+            <div className="relative mb-6">
+              <span className="absolute -inset-4 rounded-full bg-emerald-500/20 animate-ping" />
+              <span className="absolute -inset-8 rounded-full bg-emerald-500/10 animate-pulse" />
+              <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-lg border-2 border-emerald-400/50">
+                <PhoneCall className="w-12 h-12 text-white animate-bounce" />
               </div>
-              <button
-                onClick={handleCloseCallingPair}
-                className="p-1.5 rounded-lg hover:bg-white/20 transition text-emerald-100 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
             </div>
 
-            {/* Modal Body */}
-            <div className="p-6 flex flex-col items-center text-center">
-              {/* QR Code Container */}
-              <div className="relative w-64 h-64 bg-slate-50 border-2 border-dashed border-emerald-300 rounded-2xl flex items-center justify-center p-3 mb-4 shadow-inner">
-                {isCallingPairLoading ? (
-                  <div className="flex flex-col items-center gap-3 text-slate-500">
-                    <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
-                    <span className="text-xs font-medium">Generating calling QR code...</span>
-                  </div>
-                ) : callingPairQR ? (
-                  <img
-                    src={callingPairQR}
-                    alt="WhatsApp Calling QR Code"
-                    className="w-full h-full object-contain rounded-xl"
-                  />
-                ) : (
-                  <div className="flex flex-col items-center gap-2 text-slate-400">
-                    <AlertCircle className="w-8 h-8 text-amber-500" />
-                    <span className="text-xs font-medium text-slate-600">Waiting for QR code...</span>
-                    <button
-                      onClick={handleOpenCallingPair}
-                      className="mt-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold cursor-pointer"
-                    >
-                      Retry
-                    </button>
-                  </div>
-                )}
+            {/* Caller Information */}
+            <h3 className="text-xl font-bold text-white mb-1">
+              {incomingCall.caller_name || 'WhatsApp Caller'}
+            </h3>
+            <p className="text-sm font-mono text-emerald-400 mb-2">
+              {incomingCall.caller_phone || 'WhatsApp Voice Call'}
+            </p>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium mb-8">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              Incoming WhatsApp Call...
+            </div>
+
+            {/* Action Buttons: Decline & Answer */}
+            <div className="flex items-center justify-center gap-8 w-full">
+              {/* Decline Button */}
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={handleRejectIncomingCall}
+                  className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 cursor-pointer"
+                  title="Decline Call"
+                >
+                  <PhoneOff className="w-7 h-7" />
+                </button>
+                <span className="text-xs font-medium text-slate-300">Decline</span>
               </div>
 
-              {/* Status indicator */}
-              <div className="flex items-center gap-2 mb-4 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                <span>Auto-refreshing & detecting connection...</span>
+              {/* Answer Button */}
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={handleAcceptIncomingCall}
+                  className="w-16 h-16 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white flex items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 cursor-pointer ring-4 ring-emerald-500/30"
+                  title="Answer Call"
+                >
+                  <PhoneCall className="w-7 h-7" />
+                </button>
+                <span className="text-xs font-semibold text-emerald-400">Answer</span>
               </div>
-
-              {/* Step by Step Instructions */}
-              <div className="w-full text-left bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2 text-xs text-slate-700 mb-4">
-                <p className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <span>📱 How to link on your phone:</span>
-                </p>
-                <ol className="list-decimal list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
-                  <li>Open <strong>WhatsApp</strong> on your phone</li>
-                  <li>Tap <strong>Settings</strong> or <strong>Menu (⋮)</strong> &gt; <strong>Linked Devices</strong></li>
-                  <li>Tap <strong>Link a device</strong> and scan this QR code</li>
-                </ol>
-                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200/80 rounded-lg p-2 mt-2">
-                  <strong>Note:</strong> WhatsApp allows up to 4 linked devices per phone. If WhatsApp shows <em>"Couldn't link device"</em>, please remove any old or unused devices in your phone's Linked Devices list first.
-                </p>
-              </div>
-
-              {/* Close Button */}
-              <button
-                onClick={handleCloseCallingPair}
-                className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition cursor-pointer"
-              >
-                Close & Return
-              </button>
             </div>
           </div>
         </div>

@@ -170,16 +170,28 @@ class WAHAClient:
             except json.JSONDecodeError:
                 detail = {"detail": raw or "WAHA returned an error."}
 
-            # Log without exposing the API key.
-            logger.warning(
-                "WAHA HTTP error: method=%s path=%s status=%d payload=%s detail=%s",
-                method,
-                path,
-                exc.code,
-                payload,
-                detail,
-                extra={"status_code": exc.code},
+            # Log without exposing the API key (silence benign probes that 404 on noweb-light).
+            is_benign_404 = exc.code == 404 and (
+                path == "/api/chats"
+                or path.startswith(("/api/chats/", "/api/groups/"))
+                or path in ("/api/groups",)
             )
+            if is_benign_404:
+                logger.debug(
+                    "WAHA probe 404 (benign/unsupported route): method=%s path=%s",
+                    method,
+                    path,
+                )
+            else:
+                logger.warning(
+                    "WAHA HTTP error: method=%s path=%s status=%d payload=%s detail=%s",
+                    method,
+                    path,
+                    exc.code,
+                    payload,
+                    detail,
+                    extra={"status_code": exc.code},
+                )
 
             if exc.code == 401:
                 raise WAHAAuthError(
@@ -477,21 +489,22 @@ class WAHAClient:
 
     # -- Chat / messages -----------------------------------------------------
 
-    def get_chats(self, session_name: str = "default", limit: int = 50) -> list:
-        """Get list of chats."""
+    def get_groups(self, session_name: str = "default") -> list:
+        """Get list of participating groups from WAHA noweb-light."""
         try:
             _status, body = self._request(
                 "GET",
-                "/api/chats",
-                query={"session": session_name, "limit": limit},
+                f"/api/{session_name}/groups",
+                timeout=5.0,
             )
             return body if isinstance(body, list) else []
-        except WAHAServiceError as exc:
-            if exc.status_code == 404:
-                return []
-            raise
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to get groups from WAHA for session %s: %s", session_name, e)
             return []
+
+    def get_chats(self, session_name: str = "default", limit: int = 50) -> list:
+        """Get list of chats / groups from WAHA noweb-light."""
+        return self.get_groups(session_name)
 
     def get_messages(
         self,
@@ -659,7 +672,25 @@ class WAHAClient:
             except Exception:
                 continue
 
-        return candidates[0] if candidates else "default"
+        # If none reported paired in calling subsystem, prefer any actively WORKING Baileys session
+        working_sessions = []
+        try:
+            sessions = self.get_all_sessions()
+            if isinstance(sessions, list):
+                for s in sessions:
+                    if isinstance(s, dict) and s.get("status") == "WORKING":
+                        w_name = s.get("name")
+                        if w_name and w_name not in working_sessions:
+                            working_sessions.append(w_name)
+        except Exception:
+            pass
+
+        if working_sessions:
+            if preferred_session in working_sessions:
+                return preferred_session
+            return working_sessions[0]
+
+        return candidates[0] if candidates else (preferred_session or "default")
 
     def pair_calling(self, session_name: str) -> dict:
         """Initiate pairing for calling subsystem."""

@@ -896,7 +896,24 @@ class WhatsAppSendMessageView(APIView):
                         reply_to_id = last_inbound.waha_message_id
 
                 client = get_waha_client()
-                waha_res = client.send_text(actual_session_name, raw_chat_id, message_body, reply_to=reply_to_id)
+                is_crm_group = (
+                    raw_chat_id.startswith("crm_group_")
+                    or bool(target_conv.metadata and target_conv.metadata.get("is_crm_group"))
+                )
+                if is_crm_group:
+                    participants = (target_conv.metadata or {}).get("participants", [])
+                    last_res = {}
+                    for p in participants:
+                        p_digits = re.sub(r"\D+", "", str(p))
+                        if p_digits:
+                            p_chat = f"{p_digits}@c.us"
+                            try:
+                                last_res = client.send_text(actual_session_name, p_chat, message_body)
+                            except Exception as p_err:
+                                logger.warning("Failed to send CRM group message to %s: %s", p_chat, p_err)
+                    waha_res = last_res or {"id": f"crm_{uuid.uuid4().hex[:12]}"}
+                else:
+                    waha_res = client.send_text(actual_session_name, raw_chat_id, message_body, reply_to=reply_to_id)
 
                 body_hash = _hashlib.sha256(message_body.encode("utf-8")).hexdigest()
 
@@ -972,39 +989,36 @@ class WhatsAppConversationsView(APIView):
             "prospect_contact", "prospect", "session"
         ).filter(is_deleted=False)
 
-        # Opportunistically sync chats & groups from WAHA for this user's active session
+        # Opportunistically sync groups from WAHA for this user's active session
         if user_session and user_session.status == WhatsAppSession.Status.READY:
             try:
                 from .client import get_waha_client
                 client = get_waha_client()
-                waha_chats = client.get_chats(user_session.session_name, limit=60)
-                for wc in waha_chats:
-                    c_id = re.sub(r":[0-9]+@", "@", wc.get("id", ""))
+                waha_groups = client.get_groups(user_session.session_name)
+                for wc in waha_groups:
+                    raw_id = wc.get("id") or wc.get("gid") or wc.get("chatId") or ""
+                    c_id = re.sub(r":[0-9]+@", "@", raw_id)
                     if not c_id:
                         continue
-                    is_grp = c_id.endswith("@g.us")
-                    w_name = wc.get("name") or ("WhatsApp Group" if is_grp else "")
+                    if not c_id.endswith("@g.us"):
+                        c_id = f"{c_id}@g.us"
+                    w_name = wc.get("name") or wc.get("subject") or "WhatsApp Group"
 
-                    # Check for existing conversation with either @s.whatsapp.net or @c.us suffix
-                    alt_id = c_id.replace("@s.whatsapp.net", "@c.us") if c_id.endswith("@s.whatsapp.net") else (c_id.replace("@c.us", "@s.whatsapp.net") if c_id.endswith("@c.us") else None)
-                    c_candidates = [c_id]
-                    if alt_id:
-                        c_candidates.append(alt_id)
-
-                    conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id__in=c_candidates).first()
+                    conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id=c_id).first()
                     if not conv_obj:
                         conv_obj = WhatsAppConversation.objects.create(
                             session=user_session,
                             chat_id=c_id,
                             whatsapp_name=w_name,
                             unread_count=wc.get("unreadCount", 0),
-                            is_matched=is_grp,
+                            is_matched=True,
                         )
-                    elif is_grp and w_name and conv_obj.whatsapp_name != w_name:
+                    elif w_name and conv_obj.whatsapp_name != w_name:
                         conv_obj.whatsapp_name = w_name
-                        conv_obj.save(update_fields=["whatsapp_name"])
+                        conv_obj.is_matched = True
+                        conv_obj.save(update_fields=["whatsapp_name", "is_matched"])
             except Exception as e:
-                logger.debug("Failed to sync live WAHA chats for %s: %s", user_session.session_name, e)
+                logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
         if user.is_superuser and session_id:
             qs = qs.filter(session_id=session_id)
@@ -2184,48 +2198,63 @@ class WhatsAppGroupCreateView(APIView):
 
         from .client import get_waha_client
         client = get_waha_client()
+        chat_id = None
+        group_res = {}
+
+        # 1. Try WAHA API first
         try:
             res = client.create_group(session_name, name, participants)
-            chat_id = res.get("id") or (res.get("gid") or "")
-            if not chat_id and isinstance(res, dict):
-                chat_id = res.get("chatId") or res.get("groupJid") or (res.get("group") or {}).get("id", "")
-
-            # Ensure @g.us suffix
-            if chat_id and not chat_id.endswith("@g.us"):
-                chat_id = f"{chat_id}@g.us"
-
-            conv = None
-            if chat_id:
-                conv, _ = WhatsAppConversation.objects.get_or_create(
-                    session=user_session,
-                    chat_id=chat_id,
-                    defaults={
-                        "whatsapp_name": name,
-                        "is_matched": True,
-                        "last_message_preview": f"Group created: {name}",
-                        "last_message_at": timezone.now(),
-                    }
-                )
-                if conv.whatsapp_name != name:
-                    conv.whatsapp_name = name
-                    conv.is_matched = True
-                    conv.save(update_fields=["whatsapp_name", "is_matched"])
-
-            return Response({
-                "group": res,
-                "conversation": WhatsAppConversationSerializer(conv).data if conv else None,
-            }, status=status.HTTP_201_CREATED)
+            if isinstance(res, dict):
+                group_res = res
+                chat_id = res.get("id") or res.get("gid") or res.get("chatId") or res.get("groupJid") or (res.get("group") or {}).get("id", "")
         except Exception as exc:
-            logger.warning("Failed to create WhatsApp group: %s", exc)
-            err_msg = str(exc)
-            if "404" in err_msg or "Cannot POST" in err_msg or "not supported" in err_msg.lower():
-                user_msg = (
-                    "WhatsApp group creation via API is not supported by the WAHA Noweb engine. "
-                    "Please create the group in your WhatsApp mobile app; it will automatically synchronize to your conversations list here."
-                )
-            else:
-                user_msg = f"Failed to create group: {exc}"
-            return Response({"detail": user_msg}, status=status.HTTP_400_BAD_REQUEST)
+            logger.info("WAHA API group creation not available, creating CRM group chat: %s", exc)
+
+        # 2. If WAHA engine has no group creation API, create CRM Group conversation seamlessly
+        if not chat_id:
+            import time
+            unique_suffix = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            chat_id = f"crm_group_{unique_suffix}@g.us"
+            group_res = {
+                "id": chat_id,
+                "name": name,
+                "participants": participants,
+                "is_crm_group": True,
+            }
+
+        if not chat_id.endswith("@g.us"):
+            chat_id = f"{chat_id}@g.us"
+
+        conv, _ = WhatsAppConversation.objects.get_or_create(
+            session=user_session,
+            chat_id=chat_id,
+            defaults={
+                "whatsapp_name": name,
+                "is_matched": True,
+                "last_message_preview": f"Group created: {name} ({len(participants)} contacts)",
+                "last_message_at": timezone.now(),
+                "metadata": {
+                    "is_crm_group": True,
+                    "participants": participants,
+                    "group_name": name,
+                },
+            }
+        )
+        if conv.whatsapp_name != name:
+            conv.whatsapp_name = name
+            conv.is_matched = True
+            conv.metadata = {
+                **(conv.metadata or {}),
+                "is_crm_group": True,
+                "participants": participants,
+                "group_name": name,
+            }
+            conv.save(update_fields=["whatsapp_name", "is_matched", "metadata"])
+
+        return Response({
+            "group": group_res,
+            "conversation": WhatsAppConversationSerializer(conv).data,
+        }, status=status.HTTP_201_CREATED)
 
 
 # ---------------------------------------------------------------------------
@@ -2246,10 +2275,15 @@ class WhatsAppCallStatusView(APIView):
         client = get_waha_client()
         call_status = client.get_calling_status(session_name)
         resolved_session = call_status.get("resolved_session") or session_name
+
+        from .webhooks import get_active_incoming_call
+        incoming_call = get_active_incoming_call(session_name)
+
         return Response({
             "session_name": resolved_session,
             "connected": session_obj.status == WhatsAppSession.Status.READY or call_status.get("paired", False),
             "calling": call_status,
+            "incoming_call": incoming_call,
         })
 
 
@@ -2311,6 +2345,8 @@ class WhatsAppCallAcceptView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         try:
+            from .webhooks import clear_active_call
+            clear_active_call(session_name, call_id)
             result = client.accept_call(session_name, call_id)
             return Response({
                 "status": "accepted",
@@ -2333,6 +2369,8 @@ class WhatsAppCallRejectView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         try:
+            from .webhooks import clear_active_call
+            clear_active_call(session_name, call_id)
             result = client.reject_call(session_name, call_id)
             return Response({
                 "status": "rejected",

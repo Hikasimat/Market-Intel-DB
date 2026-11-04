@@ -124,6 +124,74 @@ def clear_cached_qr(session_name: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Live WhatsApp Active / Incoming Call Tracking
+# ---------------------------------------------------------------------------
+
+LATEST_CALL_CACHE: dict = {}
+
+def _call_cache_file(session_name: str) -> str:
+    import tempfile
+    clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_name)
+    return os.path.join(tempfile.gettempdir(), f"waha_active_call_{clean}.json")
+
+def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
+    """Retrieve currently ringing/incoming voice call for user session."""
+    import time
+    now = time.time()
+    for s in (session_name, "default"):
+        cached = LATEST_CALL_CACHE.get(s)
+        if cached and (now - cached.get("received_at", 0) <= 60):
+            return cached
+
+        cache_path = _call_cache_file(s)
+        try:
+            if os.path.exists(cache_path):
+                age = now - os.path.getmtime(cache_path)
+                if age <= 60:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and data.get("call_id"):
+                        LATEST_CALL_CACHE[s] = data
+                        return data
+                else:
+                    try:
+                        os.remove(cache_path)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+    return None
+
+def set_active_incoming_call(session_name: str, call_data: dict) -> None:
+    """Persist active incoming call to memory and temp cache file."""
+    import time
+    if not isinstance(call_data, dict):
+        return
+    call_data["received_at"] = time.time()
+    for s in (session_name, "default"):
+        LATEST_CALL_CACHE[s] = call_data
+        try:
+            cache_path = _call_cache_file(s)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(call_data, f)
+        except Exception as e:
+            logger.debug("Failed to write call cache file: %s", e)
+
+def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
+    """Clear active incoming call once answered, rejected, or ended."""
+    for s in (session_name, "default"):
+        cached = LATEST_CALL_CACHE.get(s)
+        if not call_id or (cached and cached.get("call_id") == call_id):
+            LATEST_CALL_CACHE.pop(s, None)
+            try:
+                cache_path = _call_cache_file(s)
+                if os.path.exists(cache_path):
+                    os.remove(cache_path)
+            except OSError:
+                pass
+
+
 def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
     """Store WAHA's local media URL directly in the database - no re-download needed."""
     from whatsapp.models import WhatsAppMessage
@@ -806,6 +874,25 @@ def _handle_call_event(
         },
     )
     logger.info("Processed call event %s for %s (%s)", event_type, target_chat_id, call_label)
+
+    # Track or clear active incoming call in real-time
+    if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
+        clean_d = re.sub(r"\D+", "", str(raw_from or target_chat_id).split("@")[0].split(":")[0])
+        display_name = conversation.whatsapp_name if conversation and conversation.whatsapp_name else (f"+{clean_d}" if clean_d else "WhatsApp Contact")
+        incoming_payload = {
+            "call_id": call_id,
+            "caller_phone": f"+{clean_d}" if clean_d else "",
+            "caller_name": display_name,
+            "session_name": session_name,
+            "chat_id": target_chat_id,
+            "is_video": is_video,
+            "status": "ringing",
+        }
+        set_active_incoming_call(session_name, incoming_payload)
+        logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
+    elif is_missed or is_rejected or is_ended or is_accepted or event_type in ("call.accepted", "call.rejected", "call.missed", "call.ended", "call.voice.ended"):
+        clear_active_call(session_name, call_id)
+        logger.info("Cleared active WhatsApp call: %s", call_id)
 
 
 def _handle_incoming_message(
