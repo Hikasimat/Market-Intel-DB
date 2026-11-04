@@ -678,16 +678,14 @@ export default function WhatsappPage() {
       await initWebRTCAudioChannel(newCallId);
     } catch (err) {
       console.error('Start voice call failed:', err);
-      const errMsg = err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call';
       setCallState((prev) => ({
         ...prev,
         status: 'ended',
-        error: errMsg,
+        error: err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call',
       }));
-      showToast(errMsg, 'error');
       setTimeout(() => {
         cleanupCallSession();
-      }, 5000);
+      }, 4000);
     }
   }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession]);
 

@@ -38,3 +38,4 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor("playback-processor", PlaybackProcessor);
+

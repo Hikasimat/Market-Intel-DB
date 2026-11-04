@@ -2176,10 +2176,7 @@ class WhatsAppCallStartView(APIView):
             }, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to start voice call: %s", exc)
-            err_msg = str(exc)
-            if "calling subsystem is disabled" in err_msg.lower() or "calling_enabled" in err_msg.lower():
-                err_msg = "WhatsApp voice calling is disabled on the WAHA server. Set CALLING_ENABLED=true in the WAHA container environment to activate live voice calls."
-            return Response({"error": err_msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class WhatsAppCallAcceptView(APIView):
