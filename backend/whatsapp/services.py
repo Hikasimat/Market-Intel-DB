@@ -398,14 +398,14 @@ def send_whatsapp_message(
     profile = getattr(performed_by, "profile", None)
     user_role = profile.role if profile else None
 
-    # Only LQ and SuperAdmin can send WhatsApp messages.
-    allowed_sender_roles = {"LQ"}
+    # Only PRE, LQ and SuperAdmin can send WhatsApp messages.
+    allowed_sender_roles = {"PRE", "LQ"}
     is_superuser = performed_by.is_superuser
 
     if not is_superuser and user_role not in allowed_sender_roles:
         raise WhatsAppAuthorizationError(
             f"Role '{user_role}' is not permitted to send WhatsApp messages. "
-            "Only LQ users and administrators can send WhatsApp messages."
+            "Only PRE users and administrators can send WhatsApp messages."
         )
 
     # ------------------------------------------------------------------
