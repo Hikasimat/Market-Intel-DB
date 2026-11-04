@@ -661,6 +661,32 @@ class WAHAClient:
 
         return candidates[0] if candidates else "default"
 
+    def pair_calling(self, session_name: str) -> dict:
+        """Initiate pairing for calling subsystem."""
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{session_name}/pair",
+                timeout=5.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            logger.warning("Failed to initiate calling pairing for %s: %s", session_name, e)
+            return {"error": str(e)}
+
+    def get_calling_qr(self, session_name: str) -> dict:
+        """Fetch pairing QR code for calling subsystem."""
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/calling/sessions/{session_name}/qr",
+                timeout=5.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            logger.debug("Failed to fetch calling QR for %s: %s", session_name, e)
+            return {"error": str(e)}
+
     def get_calling_status(self, session_name: str) -> dict:
         """Query status of calling subsystem for given session, falling back to paired session."""
         target_session = self.resolve_calling_session(preferred_session=session_name)

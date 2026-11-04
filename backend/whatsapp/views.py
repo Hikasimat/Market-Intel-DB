@@ -1012,25 +1012,57 @@ class WhatsAppConversationsView(APIView):
             # Strictly scoped to current user's session!
             qs = qs.filter(session=user_session)
 
-        # Deduplicate conversations by canonical phone digits / group ID and auto-merge duplicate threads
+        # Deduplicate conversations by canonical phone digits / contact / group ID and auto-merge duplicate threads
         conversations = list(qs)
         canonical_convs = {}
         duplicates_to_merge = []
 
+        # Build reverse phone mapping so conversations with and without contact share the same deduplication key
+        phone_to_key = {}
+        for c in conversations:
+            if not c.chat_id.endswith("@g.us"):
+                raw_d = ""
+                if c.phone_number:
+                    raw_d = re.sub(r"\D+", "", str(c.phone_number))
+                elif not c.chat_id.endswith("@lid"):
+                    raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                if len(raw_d) >= 8:
+                    suffix = raw_d[-10:]
+                    if c.prospect_contact_id:
+                        phone_to_key[suffix] = f"contact_{c.prospect_contact_id}"
+                    elif suffix not in phone_to_key:
+                        phone_to_key[suffix] = f"phone_{suffix}"
+
         for c in conversations:
             if c.chat_id.endswith("@g.us"):
-                key = c.chat_id
+                key = f"group_{c.chat_id}"
+            elif c.prospect_contact_id:
+                key = f"contact_{c.prospect_contact_id}"
             else:
-                raw_d = re.sub(r"\D+", "", (c.phone_number or c.chat_id).split("@")[0].split(":")[0])
-                key = raw_d[-10:] if len(raw_d) >= 10 else (raw_d or c.chat_id)
+                raw_d = ""
+                if c.phone_number:
+                    raw_d = re.sub(r"\D+", "", str(c.phone_number))
+                elif not c.chat_id.endswith("@lid"):
+                    raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                suffix = raw_d[-10:] if len(raw_d) >= 8 else None
+                if suffix and suffix in phone_to_key:
+                    key = phone_to_key[suffix]
+                else:
+                    key = c.chat_id
 
             if key not in canonical_convs:
                 canonical_convs[key] = c
             else:
                 existing = canonical_convs[key]
-                c_time = c.last_message_at or c.updated_at
-                ex_time = existing.last_message_at or existing.updated_at
-                primary, secondary = (c, existing) if (c_time and ex_time and c_time > ex_time) else (existing, c)
+                # Prioritize conversation with prospect_contact
+                if c.prospect_contact and not existing.prospect_contact:
+                    primary, secondary = c, existing
+                elif existing.prospect_contact and not c.prospect_contact:
+                    primary, secondary = existing, c
+                else:
+                    c_time = c.last_message_at or c.updated_at
+                    ex_time = existing.last_message_at or existing.updated_at
+                    primary, secondary = (c, existing) if (c_time and ex_time and c_time > ex_time) else (existing, c)
                 canonical_convs[key] = primary
                 duplicates_to_merge.append((primary, secondary))
 
@@ -1049,6 +1081,13 @@ class WhatsAppConversationsView(APIView):
                 if not primary.whatsapp_name and secondary.whatsapp_name:
                     primary.whatsapp_name = secondary.whatsapp_name
                     update_fields.append("whatsapp_name")
+                sec_time = secondary.last_message_at or secondary.updated_at
+                prim_time = primary.last_message_at or primary.updated_at
+                if sec_time and (not prim_time or sec_time > prim_time):
+                    primary.last_message_at = secondary.last_message_at
+                    primary.last_message_preview = secondary.last_message_preview
+                    primary.last_message_from_me = secondary.last_message_from_me
+                    update_fields.extend(["last_message_at", "last_message_preview", "last_message_from_me"])
                 if update_fields:
                     primary.save(update_fields=list(set(update_fields)))
                 secondary.is_deleted = True
@@ -2252,6 +2291,12 @@ class WhatsAppCallStartView(APIView):
             }, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to start voice call: %s", exc)
+            err_str = str(exc).lower()
+            if "not paired" in err_str or "503" in err_str:
+                return Response({
+                    "error": "calling_not_paired",
+                    "detail": "WhatsApp voice calling is not linked yet. Please scan the QR code to link calling device.",
+                }, status=status.HTTP_400_BAD_REQUEST)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -2360,3 +2405,51 @@ class WhatsAppCallWebRTCView(APIView):
         except Exception as exc:
             logger.error("Failed to exchange WebRTC offer for call %s: %s", call_id, exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppCallPairView(APIView):
+    """
+    Initiate or query WhatsApp calling subsystem pairing for user session.
+    POST /api/whatsapp/calls/pair/ -> initiates pairing and returns calling QR
+    GET /api/whatsapp/calls/pair/  -> queries status and returns calling QR if unpaired
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        import time
+        client = get_waha_client()
+        pair_res = client.pair_calling(session_name)
+        time.sleep(0.6)
+        qr_res = client.get_calling_qr(session_name)
+        status_res = client.get_calling_status(session_name)
+
+        return Response({
+            "status": "pairing_initiated",
+            "paired": status_res.get("paired", False),
+            "calling_status": status_res,
+            "qr": qr_res.get("raw") or qr_res.get("qr") or qr_res.get("base64"),
+            "qrBase64": qr_res.get("base64") or qr_res.get("qrBase64") or qr_res.get("qr"),
+            "pair_info": pair_res,
+        }, status=status.HTTP_200_OK)
+
+    def get(self, request):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        status_res = client.get_calling_status(session_name)
+        qr_res = {}
+        if not status_res.get("paired", False):
+            qr_res = client.get_calling_qr(session_name)
+
+        return Response({
+            "paired": status_res.get("paired", False),
+            "calling_status": status_res,
+            "qr": qr_res.get("raw") or qr_res.get("qr") or qr_res.get("base64"),
+            "qrBase64": qr_res.get("base64") or qr_res.get("qrBase64") or qr_res.get("qr"),
+        }, status=status.HTTP_200_OK)

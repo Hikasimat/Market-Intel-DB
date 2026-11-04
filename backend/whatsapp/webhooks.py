@@ -897,7 +897,32 @@ def _handle_incoming_message(
     phone_digits = _extract_phone_digits(target_chat_id)
     is_group = target_chat_id.endswith("@g.us")
 
-    # Build candidate JIDs for 1-on-1 chats to match both @s.whatsapp.net and @c.us
+    # If message is from a WhatsApp Business / multi-device LID (@lid), extract real phone number
+    resolved_phone = None
+    sender_pn = key.get("senderPn") or key.get("participantPn") or event_data.get("senderPn") or _data.get("senderPn")
+    if sender_pn:
+        d = re.sub(r"\D+", "", str(sender_pn).split("@")[0].split(":")[0])
+        if len(d) >= 8:
+            resolved_phone = f"+{d}"
+            phone_digits = d
+
+    if not resolved_phone and not target_chat_id.endswith("@lid") and not is_group:
+        d = re.sub(r"\D+", "", target_chat_id.split("@")[0].split(":")[0])
+        if len(d) >= 8:
+            resolved_phone = f"+{d}"
+            phone_digits = d
+
+    # If @lid without sender_pn, look up if any existing conversation has this @lid or phone
+    if not resolved_phone and target_chat_id.endswith("@lid"):
+        existing_saved = WhatsAppConversation.objects.filter(
+            chat_id=target_chat_id,
+            phone_number__isnull=False
+        ).exclude(phone_number="").first()
+        if existing_saved and existing_saved.phone_number:
+            resolved_phone = existing_saved.phone_number
+            phone_digits = re.sub(r"\D+", "", resolved_phone)
+
+    # Build candidate JIDs for 1-on-1 chats to match @s.whatsapp.net, @c.us, and @lid
     alt_chat_id = None
     if target_chat_id.endswith("@s.whatsapp.net"):
         alt_chat_id = target_chat_id.replace("@s.whatsapp.net", "@c.us")
@@ -907,6 +932,10 @@ def _handle_incoming_message(
     candidate_ids = [target_chat_id]
     if alt_chat_id:
         candidate_ids.append(alt_chat_id)
+
+    if phone_digits and len(phone_digits) >= 8:
+        candidate_ids.append(f"{phone_digits}@c.us")
+        candidate_ids.append(f"{phone_digits}@s.whatsapp.net")
 
     from django.db.models import Q
 
@@ -1014,13 +1043,13 @@ def _handle_incoming_message(
     )
     group_author_name = extracted_name or (group_author.split("@")[0].split(":")[0] if group_author else "")
 
-    # Extract real phone number (Baileys senderPn/participantPn for @lid messages)
-    resolved_phone = None
-    sender_pn = key.get("senderPn") or key.get("participantPn") or event_data.get("senderPn")
-    if sender_pn:
-        d = re.sub(r"\D+", "", str(sender_pn).split("@")[0].split(":")[0])
-        if len(d) >= 8:
-            resolved_phone = f"+{d}"
+    # Extract real phone number (Baileys senderPn/participantPn for @lid messages if not yet resolved)
+    if not resolved_phone:
+        sender_pn = key.get("senderPn") or key.get("participantPn") or event_data.get("senderPn")
+        if sender_pn:
+            d = re.sub(r"\D+", "", str(sender_pn).split("@")[0].split(":")[0])
+            if len(d) >= 8:
+                resolved_phone = f"+{d}"
 
     if not resolved_phone and not target_chat_id.endswith("@lid"):
         d = re.sub(r"\D+", "", target_chat_id.split("@")[0].split(":")[0])
@@ -1034,6 +1063,7 @@ def _handle_incoming_message(
             phone_number__isnull=False
         ).exclude(phone_number="").first()
         if existing_saved:
+            resolved_phone = existing_saved.phone_number
             resolved_phone = existing_saved.phone_number
 
     search_digits = re.sub(r"\D+", "", resolved_phone or phone_digits or "")

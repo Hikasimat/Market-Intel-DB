@@ -16,6 +16,7 @@ from django.urls import path
 from .views import (
     WhatsAppAuditLogView,
     WhatsAppCallAcceptView,
+    WhatsAppCallPairView,
     WhatsAppCallEndView,
     WhatsAppCallRejectView,
     WhatsAppCallStartView,
@@ -145,6 +146,7 @@ urlpatterns = [
 
     # -- Voice Calling (WAHA / WaCalls WebRTC VoIP) ---------------------------
     path("calls/status/", WhatsAppCallStatusView.as_view(), name="whatsapp-call-status"),
+    path("calls/pair/", WhatsAppCallPairView.as_view(), name="whatsapp-call-pair"),
     path("calls/start/", WhatsAppCallStartView.as_view(), name="whatsapp-call-start"),
     path("calls/<str:call_id>/accept/", WhatsAppCallAcceptView.as_view(), name="whatsapp-call-accept"),
     path("calls/<str:call_id>/reject/", WhatsAppCallRejectView.as_view(), name="whatsapp-call-reject"),
