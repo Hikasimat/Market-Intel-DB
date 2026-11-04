@@ -15,6 +15,12 @@ from django.urls import path
 
 from .views import (
     WhatsAppAuditLogView,
+    WhatsAppCallAcceptView,
+    WhatsAppCallEndView,
+    WhatsAppCallRejectView,
+    WhatsAppCallStartView,
+    WhatsAppCallStatusView,
+    WhatsAppCallWebRTCView,
     WhatsAppConfigView,
     WhatsAppContactInfoView,
     WhatsAppCRMContactsView,
@@ -136,4 +142,12 @@ urlpatterns = [
     path("safety-events/", WhatsAppSafetyEventsView.as_view(), name="whatsapp-safety-events"),
     path("audit-log/", WhatsAppAuditLogView.as_view(), name="whatsapp-audit-log"),
     path("opt-outs/", WhatsAppOptOutsView.as_view(), name="whatsapp-opt-outs"),
+
+    # -- Voice Calling (WAHA / WaCalls WebRTC VoIP) ---------------------------
+    path("calls/status/", WhatsAppCallStatusView.as_view(), name="whatsapp-call-status"),
+    path("calls/start/", WhatsAppCallStartView.as_view(), name="whatsapp-call-start"),
+    path("calls/<str:call_id>/accept/", WhatsAppCallAcceptView.as_view(), name="whatsapp-call-accept"),
+    path("calls/<str:call_id>/reject/", WhatsAppCallRejectView.as_view(), name="whatsapp-call-reject"),
+    path("calls/<str:call_id>/end/", WhatsAppCallEndView.as_view(), name="whatsapp-call-end"),
+    path("calls/<str:call_id>/webrtc/", WhatsAppCallWebRTCView.as_view(), name="whatsapp-call-webrtc"),
 ]

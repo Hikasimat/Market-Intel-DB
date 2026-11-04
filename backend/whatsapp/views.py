@@ -2106,3 +2106,177 @@ class WhatsAppGroupCreateView(APIView):
         except Exception as exc:
             logger.error("Failed to create WhatsApp group: %s", exc)
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Voice Calling Views
+# ---------------------------------------------------------------------------
+
+class WhatsAppCallStatusView(APIView):
+    """
+    Get live status of WhatsApp voice calling subsystem for user's connected session.
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def get(self, request):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        call_status = client.get_calling_status(session_name)
+        return Response({
+            "session_name": session_name,
+            "connected": session_obj.status == WhatsAppSession.Status.READY,
+            "calling": call_status,
+        })
+
+
+class WhatsAppCallStartView(APIView):
+    """
+    Initiate outgoing voice call to a WhatsApp contact.
+    Strictly requires user's WhatsApp session to be connected.
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        # Ensure session is connected
+        if session_obj.status != WhatsAppSession.Status.READY:
+            return Response(
+                {"error": "WhatsApp session is not connected. Please connect WhatsApp first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        phone = request.data.get("phone") or ""
+        chat_id = request.data.get("chat_id") or ""
+        if not phone and chat_id:
+            phone = chat_id.split("@")[0].split(":")[0]
+
+        clean_phone = re.sub(r"\D+", "", str(phone))
+        if not clean_phone:
+            return Response(
+                {"error": "Valid phone number or chat_id is required to initiate call."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            result = client.start_call(session_name, clean_phone)
+            call_id = result.get("callId") or result.get("call_id") or ""
+            return Response({
+                "status": "calling",
+                "call_id": call_id,
+                "phone": clean_phone,
+                "session_name": session_name,
+                "result": result,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to start voice call: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppCallAcceptView(APIView):
+    """Accept an incoming voice call."""
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, call_id):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            result = client.accept_call(session_name, call_id)
+            return Response({
+                "status": "accepted",
+                "call_id": call_id,
+                "result": result,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to accept voice call %s: %s", call_id, exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppCallRejectView(APIView):
+    """Reject an incoming voice call."""
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, call_id):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            result = client.reject_call(session_name, call_id)
+            return Response({
+                "status": "rejected",
+                "call_id": call_id,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to reject voice call %s: %s", call_id, exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppCallEndView(APIView):
+    """End / terminate an active voice call."""
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, call_id):
+        return self._end(request, call_id)
+
+    def delete(self, request, call_id):
+        return self._end(request, call_id)
+
+    def _end(self, request, call_id):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            result = client.end_call(session_name, call_id)
+            return Response({
+                "status": "ended",
+                "call_id": call_id,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.warning("End call %s error: %s", call_id, exc)
+            return Response({"status": "ended", "call_id": call_id}, status=status.HTTP_200_OK)
+
+
+class WhatsAppCallWebRTCView(APIView):
+    """
+    Exchange WebRTC SDP offer with WAHA calling service to establish
+    browser PCM audio channel for active call.
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, call_id):
+        session_obj = _get_user_session(request.user, create=True)
+        session_name = session_obj.session_name
+
+        sdp_offer = request.data.get("sdp_offer") or request.data.get("sdpOffer") or ""
+        if not sdp_offer:
+            return Response(
+                {"error": "sdp_offer is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            result = client.exchange_webrtc(session_name, call_id, sdp_offer)
+            sdp_answer = result.get("sdpAnswer") or result.get("sdp_answer") or ""
+            return Response({
+                "sdp_answer": sdp_answer,
+                "sdpAnswer": sdp_answer,
+                "call_id": call_id,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to exchange WebRTC offer for call %s: %s", call_id, exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

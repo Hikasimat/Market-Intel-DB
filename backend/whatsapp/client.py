@@ -20,6 +20,7 @@ X-Api-Key; WAHA validates it against the stored hash.
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
@@ -102,6 +103,7 @@ class WAHAClient:
         payload: Optional[dict] = None,
         query: Optional[dict] = None,
         timeout: Optional[float] = None,
+        extra_headers: Optional[dict] = None,
     ) -> tuple[int, Any]:
         """
         Execute an authenticated HTTP request to WAHA.
@@ -121,6 +123,9 @@ class WAHAClient:
             "X-Api-Key": self._api_key,
             "Accept": "application/json, image/*, */*",
         }
+
+        if extra_headers:
+            headers.update(extra_headers)
 
         body = None
         if payload is not None:
@@ -557,6 +562,183 @@ class WAHAClient:
                 timeout=4.0,
             )
             return body if isinstance(body, dict) else {}
+
+    # -- Voice Calling (WAHA Live Calling API) -------------------------------
+
+    def get_calling_status(self, session_name: str) -> dict:
+        """Query status of calling subsystem for given session."""
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/calling/sessions/{session_name}/status",
+                timeout=4.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "GET",
+                        "/api/calling/sessions/default/status",
+                        timeout=4.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            logger.debug("Failed to query calling status for %s: %s", session_name, e)
+            return {"enabled": False, "paired": False, "state": "error", "error": str(e)}
+
+    def start_call(self, session_name: str, phone: str, client_id: Optional[str] = None) -> dict:
+        """Initiate outgoing voice call to a WhatsApp phone number."""
+        extra_headers = {}
+        if client_id:
+            extra_headers["X-Client-Id"] = client_id
+
+        clean_phone = re.sub(r"\D+", "", phone)
+        payload = {"phone": clean_phone}
+
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{session_name}/calls",
+                payload=payload,
+                extra_headers=extra_headers,
+                timeout=10.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        "/api/calling/sessions/default/calls",
+                        payload=payload,
+                        extra_headers=extra_headers,
+                        timeout=10.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            raise WAHAServiceError(f"Failed to start call: {e}")
+
+    def accept_call(self, session_name: str, call_id: str, client_id: Optional[str] = None) -> dict:
+        """Accept an incoming voice call."""
+        extra_headers = {}
+        if client_id:
+            extra_headers["X-Client-Id"] = client_id
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{session_name}/calls/{call_id}/accept",
+                extra_headers=extra_headers,
+                timeout=8.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/default/calls/{call_id}/accept",
+                        extra_headers=extra_headers,
+                        timeout=8.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            raise WAHAServiceError(f"Failed to accept call: {e}")
+
+    def reject_call(self, session_name: str, call_id: str) -> dict:
+        """Reject an incoming voice call."""
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{session_name}/calls/{call_id}/reject",
+                timeout=6.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/default/calls/{call_id}/reject",
+                        timeout=6.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            raise WAHAServiceError(f"Failed to reject call: {e}")
+
+    def end_call(self, session_name: str, call_id: str) -> dict:
+        """Hang up / terminate an active voice call."""
+        try:
+            _status, body = self._request(
+                "DELETE",
+                f"/api/calling/sessions/{session_name}/calls/{call_id}",
+                timeout=6.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "DELETE",
+                        f"/api/calling/sessions/default/calls/{call_id}",
+                        timeout=6.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            return {"status": "ended"}
+
+    def exchange_webrtc(self, session_name: str, call_id: str, sdp_offer: str) -> dict:
+        """Exchange WebRTC SDP offer to establish PCM audio data channel."""
+        payload = {"sdp_offer": sdp_offer}
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{session_name}/calls/{call_id}/webrtc",
+                payload=payload,
+                timeout=12.0,
+            )
+            return body if isinstance(body, dict) else {}
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/default/calls/{call_id}/webrtc",
+                        payload=payload,
+                        timeout=12.0,
+                    )
+                    return body if isinstance(body, dict) else {}
+                except Exception:
+                    pass
+            raise WAHAServiceError(f"Failed to exchange WebRTC offer: {e}")
+
+    def get_calling_history(self, session_name: str) -> list:
+        """Get voice call history from WAHA calling service."""
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/calling/sessions/{session_name}/history",
+                timeout=6.0,
+            )
+            return body if isinstance(body, list) else []
+        except Exception as e:
+            if session_name != "default":
+                try:
+                    _status, body = self._request(
+                        "GET",
+                        "/api/calling/sessions/default/history",
+                        timeout=6.0,
+                    )
+                    return body if isinstance(body, list) else []
+                except Exception:
+                    pass
+            logger.debug("Failed to retrieve calling history for %s: %s", session_name, e)
+            return []
 
 
 # ---------------------------------------------------------------------------

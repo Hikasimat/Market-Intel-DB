@@ -7,6 +7,8 @@ import {
   Smile,
   Send,
   Phone,
+  PhoneCall,
+  PhoneOff,
   Video,
   RefreshCw,
   Plus,
@@ -14,6 +16,7 @@ import {
   X,
   ChevronDown,
   Mic,
+  MicOff,
   Square,
   Play,
   Pause,
@@ -244,6 +247,84 @@ function WhatsAppAudioPlayer({ src, isMe }) {
 }
 
 // ---------------------------------------------------------------------------
+// PCM Voice Calling Helpers & Audio Worklets
+// ---------------------------------------------------------------------------
+function float32ToInt16LE(pcm) {
+  const view = new DataView(new ArrayBuffer(pcm.length * 2));
+  for (let i = 0; i < pcm.length; i++) {
+    let s = pcm[i];
+    if (Number.isNaN(s)) s = 0;
+    else if (s > 1) s = 1;
+    else if (s < -1) s = -1;
+    view.setInt16(i * 2, s < 0 ? Math.round(s * 32768) : Math.round(s * 32767), true);
+  }
+  return view.buffer;
+}
+
+function int16LEToFloat32(buf) {
+  const view = new DataView(buf);
+  const n = Math.floor(buf.byteLength / 2);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = view.getInt16(i * 2, true) / 32768;
+  }
+  return out;
+}
+
+const CAPTURE_WORKLET_CODE = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (channel && channel.length) {
+      this.port.postMessage(channel.slice(0));
+    }
+    return true;
+  }
+}
+registerProcessor("capture-processor", CaptureProcessor);
+`;
+
+const PLAYBACK_WORKLET_CODE = `
+const RING_SIZE = 16000 * 2;
+class PlaybackProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ring = new Float32Array(RING_SIZE);
+    this.read = 0;
+    this.write = 0;
+    this.available = 0;
+    this.port.onmessage = (e) => {
+      const data = e.data;
+      for (let i = 0; i < data.length; i += 1) {
+        this.ring[this.write] = data[i];
+        this.write = (this.write + 1) % RING_SIZE;
+        if (this.available < RING_SIZE) {
+          this.available += 1;
+        } else {
+          this.read = (this.read + 1) % RING_SIZE;
+        }
+      }
+    };
+  }
+  process(_inputs, outputs) {
+    const out = outputs[0][0];
+    if (!out) return true;
+    for (let i = 0; i < out.length; i += 1) {
+      if (this.available > 0) {
+        out[i] = this.ring[this.read];
+        this.read = (this.read + 1) % RING_SIZE;
+        this.available -= 1;
+      } else {
+        out[i] = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("playback-processor", PlaybackProcessor);
+`;
+
+// ---------------------------------------------------------------------------
 // Main WhatsappPage Component
 // ---------------------------------------------------------------------------
 export default function WhatsappPage() {
@@ -332,6 +413,281 @@ export default function WhatsappPage() {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), type === 'error' ? 5000 : 3000);
   };
+
+  // -------------------------------------------------------------------
+  // Voice Calling State (strictly tied to connected session — no duplicate QR)
+  // -------------------------------------------------------------------
+  const [callState, setCallState] = useState({
+    active: false,
+    status: 'idle', // 'calling' | 'connected' | 'ended'
+    callId: null,
+    peerName: '',
+    peerPhone: '',
+    duration: 0,
+    isMuted: false,
+    error: null,
+  });
+
+  const callMediaRef = useRef({
+    peerConnection: null,
+    dataChannel: null,
+    audioCtx: null,
+    micStream: null,
+    timerInterval: null,
+    captureBlobUrl: null,
+    playbackBlobUrl: null,
+  });
+
+  // Call duration counter
+  useEffect(() => {
+    let timer = null;
+    if (callState.active && callState.status === 'connected') {
+      timer = setInterval(() => {
+        setCallState((prev) => ({ ...prev, duration: prev.duration + 1 }));
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [callState.active, callState.status]);
+
+  const cleanupCallSession = useCallback(() => {
+    if (callMediaRef.current.timerInterval) {
+      clearInterval(callMediaRef.current.timerInterval);
+    }
+    if (callMediaRef.current.micStream) {
+      callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
+    }
+    if (callMediaRef.current.dataChannel) {
+      try {
+        callMediaRef.current.dataChannel.close();
+      } catch (_) {}
+    }
+    if (callMediaRef.current.peerConnection) {
+      try {
+        callMediaRef.current.peerConnection.close();
+      } catch (_) {}
+    }
+    if (callMediaRef.current.audioCtx) {
+      callMediaRef.current.audioCtx.close().catch(() => {});
+    }
+    if (callMediaRef.current.captureBlobUrl) {
+      try { URL.revokeObjectURL(callMediaRef.current.captureBlobUrl); } catch (_) {}
+    }
+    if (callMediaRef.current.playbackBlobUrl) {
+      try { URL.revokeObjectURL(callMediaRef.current.playbackBlobUrl); } catch (_) {}
+    }
+    callMediaRef.current = {
+      peerConnection: null,
+      dataChannel: null,
+      audioCtx: null,
+      micStream: null,
+      timerInterval: null,
+      captureBlobUrl: null,
+      playbackBlobUrl: null,
+    };
+    setCallState({
+      active: false,
+      status: 'idle',
+      callId: null,
+      peerName: '',
+      peerPhone: '',
+      duration: 0,
+      isMuted: false,
+      error: null,
+    });
+  }, []);
+
+  const handleEndCall = useCallback(async () => {
+    const activeCallId = callState.callId;
+    if (activeCallId) {
+      try {
+        await api.post(`/whatsapp/calls/${activeCallId}/end/`);
+      } catch (err) {
+        console.warn('End call API notification failed:', err);
+      }
+    }
+    cleanupCallSession();
+  }, [callState.callId, cleanupCallSession]);
+
+  const handleToggleMute = useCallback(() => {
+    const nextMuted = !callState.isMuted;
+    if (callMediaRef.current.micStream) {
+      callMediaRef.current.micStream.getAudioTracks().forEach((track) => {
+        track.enabled = !nextMuted;
+      });
+    }
+    setCallState((prev) => ({ ...prev, isMuted: nextMuted }));
+  }, [callState.isMuted]);
+
+  const initWebRTCAudioChannel = useCallback(async (callId) => {
+    try {
+      // 1. Mic capture
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      callMediaRef.current.micStream = stream;
+
+      // 2. Peer Connection with PCM DataChannel
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      callMediaRef.current.peerConnection = pc;
+
+      const dc = pc.createDataChannel('pcm', { ordered: true });
+      dc.binaryType = 'arraybuffer';
+      callMediaRef.current.dataChannel = dc;
+
+      // 3. Audio Context at 16000 Hz
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtxClass({ sampleRate: 16000 });
+      callMediaRef.current.audioCtx = ctx;
+
+      // Load Worklets via Blob URLs
+      const captureBlob = new Blob([CAPTURE_WORKLET_CODE], { type: 'application/javascript' });
+      const playbackBlob = new Blob([PLAYBACK_WORKLET_CODE], { type: 'application/javascript' });
+      const captureUrl = URL.createObjectURL(captureBlob);
+      const playbackUrl = URL.createObjectURL(playbackBlob);
+      callMediaRef.current.captureBlobUrl = captureUrl;
+      callMediaRef.current.playbackBlobUrl = playbackUrl;
+
+      try {
+        await ctx.audioWorklet.addModule(captureUrl);
+        await ctx.audioWorklet.addModule(playbackUrl);
+      } catch (workletErr) {
+        console.warn('Blob worklet load fallback to /worklets/:', workletErr);
+        await ctx.audioWorklet.addModule('/worklets/capture-processor.js');
+        await ctx.audioWorklet.addModule('/worklets/playback-processor.js');
+      }
+
+      await ctx.resume();
+
+      // Connect mic to captureNode
+      const micSource = ctx.createMediaStreamSource(stream);
+      const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
+      captureNode.port.onmessage = (e) => {
+        if (!callMediaRef.current.isMuted && dc.readyState === 'open') {
+          dc.send(float32ToInt16LE(e.data));
+        }
+      };
+      micSource.connect(captureNode);
+
+      // Prevent local feedback loop
+      const silenceGain = ctx.createGain();
+      silenceGain.gain.value = 0;
+      captureNode.connect(silenceGain);
+      silenceGain.connect(ctx.destination);
+
+      // Playback incoming audio
+      const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
+      playbackNode.connect(ctx.destination);
+      dc.onmessage = (e) => {
+        playbackNode.port.postMessage(int16LEToFloat32(e.data));
+      };
+
+      // 4. Offer / Answer SDP exchange
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') resolve();
+        else {
+          const checkIce = () => {
+            if (pc.iceGatheringState === 'complete') {
+              pc.removeEventListener('icegatheringstatechange', checkIce);
+              resolve();
+            }
+          };
+          pc.addEventListener('icegatheringstatechange', checkIce);
+          setTimeout(resolve, 2500); // 2.5s safety timeout
+        }
+      });
+
+      const sdpOffer = pc.localDescription?.sdp || '';
+      const webrtcRes = await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/webrtc/`, {
+        sdp_offer: sdpOffer,
+      });
+
+      const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
+      if (sdpAnswer) {
+        await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
+      }
+
+      setCallState((prev) => ({
+        ...prev,
+        status: 'connected',
+      }));
+    } catch (err) {
+      console.error('WebRTC Audio Channel initialization error:', err);
+      setCallState((prev) => ({
+        ...prev,
+        status: 'ended',
+        error: err.response?.data?.error || err.message || 'Failed to establish call audio stream',
+      }));
+      setTimeout(() => {
+        cleanupCallSession();
+      }, 4000);
+    }
+  }, [cleanupCallSession]);
+
+  const handleStartVoiceCall = useCallback(async () => {
+    if (!selectedChat) return;
+
+    if (selectedChat.chat_id?.endsWith('@g.us')) {
+      showToast('Voice calling is supported for direct 1-on-1 WhatsApp contacts.', 'info');
+      return;
+    }
+
+    if (selectedSession?.status !== 'READY') {
+      showToast('Your WhatsApp session is not connected. Please scan the QR code to connect first.', 'error');
+      return;
+    }
+
+    const rawPhone = selectedChat.phone_number || (selectedChat.chat_id || '').split('@')[0].split(':')[0];
+    const cleanPhone = (rawPhone || '').replace(/\D+/g, '');
+    if (!cleanPhone) {
+      showToast('No valid phone number found for this contact.', 'error');
+      return;
+    }
+
+    try {
+      setCallState({
+        active: true,
+        status: 'calling',
+        callId: null,
+        peerName: getContactDisplayName(selectedChat),
+        peerPhone: `+${cleanPhone}`,
+        duration: 0,
+        isMuted: false,
+        error: null,
+      });
+
+      const startRes = await api.post('/whatsapp/calls/start/', {
+        phone: cleanPhone,
+        chat_id: selectedChat.chat_id,
+      });
+
+      const newCallId = startRes.data?.call_id || startRes.data?.callId;
+      if (!newCallId) {
+        throw new Error(startRes.data?.error || 'No call ID returned by WhatsApp calling service');
+      }
+
+      setCallState((prev) => ({
+        ...prev,
+        callId: newCallId,
+      }));
+
+      await initWebRTCAudioChannel(newCallId);
+    } catch (err) {
+      console.error('Start voice call failed:', err);
+      setCallState((prev) => ({
+        ...prev,
+        status: 'ended',
+        error: err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call',
+      }));
+      setTimeout(() => {
+        cleanupCallSession();
+      }, 4000);
+    }
+  }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession]);
 
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
@@ -1485,6 +1841,29 @@ export default function WhatsappPage() {
 
               {/* Chat Actions */}
               <div className="flex items-center gap-3 text-slate-600">
+                {/* Voice Call Button (Strictly using connected session — no second QR) */}
+                <button
+                  type="button"
+                  onClick={handleStartVoiceCall}
+                  disabled={callState.active || selectedSession?.status !== 'READY' || selectedChat?.chat_id?.endsWith('@g.us')}
+                  className={`p-2 rounded-full transition ${
+                    callState.active
+                      ? 'bg-emerald-100 text-emerald-600 animate-pulse'
+                      : selectedSession?.status !== 'READY' || selectedChat?.chat_id?.endsWith('@g.us')
+                      ? 'opacity-40 cursor-not-allowed hover:bg-transparent text-slate-400'
+                      : 'hover:bg-slate-200 text-slate-600 hover:text-emerald-600'
+                  }`}
+                  title={
+                    selectedSession?.status !== 'READY'
+                      ? 'Connect WhatsApp to make voice calls'
+                      : selectedChat?.chat_id?.endsWith('@g.us')
+                      ? 'Voice calling is available for direct 1-on-1 contacts'
+                      : 'Call WhatsApp Contact'
+                  }
+                >
+                  <Phone className="w-4 h-4" />
+                </button>
+
                 <button
                   onClick={handleSyncHistory}
                   className="p-2 rounded-full hover:bg-slate-200 transition"
@@ -2533,6 +2912,81 @@ export default function WhatsappPage() {
                   Unlink current CRM contact
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Active Voice Call Overlay (WhatsApp VoIP) */}
+      {callState.active && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <div className="bg-slate-900/95 backdrop-blur-md text-white rounded-2xl shadow-2xl border border-slate-700/60 p-5 w-80 flex flex-col items-center">
+            {/* Call Header Indicator */}
+            <div className="flex items-center justify-between w-full mb-3 text-xs text-slate-400">
+              <span className="flex items-center gap-1.5 text-emerald-400 font-semibold uppercase tracking-wider text-[11px]">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+                WhatsApp Voice
+              </span>
+              <span className="font-mono text-slate-300">
+                {String(Math.floor(callState.duration / 60)).padStart(2, '0')}:
+                {String(callState.duration % 60).padStart(2, '0')}
+              </span>
+            </div>
+
+            {/* Avatar & Peer Info */}
+            <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-emerald-900/40 mb-3">
+              {callState.peerName ? callState.peerName.charAt(0).toUpperCase() : <Phone className="w-7 h-7" />}
+            </div>
+
+            <h3 className="font-semibold text-base text-slate-100 text-center truncate w-full">
+              {callState.peerName || 'WhatsApp Contact'}
+            </h3>
+            <p className="text-xs text-slate-400 font-mono mb-3 truncate w-full text-center">
+              {callState.peerPhone}
+            </p>
+
+            {/* Call Status Badge */}
+            <div className="mb-4">
+              {callState.status === 'calling' && (
+                <span className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs font-medium border border-amber-500/30 flex items-center gap-1.5 animate-pulse">
+                  <PhoneCall className="w-3 h-3" /> Calling / Ringing...
+                </span>
+              )}
+              {callState.status === 'connected' && (
+                <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-medium border border-emerald-500/30 flex items-center gap-1.5">
+                  <Phone className="w-3 h-3" /> Audio Connected
+                </span>
+              )}
+              {callState.status === 'ended' && (
+                <span className="px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 text-xs font-medium border border-rose-500/30">
+                  {callState.error || 'Call Ended'}
+                </span>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center gap-4 w-full justify-center">
+              <button
+                type="button"
+                onClick={handleToggleMute}
+                className={`p-3 rounded-full transition shadow-md flex items-center justify-center ${
+                  callState.isMuted
+                    ? 'bg-rose-500 text-white hover:bg-rose-600'
+                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                }`}
+                title={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {callState.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleEndCall}
+                className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer"
+                title="Hang up call"
+              >
+                <PhoneOff className="w-5 h-5" />
+              </button>
             </div>
           </div>
         </div>
