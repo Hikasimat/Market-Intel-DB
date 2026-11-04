@@ -582,6 +582,13 @@ class WAHAClient:
                     last_error = e
 
         if last_error:
+            # If 404 (endpoint not supported by WAHA engine)
+            if isinstance(last_error, WAHAServiceError) and (last_error.status_code == 404 or "404" in str(last_error)):
+                raise WAHAServiceError(
+                    "WhatsApp group creation via API is not supported by the WAHA Noweb engine. "
+                    "Please create the group in your WhatsApp mobile app; it will automatically synchronize to your conversations list here.",
+                    status_code=404,
+                )
             raise last_error
         return {}
 
@@ -605,31 +612,82 @@ class WAHAClient:
 
     # -- Voice Calling (WAHA Live Calling API) -------------------------------
 
-    def get_calling_status(self, session_name: str) -> dict:
-        """Query status of calling subsystem for given session."""
+    def resolve_calling_session(self, preferred_session: str = "default") -> str:
+        """
+        Dynamically determine the active WAHA calling session that is paired.
+        Checks candidate sessions in order:
+          1. preferred_session (e.g. user's own session)
+          2. Any working session from get_all_sessions()
+          3. 'default'
+        Returns the first session name reporting paired == True.
+        If none reports paired == True, returns the first working session, 'default', or preferred_session.
+        """
+        candidates = []
+        if preferred_session:
+            candidates.append(preferred_session)
+
+        # Check working sessions from WAHA
         try:
-            _status, body = self._request(
-                "GET",
-                f"/api/calling/sessions/{session_name}/status",
-                timeout=4.0,
-            )
-            return body if isinstance(body, dict) else {}
+            sessions = self.get_all_sessions()
+            if isinstance(sessions, list):
+                for s in sessions:
+                    if isinstance(s, dict) and s.get("status") == "WORKING":
+                        w_name = s.get("name")
+                        if w_name and w_name not in candidates:
+                            candidates.append(w_name)
+                for s in sessions:
+                    if isinstance(s, dict):
+                        w_name = s.get("name")
+                        if w_name and w_name not in candidates:
+                            candidates.append(w_name)
         except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "GET",
-                        "/api/calling/sessions/default/status",
-                        timeout=4.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            logger.debug("Failed to query calling status for %s: %s", session_name, e)
-            return {"enabled": False, "paired": False, "state": "error", "error": str(e)}
+            logger.debug("Failed to list WAHA sessions during calling resolution: %s", e)
+
+        if "default" not in candidates:
+            candidates.append("default")
+
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "GET",
+                    f"/api/calling/sessions/{sess}/status",
+                    timeout=3.0,
+                )
+                if isinstance(body, dict) and body.get("paired") is True:
+                    logger.info("Resolved paired calling session: %s", sess)
+                    return sess
+            except Exception:
+                continue
+
+        return candidates[0] if candidates else "default"
+
+    def get_calling_status(self, session_name: str) -> dict:
+        """Query status of calling subsystem for given session, falling back to paired session."""
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "GET",
+                    f"/api/calling/sessions/{sess}/status",
+                    timeout=4.0,
+                )
+                if isinstance(body, dict):
+                    if body.get("paired") is True or sess == candidates[-1]:
+                        body["resolved_session"] = sess
+                        return body
+            except Exception as e:
+                logger.debug("Query calling status failed for session '%s': %s", sess, e)
+
+        return {"enabled": False, "paired": False, "state": "error", "error": "No calling session available"}
 
     def start_call(self, session_name: str, phone: str, client_id: Optional[str] = None) -> dict:
-        """Initiate outgoing voice call to a WhatsApp phone number."""
+        """Initiate outgoing voice call to a WhatsApp phone number via paired calling session."""
         extra_headers = {}
         if client_id:
             extra_headers["X-Client-Id"] = client_id
@@ -637,148 +695,172 @@ class WAHAClient:
         clean_phone = re.sub(r"\D+", "", phone)
         payload = {"phone": clean_phone}
 
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
         try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{session_name}/calls",
-                payload=payload,
-                extra_headers=extra_headers,
-                timeout=10.0,
-            )
-            return body if isinstance(body, dict) else {}
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "POST",
-                        "/api/calling/sessions/default/calls",
-                        payload=payload,
-                        extra_headers=extra_headers,
-                        timeout=10.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            raise WAHAServiceError(f"Failed to start call: {e}")
+            sessions = self.get_all_sessions()
+            if isinstance(sessions, list):
+                for s in sessions:
+                    if isinstance(s, dict) and s.get("status") == "WORKING":
+                        w_name = s.get("name")
+                        if w_name and w_name not in candidates:
+                            candidates.append(w_name)
+        except Exception:
+            pass
+
+        last_error = None
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{sess}/calls",
+                    payload=payload,
+                    extra_headers=extra_headers,
+                    timeout=10.0,
+                )
+                if isinstance(body, dict):
+                    body["session_name"] = sess
+                    return body
+            except Exception as e:
+                last_error = e
+                logger.info("start_call attempt failed for session '%s': %s", sess, e)
+                continue
+
+        err_msg = str(last_error) if last_error else "Calling session is not paired."
+        raise WAHAServiceError(f"Failed to start call: {err_msg}")
 
     def accept_call(self, session_name: str, call_id: str, client_id: Optional[str] = None) -> dict:
         """Accept an incoming voice call."""
         extra_headers = {}
         if client_id:
             extra_headers["X-Client-Id"] = client_id
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{session_name}/calls/{call_id}/accept",
-                extra_headers=extra_headers,
-                timeout=8.0,
-            )
-            return body if isinstance(body, dict) else {}
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "POST",
-                        f"/api/calling/sessions/default/calls/{call_id}/accept",
-                        extra_headers=extra_headers,
-                        timeout=8.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            raise WAHAServiceError(f"Failed to accept call: {e}")
+
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        last_error = None
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}/accept",
+                    extra_headers=extra_headers,
+                    timeout=8.0,
+                )
+                if isinstance(body, dict):
+                    body["session_name"] = sess
+                    return body
+            except Exception as e:
+                last_error = e
+
+        raise WAHAServiceError(f"Failed to accept call: {last_error}")
 
     def reject_call(self, session_name: str, call_id: str) -> dict:
         """Reject an incoming voice call."""
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{session_name}/calls/{call_id}/reject",
-                timeout=6.0,
-            )
-            return body if isinstance(body, dict) else {}
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "POST",
-                        f"/api/calling/sessions/default/calls/{call_id}/reject",
-                        timeout=6.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            raise WAHAServiceError(f"Failed to reject call: {e}")
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        last_error = None
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}/reject",
+                    timeout=6.0,
+                )
+                if isinstance(body, dict):
+                    return body
+            except Exception as e:
+                last_error = e
+
+        raise WAHAServiceError(f"Failed to reject call: {last_error}")
 
     def end_call(self, session_name: str, call_id: str) -> dict:
         """Hang up / terminate an active voice call."""
-        try:
-            _status, body = self._request(
-                "DELETE",
-                f"/api/calling/sessions/{session_name}/calls/{call_id}",
-                timeout=6.0,
-            )
-            return body if isinstance(body, dict) else {}
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "DELETE",
-                        f"/api/calling/sessions/default/calls/{call_id}",
-                        timeout=6.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            return {"status": "ended"}
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "DELETE",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}",
+                    timeout=6.0,
+                )
+                if isinstance(body, dict):
+                    return body
+            except Exception:
+                continue
+
+        return {"status": "ended"}
 
     def exchange_webrtc(self, session_name: str, call_id: str, sdp_offer: str) -> dict:
         """Exchange WebRTC SDP offer to establish PCM audio data channel."""
         payload = {"sdp_offer": sdp_offer}
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{session_name}/calls/{call_id}/webrtc",
-                payload=payload,
-                timeout=12.0,
-            )
-            return body if isinstance(body, dict) else {}
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "POST",
-                        f"/api/calling/sessions/default/calls/{call_id}/webrtc",
-                        payload=payload,
-                        timeout=12.0,
-                    )
-                    return body if isinstance(body, dict) else {}
-                except Exception:
-                    pass
-            raise WAHAServiceError(f"Failed to exchange WebRTC offer: {e}")
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        last_error = None
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}/webrtc",
+                    payload=payload,
+                    timeout=12.0,
+                )
+                if isinstance(body, dict):
+                    return body
+            except Exception as e:
+                last_error = e
+                logger.info("exchange_webrtc attempt failed for session '%s': %s", sess, e)
+                continue
+
+        raise WAHAServiceError(f"Failed to exchange WebRTC offer: {last_error}")
 
     def get_calling_history(self, session_name: str) -> list:
         """Get voice call history from WAHA calling service."""
-        try:
-            _status, body = self._request(
-                "GET",
-                f"/api/calling/sessions/{session_name}/history",
-                timeout=6.0,
-            )
-            return body if isinstance(body, list) else []
-        except Exception as e:
-            if session_name != "default":
-                try:
-                    _status, body = self._request(
-                        "GET",
-                        "/api/calling/sessions/default/history",
-                        timeout=6.0,
-                    )
-                    return body if isinstance(body, list) else []
-                except Exception:
-                    pass
-            logger.debug("Failed to retrieve calling history for %s: %s", session_name, e)
-            return []
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = [target_session]
+        if session_name not in candidates:
+            candidates.append(session_name)
+        if "default" not in candidates:
+            candidates.append("default")
+
+        for sess in candidates:
+            try:
+                _status, body = self._request(
+                    "GET",
+                    f"/api/calling/sessions/{sess}/history",
+                    timeout=6.0,
+                )
+                if isinstance(body, list):
+                    return body
+            except Exception:
+                continue
+
+        return []
 
 
 # ---------------------------------------------------------------------------

@@ -2177,8 +2177,16 @@ class WhatsAppGroupCreateView(APIView):
                 "conversation": WhatsAppConversationSerializer(conv).data if conv else None,
             }, status=status.HTTP_201_CREATED)
         except Exception as exc:
-            logger.error("Failed to create WhatsApp group: %s", exc)
-            return Response({"detail": f"Failed to create group: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+            logger.warning("Failed to create WhatsApp group: %s", exc)
+            err_msg = str(exc)
+            if "404" in err_msg or "Cannot POST" in err_msg or "not supported" in err_msg.lower():
+                user_msg = (
+                    "WhatsApp group creation via API is not supported by the WAHA Noweb engine. "
+                    "Please create the group in your WhatsApp mobile app; it will automatically synchronize to your conversations list here."
+                )
+            else:
+                user_msg = f"Failed to create group: {exc}"
+            return Response({"detail": user_msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ---------------------------------------------------------------------------
@@ -2198,9 +2206,10 @@ class WhatsAppCallStatusView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         call_status = client.get_calling_status(session_name)
+        resolved_session = call_status.get("resolved_session") or session_name
         return Response({
-            "session_name": session_name,
-            "connected": session_obj.status == WhatsAppSession.Status.READY,
+            "session_name": resolved_session,
+            "connected": session_obj.status == WhatsAppSession.Status.READY or call_status.get("paired", False),
             "calling": call_status,
         })
 
@@ -2208,20 +2217,13 @@ class WhatsAppCallStatusView(APIView):
 class WhatsAppCallStartView(APIView):
     """
     Initiate outgoing voice call to a WhatsApp contact.
-    Strictly requires user's WhatsApp session to be connected.
+    Dynamically routes to paired WhatsApp calling session.
     """
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
 
     def post(self, request):
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
-
-        # Ensure session is connected
-        if session_obj.status != WhatsAppSession.Status.READY:
-            return Response(
-                {"error": "WhatsApp session is not connected. Please connect WhatsApp first."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         phone = request.data.get("phone") or ""
         chat_id = request.data.get("chat_id") or ""
@@ -2240,11 +2242,12 @@ class WhatsAppCallStartView(APIView):
         try:
             result = client.start_call(session_name, clean_phone)
             call_id = result.get("callId") or result.get("call_id") or ""
+            session_used = result.get("session_name") or session_name
             return Response({
                 "status": "calling",
                 "call_id": call_id,
                 "phone": clean_phone,
-                "session_name": session_name,
+                "session_name": session_used,
                 "result": result,
             }, status=status.HTTP_200_OK)
         except Exception as exc:
@@ -2308,11 +2311,13 @@ class WhatsAppCallEndView(APIView):
     def _end(self, request, call_id):
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
+        client_session = request.data.get("session_name") or request.query_params.get("session_name")
+        target_session = client_session or session_name
 
         from .client import get_waha_client
         client = get_waha_client()
         try:
-            result = client.end_call(session_name, call_id)
+            result = client.end_call(target_session, call_id)
             return Response({
                 "status": "ended",
                 "call_id": call_id,
@@ -2332,6 +2337,8 @@ class WhatsAppCallWebRTCView(APIView):
     def post(self, request, call_id):
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
+        client_session = request.data.get("session_name") or request.query_params.get("session_name")
+        target_session = client_session or session_name
 
         sdp_offer = request.data.get("sdp_offer") or request.data.get("sdpOffer") or ""
         if not sdp_offer:
@@ -2343,7 +2350,7 @@ class WhatsAppCallWebRTCView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         try:
-            result = client.exchange_webrtc(session_name, call_id, sdp_offer)
+            result = client.exchange_webrtc(target_session, call_id, sdp_offer)
             sdp_answer = result.get("sdpAnswer") or result.get("sdp_answer") or ""
             return Response({
                 "sdp_answer": sdp_answer,

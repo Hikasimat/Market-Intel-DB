@@ -422,6 +422,7 @@ export default function WhatsappPage() {
     active: false,
     status: 'idle', // 'calling' | 'connected' | 'ended'
     callId: null,
+    sessionName: null,
     peerName: '',
     peerPhone: '',
     duration: 0,
@@ -491,6 +492,7 @@ export default function WhatsappPage() {
       active: false,
       status: 'idle',
       callId: null,
+      sessionName: null,
       peerName: '',
       peerPhone: '',
       duration: 0,
@@ -503,13 +505,15 @@ export default function WhatsappPage() {
     const activeCallId = callState.callId;
     if (activeCallId) {
       try {
-        await api.post(`/whatsapp/calls/${activeCallId}/end/`);
+        await api.post(`/whatsapp/calls/${activeCallId}/end/`, {
+          session_name: callState.sessionName,
+        });
       } catch (err) {
         console.warn('End call API notification failed:', err);
       }
     }
     cleanupCallSession();
-  }, [callState.callId, cleanupCallSession]);
+  }, [callState.callId, callState.sessionName, cleanupCallSession]);
 
   const handleToggleMute = useCallback(() => {
     const nextMuted = !callState.isMuted;
@@ -521,7 +525,7 @@ export default function WhatsappPage() {
     setCallState((prev) => ({ ...prev, isMuted: nextMuted }));
   }, [callState.isMuted]);
 
-  const initWebRTCAudioChannel = useCallback(async (callId) => {
+  const initWebRTCAudioChannel = useCallback(async (callId, callSessionName) => {
     try {
       // 1. Mic capture
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -605,6 +609,7 @@ export default function WhatsappPage() {
       const sdpOffer = pc.localDescription?.sdp || '';
       const webrtcRes = await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/webrtc/`, {
         sdp_offer: sdpOffer,
+        session_name: callSessionName,
       });
 
       const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
@@ -667,6 +672,7 @@ export default function WhatsappPage() {
       });
 
       const newCallId = startRes.data?.call_id || startRes.data?.callId;
+      const resolvedSession = startRes.data?.session_name || selectedSession?.session_name || 'default';
       if (!newCallId) {
         throw new Error(startRes.data?.error || 'No call ID returned by WhatsApp calling service');
       }
@@ -674,9 +680,10 @@ export default function WhatsappPage() {
       setCallState((prev) => ({
         ...prev,
         callId: newCallId,
+        sessionName: resolvedSession,
       }));
 
-      await initWebRTCAudioChannel(newCallId);
+      await initWebRTCAudioChannel(newCallId, resolvedSession);
     } catch (err) {
       console.error('Start voice call failed:', err);
       setCallState((prev) => ({
@@ -2759,6 +2766,10 @@ export default function WhatsappPage() {
               </div>
             ) : (
               <div className="p-5 space-y-4">
+                <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-3 text-xs text-amber-800 flex items-start gap-2">
+                  <span className="font-bold text-amber-900">&#9432; Note:</span>
+                  <span>WhatsApp groups created directly in your WhatsApp mobile app will automatically synchronize to your conversations list here.</span>
+                </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
                     Group Name / Subject *
