@@ -312,8 +312,15 @@ class WAHAClient:
 
     def get_all_sessions(self) -> list:
         """List all WAHA sessions."""
-        _status, body = self._request("GET", "/api/sessions", timeout=2.5)
-        return body if isinstance(body, list) else []
+        try:
+            _status, body = self._request("GET", "/api/sessions", timeout=5.0)
+            if isinstance(body, list):
+                return body
+            if isinstance(body, dict) and isinstance(body.get("sessions"), list):
+                return body["sessions"]
+        except Exception as e:
+            logger.debug("get_all_sessions request failed: %s", e)
+        return []
 
     def get_qr(self, session_name: str = "default") -> dict:
         """Get the QR code for a session (as base64 or raw string)."""
@@ -666,9 +673,10 @@ class WAHAClient:
                     f"/api/calling/sessions/{sess}/status",
                     timeout=3.0,
                 )
-                if isinstance(body, dict) and body.get("paired") is True:
-                    logger.info("Resolved paired calling session: %s", sess)
-                    return sess
+                if isinstance(body, dict):
+                    if body.get("paired") is True or body.get("callingSessionId") or body.get("state") in ("open", "connected"):
+                        logger.info("Resolved paired calling session: %s (paired=%s, state=%s)", sess, body.get("paired"), body.get("state"))
+                        return sess
             except Exception:
                 continue
 
@@ -678,7 +686,7 @@ class WAHAClient:
             sessions = self.get_all_sessions()
             if isinstance(sessions, list):
                 for s in sessions:
-                    if isinstance(s, dict) and s.get("status") == "WORKING":
+                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
                         w_name = s.get("name")
                         if w_name and w_name not in working_sessions:
                             working_sessions.append(w_name)
@@ -718,14 +726,30 @@ class WAHAClient:
             logger.debug("Failed to fetch calling QR for %s: %s", session_name, e)
             return {"error": str(e)}
 
+    def _get_calling_candidates(self, session_name: str) -> list:
+        """Return candidate WAHA calling sessions prioritized by active/paired status."""
+        target_session = self.resolve_calling_session(preferred_session=session_name)
+        candidates = []
+        for s in (target_session, session_name, "default"):
+            if s and s not in candidates:
+                candidates.append(s)
+
+        try:
+            sessions = self.get_all_sessions()
+            if isinstance(sessions, list):
+                for s in sessions:
+                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
+                        w_name = s.get("name")
+                        if w_name and w_name not in candidates:
+                            candidates.append(w_name)
+        except Exception:
+            pass
+
+        return candidates
+
     def get_calling_status(self, session_name: str) -> dict:
         """Query status of calling subsystem for given session, falling back to paired session."""
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         for sess in candidates:
             try:
@@ -735,7 +759,12 @@ class WAHAClient:
                     timeout=4.0,
                 )
                 if isinstance(body, dict):
-                    if body.get("paired") is True or sess == candidates[-1]:
+                    if (
+                        body.get("paired") is True
+                        or body.get("callingSessionId")
+                        or body.get("state") in ("open", "connected")
+                        or sess == candidates[-1]
+                    ):
                         body["resolved_session"] = sess
                         return body
             except Exception as e:
@@ -753,17 +782,16 @@ class WAHAClient:
         payload = {"phone": clean_phone}
 
         target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = []
+        for s in (target_session, session_name, "default"):
+            if s and s not in candidates:
+                candidates.append(s)
 
         try:
             sessions = self.get_all_sessions()
             if isinstance(sessions, list):
                 for s in sessions:
-                    if isinstance(s, dict) and s.get("status") == "WORKING":
+                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
                         w_name = s.get("name")
                         if w_name and w_name not in candidates:
                             candidates.append(w_name)
@@ -797,12 +825,7 @@ class WAHAClient:
         if client_id:
             extra_headers["X-Client-Id"] = client_id
 
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         last_error = None
         for sess in candidates:
@@ -823,12 +846,7 @@ class WAHAClient:
 
     def reject_call(self, session_name: str, call_id: str) -> dict:
         """Reject an incoming voice call."""
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         last_error = None
         for sess in candidates:
@@ -847,12 +865,7 @@ class WAHAClient:
 
     def end_call(self, session_name: str, call_id: str) -> dict:
         """Hang up / terminate an active voice call."""
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         for sess in candidates:
             try:
@@ -871,12 +884,7 @@ class WAHAClient:
     def exchange_webrtc(self, session_name: str, call_id: str, sdp_offer: str) -> dict:
         """Exchange WebRTC SDP offer to establish PCM audio data channel."""
         payload = {"sdp_offer": sdp_offer}
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         last_error = None
         for sess in candidates:
@@ -898,12 +906,7 @@ class WAHAClient:
 
     def get_calling_history(self, session_name: str) -> list:
         """Get voice call history from WAHA calling service."""
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = [target_session]
-        if session_name not in candidates:
-            candidates.append(session_name)
-        if "default" not in candidates:
-            candidates.append("default")
+        candidates = self._get_calling_candidates(session_name)
 
         for sess in candidates:
             try:

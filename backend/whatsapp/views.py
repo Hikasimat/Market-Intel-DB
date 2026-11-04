@@ -2278,10 +2278,19 @@ class WhatsAppCallStatusView(APIView):
 
         from .webhooks import get_active_incoming_call
         incoming_call = get_active_incoming_call(session_name)
+        if not incoming_call and resolved_session != session_name:
+            incoming_call = get_active_incoming_call(resolved_session)
+
+        is_connected = (
+            session_obj.status == WhatsAppSession.Status.READY
+            or bool(call_status.get("paired"))
+            or call_status.get("state") in ("open", "connected")
+        )
 
         return Response({
             "session_name": resolved_session,
-            "connected": session_obj.status == WhatsAppSession.Status.READY or call_status.get("paired", False),
+            "connected": is_connected,
+            "paired": bool(call_status.get("paired")),
             "calling": call_status,
             "incoming_call": incoming_call,
         })
@@ -2296,7 +2305,9 @@ class WhatsAppCallStartView(APIView):
 
     def post(self, request):
         session_obj = _get_user_session(request.user, create=True)
-        session_name = session_obj.session_name
+        default_session = session_obj.session_name
+        req_session = (request.data.get("session_name") or "").strip()
+        session_name = req_session or default_session
 
         phone = request.data.get("phone") or ""
         chat_id = request.data.get("chat_id") or ""
@@ -2324,14 +2335,19 @@ class WhatsAppCallStartView(APIView):
                 "result": result,
             }, status=status.HTTP_200_OK)
         except Exception as exc:
-            logger.error("Failed to start voice call: %s", exc)
+            logger.error("Failed to start voice call (session=%s, phone=%s): %s", session_name, clean_phone, exc, exc_info=True)
             err_str = str(exc).lower()
             if "not paired" in err_str or "503" in err_str:
                 return Response({
                     "error": "calling_not_paired",
                     "detail": "WhatsApp voice calling is not linked yet. Please scan the QR code to link calling device.",
+                    "raw": str(exc),
                 }, status=status.HTTP_400_BAD_REQUEST)
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "error": str(exc),
+                "detail": str(exc),
+                "session_attempted": session_name,
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class WhatsAppCallAcceptView(APIView):
@@ -2340,7 +2356,9 @@ class WhatsAppCallAcceptView(APIView):
 
     def post(self, request, call_id):
         session_obj = _get_user_session(request.user, create=True)
-        session_name = session_obj.session_name
+        default_session = session_obj.session_name
+        req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
+        session_name = req_session or default_session
 
         from .client import get_waha_client
         client = get_waha_client()
@@ -2364,7 +2382,9 @@ class WhatsAppCallRejectView(APIView):
 
     def post(self, request, call_id):
         session_obj = _get_user_session(request.user, create=True)
-        session_name = session_obj.session_name
+        default_session = session_obj.session_name
+        req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
+        session_name = req_session or default_session
 
         from .client import get_waha_client
         client = get_waha_client()

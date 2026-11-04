@@ -138,7 +138,9 @@ def _call_cache_file(session_name: str) -> str:
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
     """Retrieve currently ringing/incoming voice call for user session."""
     import time
+    import glob
     now = time.time()
+    # 1. Check direct session candidate and default
     for s in (session_name, "default"):
         cached = LATEST_CALL_CACHE.get(s)
         if cached and (now - cached.get("received_at", 0) <= 60):
@@ -161,6 +163,33 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
                         pass
         except Exception:
             pass
+
+    # 2. Check any other active call cached in memory
+    for s, cached in list(LATEST_CALL_CACHE.items()):
+        if cached and (now - cached.get("received_at", 0) <= 60):
+            return cached
+
+    # 3. Check any active call file in temp dir
+    try:
+        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
+        for fpath in glob.glob(pattern):
+            try:
+                age = now - os.path.getmtime(fpath)
+                if age <= 60:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and data.get("call_id"):
+                        return data
+                else:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return None
 
 def set_active_incoming_call(session_name: str, call_data: dict) -> None:
@@ -180,16 +209,27 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
 
 def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
     """Clear active incoming call once answered, rejected, or ended."""
-    for s in (session_name, "default"):
+    import glob
+    for s in list(LATEST_CALL_CACHE.keys()):
         cached = LATEST_CALL_CACHE.get(s)
         if not call_id or (cached and cached.get("call_id") == call_id):
             LATEST_CALL_CACHE.pop(s, None)
+
+    try:
+        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
+        for fpath in glob.glob(pattern):
             try:
-                cache_path = _call_cache_file(s)
-                if os.path.exists(cache_path):
-                    os.remove(cache_path)
-            except OSError:
+                if not call_id:
+                    os.remove(fpath)
+                else:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and data.get("call_id") == call_id:
+                        os.remove(fpath)
+            except Exception:
                 pass
+    except Exception:
+        pass
 
 
 def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
@@ -685,12 +725,22 @@ def _handle_call_event(
       - call.ended     (status: "terminate")
       - call.update    (generic fallback)
     """
-    call_id = str(event_data.get("id") or "").strip()
-    raw_from = str(event_data.get("from") or "").strip()
-    raw_chat = str(event_data.get("chatId") or "").strip()
-    is_group = bool(event_data.get("isGroup", False))
-    group_jid = str(event_data.get("groupJid") or "").strip()
-    is_video = bool(event_data.get("isVideo", False))
+    call_id = str(
+        event_data.get("callId")
+        or event_data.get("call_id")
+        or event_data.get("id")
+        or ""
+    ).strip()
+    raw_from = str(
+        event_data.get("peer")
+        or event_data.get("from")
+        or event_data.get("caller")
+        or ""
+    ).strip()
+    raw_chat = str(event_data.get("chatId") or event_data.get("chat_id") or "").strip()
+    is_group = bool(event_data.get("isGroup", False) or event_data.get("is_group", False))
+    group_jid = str(event_data.get("groupJid") or event_data.get("group_jid") or "").strip()
+    is_video = bool(event_data.get("isVideo", False) or event_data.get("is_video", False))
     raw_status = str(event_data.get("status") or "").strip().lower()
 
     # Determine target chat ID
@@ -722,11 +772,14 @@ def _handle_call_event(
 
     # Call type and human-readable label
     call_type = "Video call" if is_video else "Voice call"
-    is_missed = event_type == "call.missed" or raw_status in ("timeout", "missed")
-    is_rejected = event_type == "call.rejected" or raw_status in ("reject", "declined")
-    is_ended = event_type == "call.ended" or raw_status in ("terminate", "ended")
-    is_accepted = event_type == "call.accepted" or raw_status in ("accept", "answered")
-    is_received = event_type == "call.received" or raw_status in ("offer", "received")
+    is_missed = event_type in ("call.missed", "call.voice.missed") or raw_status in ("timeout", "missed")
+    is_rejected = event_type in ("call.rejected", "call.voice.rejected") or raw_status in ("reject", "declined", "rejected")
+    is_ended = event_type in ("call.ended", "call.voice.ended") or raw_status in ("terminate", "ended")
+    is_accepted = event_type in ("call.accepted", "call.voice.active") or raw_status in ("accept", "answered", "active")
+    is_received = (
+        event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing")
+        or raw_status in ("offer", "received", "incoming", "ringing")
+    )
 
     if is_missed:
         call_label = f"Missed {call_type.lower()}"

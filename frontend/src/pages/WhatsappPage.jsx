@@ -262,8 +262,23 @@ function float32ToInt16LE(pcm) {
 }
 
 function int16LEToFloat32(buf) {
-  const view = new DataView(buf);
-  const n = Math.floor(buf.byteLength / 2);
+  if (!buf) return new Float32Array(0);
+  let arrayBuffer;
+  let byteOffset = 0;
+  let byteLength = 0;
+  if (buf instanceof ArrayBuffer) {
+    arrayBuffer = buf;
+    byteOffset = 0;
+    byteLength = buf.byteLength;
+  } else if (ArrayBuffer.isView(buf)) {
+    arrayBuffer = buf.buffer;
+    byteOffset = buf.byteOffset;
+    byteLength = buf.byteLength;
+  } else {
+    return new Float32Array(0);
+  }
+  const view = new DataView(arrayBuffer, byteOffset, byteLength);
+  const n = Math.floor(byteLength / 2);
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     out[i] = view.getInt16(i * 2, true) / 32768;
@@ -295,6 +310,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.available = 0;
     this.port.onmessage = (e) => {
       const data = e.data;
+      if (!data || !data.length) return;
       for (let i = 0; i < data.length; i += 1) {
         this.ring[this.write] = data[i];
         this.write = (this.write + 1) % RING_SIZE;
@@ -307,15 +323,19 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     };
   }
   process(_inputs, outputs) {
-    const out = outputs[0][0];
-    if (!out) return true;
-    for (let i = 0; i < out.length; i += 1) {
+    const output = outputs[0];
+    if (!output || !output[0]) return true;
+    const channelCount = output.length;
+    const frameCount = output[0].length;
+    for (let i = 0; i < frameCount; i += 1) {
+      let sample = 0;
       if (this.available > 0) {
-        out[i] = this.ring[this.read];
+        sample = this.ring[this.read];
         this.read = (this.read + 1) % RING_SIZE;
         this.available -= 1;
-      } else {
-        out[i] = 0;
+      }
+      for (let ch = 0; ch < channelCount; ch += 1) {
+        output[ch][i] = sample;
       }
     }
     return true;
@@ -475,6 +495,39 @@ export default function WhatsappPage() {
     return () => clearInterval(interval);
   }, [checkCallingStatus]);
 
+  // Audible Ringing Chime for Incoming WhatsApp Calls
+  useEffect(() => {
+    if (!incomingCall) return;
+    let ringInterval = null;
+    let ringCtx = null;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      ringCtx = new AudioCtx();
+      const playTone = () => {
+        if (!ringCtx || ringCtx.state === 'closed') return;
+        if (ringCtx.state === 'suspended') ringCtx.resume().catch(() => {});
+        const now = ringCtx.currentTime;
+        const osc = ringCtx.createOscillator();
+        const gain = ringCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.setValueAtTime(480, now + 0.1);
+        gain.gain.setValueAtTime(0.12, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+        osc.connect(gain);
+        gain.connect(ringCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.8);
+      };
+      playTone();
+      ringInterval = setInterval(playTone, 2000);
+    } catch (_) {}
+    return () => {
+      if (ringInterval) clearInterval(ringInterval);
+      if (ringCtx) ringCtx.close().catch(() => {});
+    };
+  }, [incomingCall]);
+
 
 
 
@@ -573,7 +626,11 @@ export default function WhatsappPage() {
       callMediaRef.current.micStream = stream;
 
       // 2. Peer Connection with PCM DataChannel
-      const pc = new RTCPeerConnection({ iceServers: [] });
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+        ]
+      });
       callMediaRef.current.peerConnection = pc;
 
       const dc = pc.createDataChannel('pcm', { ordered: true });
@@ -623,8 +680,41 @@ export default function WhatsappPage() {
       // Playback incoming audio
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
       playbackNode.connect(ctx.destination);
-      dc.onmessage = (e) => {
-        playbackNode.port.postMessage(int16LEToFloat32(e.data));
+      dc.onopen = () => {
+        console.log('Voice PCM DataChannel opened');
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch((err) => console.warn('AudioContext resume error:', err));
+        }
+      };
+      dc.onmessage = async (e) => {
+        let rawData = e.data;
+        if (rawData instanceof Blob) {
+          rawData = await rawData.arrayBuffer();
+        }
+        const floats = int16LEToFloat32(rawData);
+        if (floats && floats.length) {
+          playbackNode.port.postMessage(floats);
+        }
+      };
+
+      pc.ondatachannel = (event) => {
+        const remoteDc = event.channel;
+        remoteDc.binaryType = 'arraybuffer';
+        remoteDc.onopen = () => {
+          if (ctx.state === 'suspended') {
+            ctx.resume().catch((err) => console.warn('AudioContext resume error:', err));
+          }
+        };
+        remoteDc.onmessage = async (e) => {
+          let rawData = e.data;
+          if (rawData instanceof Blob) {
+            rawData = await rawData.arrayBuffer();
+          }
+          const floats = int16LEToFloat32(rawData);
+          if (floats && floats.length) {
+            playbackNode.port.postMessage(floats);
+          }
+        };
       };
 
       // 4. Offer / Answer SDP exchange
@@ -708,6 +798,7 @@ export default function WhatsappPage() {
       const startRes = await api.post('/whatsapp/calls/start/', {
         phone: cleanPhone,
         chat_id: selectedChat.chat_id,
+        session_name: selectedSession?.session_name || 'default',
       });
 
       const newCallId = startRes.data?.call_id || startRes.data?.callId;
@@ -724,17 +815,19 @@ export default function WhatsappPage() {
 
       await initWebRTCAudioChannel(newCallId, resolvedSession);
     } catch (err) {
-      console.error('Start voice call failed:', err);
+      console.error('Start voice call failed:', err.response?.data || err);
       const isNotPaired = err.response?.data?.error === 'calling_not_paired' || (err.response?.data?.detail || '').includes('calling device') || (err.response?.data?.error || '').includes('not paired');
       if (isNotPaired) {
         cleanupCallSession();
         showToast('Voice calling is initializing with your connected WhatsApp session. Please try again.', 'info');
         return;
       }
+      const errDetail = err.response?.data?.detail || err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call';
+      showToast(`Call failed: ${errDetail}`, 'error');
       setCallState((prev) => ({
         ...prev,
         status: 'ended',
-        error: err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call',
+        error: errDetail,
       }));
       setTimeout(() => {
         cleanupCallSession();
@@ -763,7 +856,9 @@ export default function WhatsappPage() {
     });
 
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`);
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`, {
+        session_name: sessionToUse,
+      });
     } catch (acceptErr) {
       console.warn('Accept call error (may already be accepted):', acceptErr);
     }
@@ -780,14 +875,17 @@ export default function WhatsappPage() {
   const handleRejectIncomingCall = useCallback(async () => {
     if (!incomingCall) return;
     const callId = incomingCall.call_id;
+    const sessionToUse = incomingCall.session_name || selectedSession?.session_name || 'default';
     setIncomingCall(null);
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`);
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`, {
+        session_name: sessionToUse,
+      });
       showToast('Call declined', 'info');
     } catch (err) {
       console.warn('Decline call error:', err);
     }
-  }, [incomingCall, showToast]);
+  }, [incomingCall, selectedSession?.session_name, showToast]);
 
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
