@@ -886,18 +886,46 @@ def _handle_incoming_message(
         logger.info("Ignoring WhatsApp Status story/broadcast media from %s", raw_from)
         return
 
+    # Strip multi-device colon from chat ID (e.g. 919003619221:0@s.whatsapp.net -> 919003619221@s.whatsapp.net)
+    target_chat_id = re.sub(r":[0-9]+@", "@", target_chat_id)
+
     # Validate chat ID.
     if not VALID_CHAT_ID_RE.match(target_chat_id):
         logger.warning("Incoming message with invalid chat ID: %r — ignored.", target_chat_id)
         return
 
     phone_digits = _extract_phone_digits(target_chat_id)
+    is_group = target_chat_id.endswith("@g.us")
 
-    # Opt-out keyword check only for incoming messages from contacts
+    # Build candidate JIDs for 1-on-1 chats to match both @s.whatsapp.net and @c.us
+    alt_chat_id = None
+    if target_chat_id.endswith("@s.whatsapp.net"):
+        alt_chat_id = target_chat_id.replace("@s.whatsapp.net", "@c.us")
+    elif target_chat_id.endswith("@c.us"):
+        alt_chat_id = target_chat_id.replace("@c.us", "@s.whatsapp.net")
+
+    candidate_ids = [target_chat_id]
+    if alt_chat_id:
+        candidate_ids.append(alt_chat_id)
+
+    from django.db.models import Q
+
+    # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
     conversation = WhatsAppConversation.objects.filter(
-        chat_id=target_chat_id,
+        chat_id__in=candidate_ids,
         session__session_name=session_name,
+        is_deleted=False,
     ).first()
+
+    # If not found by chat_id and not a group, match by phone digits within this session
+    if not conversation and not is_group and phone_digits and len(phone_digits) >= 8:
+        suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits[-8:]
+        conversation = WhatsAppConversation.objects.filter(
+            session__session_name=session_name,
+            is_deleted=False,
+        ).filter(
+            Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+        ).first()
 
     if not is_from_me:
         opt_out_registered = check_incoming_for_opt_out(
@@ -911,7 +939,6 @@ def _handle_incoming_message(
     # -----------------------------------------------------------------------
     # Find or create conversation record.
     # -----------------------------------------------------------------------
-    is_group = target_chat_id.endswith("@g.us")
     is_matched = is_group
     prospect_contact = None
     

@@ -818,15 +818,34 @@ class WhatsAppSendMessageView(APIView):
                 user_session = _get_user_session(request.user, create=True)
                 actual_session_name = user_session.session_name if user_session else "default"
 
+                clean_chat_id = re.sub(r":[0-9]+@", "@", raw_chat_id.strip())
+                alt_chat_id = None
+                if clean_chat_id.endswith("@s.whatsapp.net"):
+                    alt_chat_id = clean_chat_id.replace("@s.whatsapp.net", "@c.us")
+                elif clean_chat_id.endswith("@c.us"):
+                    alt_chat_id = clean_chat_id.replace("@c.us", "@s.whatsapp.net")
+
+                candidate_ids = [clean_chat_id]
+                if alt_chat_id:
+                    candidate_ids.append(alt_chat_id)
+
+                from django.db.models import Q
                 target_conv = WhatsAppConversation.objects.filter(
                     session=user_session,
-                    chat_id=raw_chat_id
+                    chat_id__in=candidate_ids,
                 ).first()
 
+                digits = re.sub(r"\D+", "", clean_chat_id.split("@")[0].split(":")[0])
+                if not target_conv and not clean_chat_id.endswith("@g.us") and digits and len(digits) >= 8:
+                    suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+                    target_conv = WhatsAppConversation.objects.filter(
+                        session=user_session,
+                    ).filter(
+                        Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+                    ).first()
+
                 if not target_conv:
-                    existing_any = WhatsAppConversation.objects.filter(chat_id=raw_chat_id).first()
-                    import re
-                    digits = re.sub(r"\D+", "", raw_chat_id.split("@")[0].split(":")[0])
+                    existing_any = WhatsAppConversation.objects.filter(chat_id__in=candidate_ids).first()
                     matched_contact = existing_any.prospect_contact if existing_any else None
                     if not matched_contact and digits and len(digits) >= 8:
                         from prospects.models import ProspectContact
@@ -844,10 +863,10 @@ class WhatsAppSendMessageView(APIView):
                                     break
 
                     phone_formatted = f"+{digits}" if digits else None
-                    is_grp = raw_chat_id.endswith("@g.us")
+                    is_grp = clean_chat_id.endswith("@g.us")
                     target_conv = WhatsAppConversation.objects.create(
                         session=user_session,
-                        chat_id=raw_chat_id,
+                        chat_id=clean_chat_id,
                         phone_number=phone_formatted if not is_grp else None,
                         prospect_contact=matched_contact if not is_grp else None,
                         prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
@@ -953,21 +972,28 @@ class WhatsAppConversationsView(APIView):
                 client = get_waha_client()
                 waha_chats = client.get_chats(user_session.session_name, limit=60)
                 for wc in waha_chats:
-                    c_id = wc.get("id")
+                    c_id = re.sub(r":[0-9]+@", "@", wc.get("id", ""))
                     if not c_id:
                         continue
                     is_grp = c_id.endswith("@g.us")
                     w_name = wc.get("name") or ("WhatsApp Group" if is_grp else "")
-                    conv_obj, created = WhatsAppConversation.objects.get_or_create(
-                        session=user_session,
-                        chat_id=c_id,
-                        defaults={
-                            "whatsapp_name": w_name,
-                            "unread_count": wc.get("unreadCount", 0),
-                            "is_matched": is_grp,
-                        }
-                    )
-                    if not created and is_grp and w_name and conv_obj.whatsapp_name != w_name:
+
+                    # Check for existing conversation with either @s.whatsapp.net or @c.us suffix
+                    alt_id = c_id.replace("@s.whatsapp.net", "@c.us") if c_id.endswith("@s.whatsapp.net") else (c_id.replace("@c.us", "@s.whatsapp.net") if c_id.endswith("@c.us") else None)
+                    c_candidates = [c_id]
+                    if alt_id:
+                        c_candidates.append(alt_id)
+
+                    conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id__in=c_candidates).first()
+                    if not conv_obj:
+                        conv_obj = WhatsAppConversation.objects.create(
+                            session=user_session,
+                            chat_id=c_id,
+                            whatsapp_name=w_name,
+                            unread_count=wc.get("unreadCount", 0),
+                            is_matched=is_grp,
+                        )
+                    elif is_grp and w_name and conv_obj.whatsapp_name != w_name:
                         conv_obj.whatsapp_name = w_name
                         conv_obj.save(update_fields=["whatsapp_name"])
             except Exception as e:
@@ -979,21 +1005,42 @@ class WhatsAppConversationsView(APIView):
             # Strictly scoped to current user's session!
             qs = qs.filter(session=user_session)
 
-        # Deduplicate by chat_id in Python and sort by last_message_at
+        # Deduplicate conversations by canonical phone digits / group ID and auto-merge duplicate threads
         conversations = list(qs)
-        unique_convs = {}
-        for c in conversations:
-            if c.chat_id not in unique_convs:
-                unique_convs[c.chat_id] = c
-            else:
-                existing = unique_convs[c.chat_id]
-                if c.last_message_at and existing.last_message_at:
-                    if c.last_message_at > existing.last_message_at:
-                        unique_convs[c.chat_id] = c
-                elif c.last_message_at:
-                    unique_convs[c.chat_id] = c
+        canonical_convs = {}
+        duplicates_to_merge = []
 
-        final_list = list(unique_convs.values())
+        for c in conversations:
+            if c.chat_id.endswith("@g.us"):
+                key = c.chat_id
+            else:
+                raw_d = re.sub(r"\D+", "", (c.phone_number or c.chat_id).split("@")[0].split(":")[0])
+                key = raw_d[-10:] if len(raw_d) >= 10 else (raw_d or c.chat_id)
+
+            if key not in canonical_convs:
+                canonical_convs[key] = c
+            else:
+                existing = canonical_convs[key]
+                c_time = c.last_message_at or c.updated_at
+                ex_time = existing.last_message_at or existing.updated_at
+                primary, secondary = (c, existing) if (c_time and ex_time and c_time > ex_time) else (existing, c)
+                canonical_convs[key] = primary
+                duplicates_to_merge.append((primary, secondary))
+
+        for primary, secondary in duplicates_to_merge:
+            try:
+                WhatsAppMessage.objects.filter(conversation=secondary).update(conversation=primary)
+                if not primary.prospect_contact and secondary.prospect_contact:
+                    primary.prospect_contact = secondary.prospect_contact
+                    primary.prospect = secondary.prospect
+                    primary.is_matched = True
+                    primary.save(update_fields=["prospect_contact", "prospect", "is_matched"])
+                secondary.is_deleted = True
+                secondary.save(update_fields=["is_deleted"])
+            except Exception as merge_err:
+                logger.debug("Conversation merge error: %s", merge_err)
+
+        final_list = list(canonical_convs.values())
 
         # Opportunistic auto-matching for unmatched conversations
         import re
@@ -2070,12 +2117,23 @@ class WhatsAppGroupCreateView(APIView):
 
     def post(self, request):
         name = (request.data.get("name") or "").strip()
-        participants = request.data.get("participants") or []
+        raw_participants = request.data.get("participants") or []
 
         if not name:
             return Response({"detail": "Group name is required."}, status=status.HTTP_400_BAD_REQUEST)
-        if not participants or not isinstance(participants, list):
-            return Response({"detail": "At least one participant is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Parse participants from list or comma-separated string
+        if isinstance(raw_participants, str):
+            raw_participants = [p.strip() for p in raw_participants.split(",") if p.strip()]
+
+        participants = []
+        for p in raw_participants:
+            digits = re.sub(r"\D+", "", str(p))
+            if digits and len(digits) >= 7:
+                participants.append(digits)
+
+        if not participants:
+            return Response({"detail": "At least one participant with a valid phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         user_session = _get_user_session(request.user, create=True)
         session_name = user_session.session_name
@@ -2086,7 +2144,11 @@ class WhatsAppGroupCreateView(APIView):
             res = client.create_group(session_name, name, participants)
             chat_id = res.get("id") or (res.get("gid") or "")
             if not chat_id and isinstance(res, dict):
-                chat_id = res.get("chatId") or res.get("groupJid") or ""
+                chat_id = res.get("chatId") or res.get("groupJid") or (res.get("group") or {}).get("id", "")
+
+            # Ensure @g.us suffix
+            if chat_id and not chat_id.endswith("@g.us"):
+                chat_id = f"{chat_id}@g.us"
 
             conv = None
             if chat_id:
@@ -2096,8 +2158,14 @@ class WhatsAppGroupCreateView(APIView):
                     defaults={
                         "whatsapp_name": name,
                         "is_matched": True,
+                        "last_message_preview": f"Group created: {name}",
+                        "last_message_at": timezone.now(),
                     }
                 )
+                if conv.whatsapp_name != name:
+                    conv.whatsapp_name = name
+                    conv.is_matched = True
+                    conv.save(update_fields=["whatsapp_name", "is_matched"])
 
             return Response({
                 "group": res,
@@ -2105,7 +2173,7 @@ class WhatsAppGroupCreateView(APIView):
             }, status=status.HTTP_201_CREATED)
         except Exception as exc:
             logger.error("Failed to create WhatsApp group: %s", exc)
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": f"Failed to create group: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ---------------------------------------------------------------------------

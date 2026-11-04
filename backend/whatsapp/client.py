@@ -516,34 +516,60 @@ class WAHAClient:
 
     def create_group(self, session_name: str, name: str, participants: list) -> dict:
         """Create a WhatsApp group with participants."""
-        formatted_participants = []
+        formatted_obj_participants = []
+        formatted_str_participants = []
         for p in participants:
             digits = re.sub(r"\D+", "", str(p))
             if digits:
-                formatted_participants.append({"id": f"{digits}@c.us"})
+                formatted_obj_participants.append({"id": f"{digits}@c.us"})
+                formatted_str_participants.append(f"{digits}@c.us")
 
-        payload = {
+        payload_obj = {
             "name": name,
-            "participants": formatted_participants,
+            "participants": formatted_obj_participants,
         }
-        # WAHA supports /api/{session}/groups and /api/groups
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/{session_name}/groups",
-                payload=payload,
-                timeout=8.0,
-            )
-            return body
-        except Exception:
-            payload["session"] = session_name
-            _status, body = self._request(
-                "POST",
-                "/api/groups",
-                payload=payload,
-                timeout=8.0,
-            )
-            return body
+        payload_str = {
+            "name": name,
+            "participants": formatted_str_participants,
+        }
+
+        # Try session endpoint then global endpoint with both schemas
+        sessions_to_try = [session_name]
+        if session_name != "default":
+            sessions_to_try.append("default")
+
+        last_error = None
+        for sess in sessions_to_try:
+            for p_load in (payload_obj, payload_str):
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/{sess}/groups",
+                        payload=p_load,
+                        timeout=12.0,
+                    )
+                    if isinstance(body, dict) and (body.get("id") or body.get("gid") or body.get("chatId") or body.get("groupJid")):
+                        return body
+                except Exception as e:
+                    last_error = e
+
+                try:
+                    p_load_with_sess = dict(p_load)
+                    p_load_with_sess["session"] = sess
+                    _status, body = self._request(
+                        "POST",
+                        "/api/groups",
+                        payload=p_load_with_sess,
+                        timeout=12.0,
+                    )
+                    if isinstance(body, dict) and (body.get("id") or body.get("gid") or body.get("chatId") or body.get("groupJid")):
+                        return body
+                except Exception as e:
+                    last_error = e
+
+        if last_error:
+            raise last_error
+        return {}
 
     def get_group_info(self, session_name: str, group_id: str) -> dict:
         """Get group details and participants from WAHA."""

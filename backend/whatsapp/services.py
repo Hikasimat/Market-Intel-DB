@@ -605,15 +605,42 @@ def send_whatsapp_message(
     # The session MUST be owned by performed_by for the ownership chain.
     session = _get_or_create_session(session_name)
 
-    conversation, _ = WhatsAppConversation.objects.get_or_create(
-        chat_id=chat_id,
+    alt_chat_id = None
+    if chat_id.endswith("@s.whatsapp.net"):
+        alt_chat_id = chat_id.replace("@s.whatsapp.net", "@c.us")
+    elif chat_id.endswith("@c.us"):
+        alt_chat_id = chat_id.replace("@c.us", "@s.whatsapp.net")
+
+    candidate_ids = [chat_id]
+    if alt_chat_id:
+        candidate_ids.append(alt_chat_id)
+
+    from django.db.models import Q
+    conversation = WhatsAppConversation.objects.filter(
         session=session,
-        defaults={
-            "prospect_contact": prospect_contact,
-            "prospect": prospect_contact.prospect,
-            "is_matched": True,
-        },
-    )
+        chat_id__in=candidate_ids,
+        is_deleted=False,
+    ).first()
+
+    if not conversation and phone and len(phone) >= 8:
+        suffix = phone[-10:] if len(phone) >= 10 else phone[-8:]
+        conversation = WhatsAppConversation.objects.filter(
+            session=session,
+            is_deleted=False,
+        ).filter(
+            Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+        ).first()
+
+    if not conversation:
+        conversation, _ = WhatsAppConversation.objects.get_or_create(
+            chat_id=chat_id,
+            session=session,
+            defaults={
+                "prospect_contact": prospect_contact,
+                "prospect": prospect_contact.prospect,
+                "is_matched": True,
+            },
+        )
 
     # Ensure conversation is matched to this contact.
     if not conversation.is_matched:
