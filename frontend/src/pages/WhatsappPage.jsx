@@ -475,52 +475,7 @@ export default function WhatsappPage() {
     return () => clearInterval(interval);
   }, [checkCallingStatus]);
 
-  // Answer Incoming WhatsApp Voice Call
-  const handleAcceptIncomingCall = useCallback(async () => {
-    if (!incomingCall) return;
-    const currentIncoming = incomingCall;
-    const callId = currentIncoming.call_id;
-    const sessionToUse = currentIncoming.session_name || selectedSession?.session_name || 'default';
 
-    setIncomingCall(null);
-    setCallState({
-      active: true,
-      status: 'connected',
-      callId: callId,
-      peerName: currentIncoming.caller_name || 'WhatsApp Contact',
-      peerPhone: currentIncoming.caller_phone || '',
-      duration: 0,
-      isMuted: false,
-      error: null,
-      sessionName: sessionToUse,
-    });
-
-    try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`);
-    } catch (acceptErr) {
-      console.warn('Accept call error (may already be accepted):', acceptErr);
-    }
-
-    try {
-      await initWebRTCAudioChannel(callId, sessionToUse);
-    } catch (audioErr) {
-      console.error('WebRTC Audio connect error:', audioErr);
-      showToast('Connected, but audio channel initialization failed.', 'error');
-    }
-  }, [incomingCall, selectedSession?.session_name, initWebRTCAudioChannel, showToast]);
-
-  // Reject / Decline Incoming WhatsApp Voice Call
-  const handleRejectIncomingCall = useCallback(async () => {
-    if (!incomingCall) return;
-    const callId = incomingCall.call_id;
-    setIncomingCall(null);
-    try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`);
-      showToast('Call declined', 'info');
-    } catch (err) {
-      console.warn('Decline call error:', err);
-    }
-  }, [incomingCall, showToast]);
 
   useEffect(() => {
     return () => {
@@ -792,6 +747,53 @@ export default function WhatsappPage() {
       }, 4000);
     }
   }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession, showToast]);
+
+  // Answer Incoming WhatsApp Voice Call (declared after initWebRTCAudioChannel)
+  const handleAcceptIncomingCall = useCallback(async () => {
+    if (!incomingCall) return;
+    const currentIncoming = incomingCall;
+    const callId = currentIncoming.call_id;
+    const sessionToUse = currentIncoming.session_name || selectedSession?.session_name || 'default';
+
+    setIncomingCall(null);
+    setCallState({
+      active: true,
+      status: 'connected',
+      callId: callId,
+      peerName: currentIncoming.caller_name || 'WhatsApp Contact',
+      peerPhone: currentIncoming.caller_phone || '',
+      duration: 0,
+      isMuted: false,
+      error: null,
+      sessionName: sessionToUse,
+    });
+
+    try {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`);
+    } catch (acceptErr) {
+      console.warn('Accept call error (may already be accepted):', acceptErr);
+    }
+
+    try {
+      await initWebRTCAudioChannel(callId, sessionToUse);
+    } catch (audioErr) {
+      console.error('WebRTC Audio connect error:', audioErr);
+      showToast('Connected, but audio channel initialization failed.', 'error');
+    }
+  }, [incomingCall, selectedSession?.session_name, initWebRTCAudioChannel, showToast]);
+
+  // Reject / Decline Incoming WhatsApp Voice Call
+  const handleRejectIncomingCall = useCallback(async () => {
+    if (!incomingCall) return;
+    const callId = incomingCall.call_id;
+    setIncomingCall(null);
+    try {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`);
+      showToast('Call declined', 'info');
+    } catch (err) {
+      console.warn('Decline call error:', err);
+    }
+  }, [incomingCall, showToast]);
 
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
