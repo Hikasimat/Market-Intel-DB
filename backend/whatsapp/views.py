@@ -651,7 +651,18 @@ class WhatsAppPairingCodeView(APIView):
                 except Exception:
                     pass
 
-            res = client.request_code(session_name, clean_phone)
+            try:
+                res = client.request_code(session_name, clean_phone)
+            except Exception as req_err:
+                if session_name != "default":
+                    try:
+                        client.start_session("default")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    res = client.request_code("default", clean_phone)
+                else:
+                    raise req_err
             if isinstance(res, dict):
                 code = res.get("code") or res.get("pairingCode") or res.get("raw")
                 if code:
