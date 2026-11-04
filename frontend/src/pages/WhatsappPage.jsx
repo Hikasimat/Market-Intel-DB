@@ -477,13 +477,7 @@ export default function WhatsappPage() {
 
 
 
-  useEffect(() => {
-    return () => {
-      if (callingPollTimerRef.current) {
-        clearInterval(callingPollTimerRef.current);
-      }
-    };
-  }, []);
+
 
   // Call duration counter
   useEffect(() => {
