@@ -531,6 +531,11 @@ class WhatsAppQRView(APIView):
         just_started = False
         if session_needs_start or waha_status in ("NOT_FOUND", "STOPPED", "FAILED", "UNKNOWN", None):
             try:
+                if waha_status == "FAILED":
+                    try:
+                        client.delete_session(session_name)
+                    except Exception:
+                        pass
                 client.start_session(session_name)
                 waha_status = "STARTING"
                 just_started = True
@@ -549,7 +554,7 @@ class WhatsAppQRView(APIView):
         # 6. Fetch live QR from WAHA or cached QR pushed via webhook
         for attempt in range(2):
             # Check cached QR (received via webhook)
-            cached_qr = get_cached_qr(session_name)
+            cached_qr = get_cached_qr(session_name) or (get_cached_qr("default") if session_name != "default" else None)
             if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64") or cached_qr.get("data")):
                 qr_base64 = cached_qr.get("qrBase64") or cached_qr.get("data") or ""
                 if not qr_base64:
@@ -570,6 +575,13 @@ class WhatsAppQRView(APIView):
             # Fetch live QR from WAHA if available
             try:
                 qr_data = client.get_qr(session_name)
+                if not (qr_data.get("qr") or qr_data.get("qrBase64") or qr_data.get("value") or qr_data.get("data")) and session_name != "default":
+                    try:
+                        default_qr = client.get_qr("default")
+                        if default_qr and (default_qr.get("qr") or default_qr.get("qrBase64") or default_qr.get("value") or default_qr.get("data")):
+                            qr_data = default_qr
+                    except Exception:
+                        pass
                 if not isinstance(qr_data, dict):
                     qr_data = {"qr": str(qr_data)}
 

@@ -312,6 +312,7 @@ ALLOWED_EVENT_TYPES = frozenset([
     "group.v2.participants",
     "group.v2.update",
     "message.waiting",
+    "call",
     "call.received",
     "call.ringing",
     "call.accepted",
@@ -401,7 +402,7 @@ def _validate_event_schema(payload: dict) -> tuple[str, str, dict]:
     # Normalize event type.
     event_type = event_type.strip().lower()
 
-    if event_type not in ALLOWED_EVENT_TYPES and not event_type.startswith("call."):
+    if event_type not in ALLOWED_EVENT_TYPES and not event_type.startswith("call.") and event_type != "call":
         raise WebhookVerificationError(
             f"Unknown event type: {event_type!r}. "
             f"Allowed: {sorted(ALLOWED_EVENT_TYPES)}"
@@ -513,7 +514,7 @@ def process_webhook_event(
     try:
         if event_type in ("message", "message.any"):
             _handle_incoming_message(event_data, session_name, event_record)
-        elif event_type.startswith("call."):
+        elif event_type == "call" or event_type.startswith("call."):
             _handle_call_event(event_data, session_name, event_record, event_type)
         elif event_type == "message.ack":
             _handle_message_ack(event_data, session_name, event_record)
@@ -632,11 +633,20 @@ def _handle_call_event(
     else:
         target_chat_id = raw_from
 
+    # Strip multidevice colons (e.g. 919003619221:0@s.whatsapp.net -> 919003619221@s.whatsapp.net)
+    target_chat_id = re.sub(r":[0-9]+@", "@", target_chat_id)
+    raw_from = re.sub(r":[0-9]+@", "@", raw_from)
+
     # Normalize WhatsApp JIDs: @s.whatsapp.net -> @c.us
     if "@s.whatsapp.net" in target_chat_id:
         target_chat_id = target_chat_id.replace("@s.whatsapp.net", "@c.us")
     if "@s.whatsapp.net" in raw_from:
         raw_from = raw_from.replace("@s.whatsapp.net", "@c.us")
+
+    if PHONE_DIGITS_RE.match(target_chat_id):
+        target_chat_id = f"{target_chat_id}@c.us"
+    if PHONE_DIGITS_RE.match(raw_from):
+        raw_from = f"{raw_from}@c.us"
 
     if not target_chat_id or not VALID_CHAT_ID_RE.match(target_chat_id):
         logger.warning("Call event with invalid chat ID: %r — ignored.", target_chat_id)
@@ -683,12 +693,15 @@ def _handle_call_event(
 
     # Find or create session
     session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-    if session_obj.owner is None and session_name.startswith("user_"):
+    if session_obj.owner is None:
         try:
-            u_id = int(session_name.split("_")[1])
             from django.contrib.auth import get_user_model
             User = get_user_model()
-            u = User.objects.filter(id=u_id).first()
+            if session_name.startswith("user_"):
+                u_id = int(session_name.split("_")[1])
+                u = User.objects.filter(id=u_id).first()
+            else:
+                u = User.objects.filter(is_active=True).first()
             if u:
                 session_obj.owner = u
                 session_obj.save(update_fields=["owner"])
@@ -696,10 +709,10 @@ def _handle_call_event(
             pass
 
     # Find or create conversation
-    conversation = WhatsAppConversation.objects.filter(
-        chat_id=target_chat_id,
-        session=session_obj,
-    ).first()
+    conversation = (
+        WhatsAppConversation.objects.filter(chat_id=target_chat_id, session=session_obj, is_deleted=False).first()
+        or WhatsAppConversation.objects.filter(chat_id=target_chat_id, is_deleted=False).first()
+    )
 
     if not conversation:
         phone_digits = _extract_phone_digits(target_chat_id)

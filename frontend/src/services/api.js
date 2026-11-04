@@ -104,12 +104,29 @@ api.interceptors.response.use(
         originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
         return api(originalRequest);
       } catch (refreshError) {
-        // Fallback for catch if needed though we handle it inside try block, but just in case
+        // Refresh token failed/expired — wipe invalid session and redirect to login
         processQueue(refreshError, null);
         store.dispatch(logout());
+        try {
+          sessionStorage.removeItem('isAuthenticated');
+          sessionStorage.removeItem('reduxState');
+        } catch (_) {}
+        if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+          window.location.href = '/login';
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
+      }
+    } else if (error.response?.status === 401 && isAuthEndpoint && !originalRequest?.url?.includes('/auth/login/')) {
+      // Direct call to /auth/refresh/ failed (token completely expired or missing)
+      store.dispatch(logout());
+      try {
+        sessionStorage.removeItem('isAuthenticated');
+        sessionStorage.removeItem('reduxState');
+      } catch (_) {}
+      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+        window.location.href = '/login';
       }
     }
     return Promise.reject(error);
