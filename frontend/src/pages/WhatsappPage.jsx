@@ -1633,7 +1633,31 @@ export default function WhatsappPage() {
                           )}
 
                           {/* Message Text Body */}
-                          {msg.full_body || msg.body_preview ? (
+                          {msg.message_type === 'call' ? (
+                            <div className="flex items-center gap-2.5 py-1">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                                (msg.full_body || '').toLowerCase().includes('missed') || (msg.full_body || '').toLowerCase().includes('declined')
+                                  ? 'bg-red-100 text-red-600'
+                                  : 'bg-emerald-100 text-emerald-600'
+                              }`}>
+                                {(msg.full_body || '').toLowerCase().includes('video') ? (
+                                  <Video className="w-4 h-4" />
+                                ) : (
+                                  <Phone className="w-4 h-4" />
+                                )}
+                              </div>
+                              <div className="flex flex-col">
+                                <span className={`text-sm font-medium ${
+                                  (msg.full_body || '').toLowerCase().includes('missed') || (msg.full_body || '').toLowerCase().includes('declined')
+                                    ? 'text-red-600 font-semibold'
+                                    : 'text-slate-800'
+                                }`}>
+                                  {msg.full_body || msg.body_preview || 'Voice call'}
+                                </span>
+                                <span className="text-[11px] text-slate-400">WhatsApp call</span>
+                              </div>
+                            </div>
+                          ) : msg.full_body || msg.body_preview ? (
                             <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
                               {msg.full_body || msg.body_preview}
                             </p>

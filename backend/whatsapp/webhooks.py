@@ -312,6 +312,13 @@ ALLOWED_EVENT_TYPES = frozenset([
     "group.v2.participants",
     "group.v2.update",
     "message.waiting",
+    "call.received",
+    "call.ringing",
+    "call.accepted",
+    "call.rejected",
+    "call.missed",
+    "call.ended",
+    "call.update",
 ])
 
 # Valid WhatsApp chat ID pattern.
@@ -394,7 +401,7 @@ def _validate_event_schema(payload: dict) -> tuple[str, str, dict]:
     # Normalize event type.
     event_type = event_type.strip().lower()
 
-    if event_type not in ALLOWED_EVENT_TYPES:
+    if event_type not in ALLOWED_EVENT_TYPES and not event_type.startswith("call."):
         raise WebhookVerificationError(
             f"Unknown event type: {event_type!r}. "
             f"Allowed: {sorted(ALLOWED_EVENT_TYPES)}"
@@ -506,6 +513,8 @@ def process_webhook_event(
     try:
         if event_type in ("message", "message.any"):
             _handle_incoming_message(event_data, session_name, event_record)
+        elif event_type.startswith("call."):
+            _handle_call_event(event_data, session_name, event_record, event_type)
         elif event_type == "message.ack":
             _handle_message_ack(event_data, session_name, event_record)
         elif event_type == "session.status":
@@ -574,14 +583,216 @@ def _handle_session_connected(event_data: dict, session_name: str, event_record:
 
 
 def _handle_session_disconnected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
-    clear_cached_qr(session_name)
     is_logged_out = bool(event_data.get("isLoggedOut", False))
-    new_status = WhatsAppSession.Status.FAILED if is_logged_out else WhatsAppSession.Status.DISCONNECTED
+    if is_logged_out:
+        clear_cached_qr(session_name)
+        new_status = WhatsAppSession.Status.FAILED
+    else:
+        # Transient connection close or socket reconnect while generating/rotating QR.
+        # Preserve cached QR code so user has uninterrupted time to scan.
+        new_status = WhatsAppSession.Status.DISCONNECTED
+
     WhatsAppSession.objects.filter(session_name=session_name).update(
         status=new_status,
         stopped_at=timezone.now()
     )
     logger.warning("Session %s disconnected (logged_out=%s)", session_name, is_logged_out)
+
+
+def _handle_call_event(
+    event_data: dict,
+    session_name: str,
+    event_record: WhatsAppEvent,
+    event_type: str,
+) -> None:
+    """
+    Handle WhatsApp call events dispatched by WAHA / waha-noweb-light.
+    Supported events:
+      - call.received  (status: "offer")
+      - call.ringing   (status: "ringing")
+      - call.accepted  (status: "accept")
+      - call.rejected  (status: "reject")
+      - call.missed    (status: "timeout")
+      - call.ended     (status: "terminate")
+      - call.update    (generic fallback)
+    """
+    call_id = str(event_data.get("id") or "").strip()
+    raw_from = str(event_data.get("from") or "").strip()
+    raw_chat = str(event_data.get("chatId") or "").strip()
+    is_group = bool(event_data.get("isGroup", False))
+    group_jid = str(event_data.get("groupJid") or "").strip()
+    is_video = bool(event_data.get("isVideo", False))
+    raw_status = str(event_data.get("status") or "").strip().lower()
+
+    # Determine target chat ID
+    if is_group and group_jid:
+        target_chat_id = group_jid
+    elif raw_chat:
+        target_chat_id = raw_chat
+    else:
+        target_chat_id = raw_from
+
+    # Normalize WhatsApp JIDs: @s.whatsapp.net -> @c.us
+    if "@s.whatsapp.net" in target_chat_id:
+        target_chat_id = target_chat_id.replace("@s.whatsapp.net", "@c.us")
+    if "@s.whatsapp.net" in raw_from:
+        raw_from = raw_from.replace("@s.whatsapp.net", "@c.us")
+
+    if not target_chat_id or not VALID_CHAT_ID_RE.match(target_chat_id):
+        logger.warning("Call event with invalid chat ID: %r — ignored.", target_chat_id)
+        return
+
+    # Call type and human-readable label
+    call_type = "Video call" if is_video else "Voice call"
+    is_missed = event_type == "call.missed" or raw_status in ("timeout", "missed")
+    is_rejected = event_type == "call.rejected" or raw_status in ("reject", "declined")
+    is_ended = event_type == "call.ended" or raw_status in ("terminate", "ended")
+    is_accepted = event_type == "call.accepted" or raw_status in ("accept", "answered")
+    is_received = event_type == "call.received" or raw_status in ("offer", "received")
+
+    if is_missed:
+        call_label = f"Missed {call_type.lower()}"
+        call_preview = f"📞 Missed {call_type.lower()}" if not is_video else f"📹 Missed {call_type.lower()}"
+        msg_status = WhatsAppMessage.Status.FAILED
+        unread_inc = 1
+    elif is_rejected:
+        call_label = f"Declined {call_type.lower()}"
+        call_preview = f"📞 Declined {call_type.lower()}" if not is_video else f"📹 Declined {call_type.lower()}"
+        msg_status = WhatsAppMessage.Status.FAILED
+        unread_inc = 0
+    elif is_ended:
+        call_label = call_type
+        call_preview = f"📞 {call_type}" if not is_video else f"📹 {call_type}"
+        msg_status = WhatsAppMessage.Status.DELIVERED
+        unread_inc = 0
+    elif is_accepted:
+        call_label = f"Answered {call_type.lower()}"
+        call_preview = f"📞 Answered {call_type.lower()}" if not is_video else f"📹 Answered {call_type.lower()}"
+        msg_status = WhatsAppMessage.Status.DELIVERED
+        unread_inc = 0
+    elif is_received:
+        call_label = f"Incoming {call_type.lower()}"
+        call_preview = f"📞 Incoming {call_type.lower()}" if not is_video else f"📹 Incoming {call_type.lower()}"
+        msg_status = WhatsAppMessage.Status.PENDING
+        unread_inc = 1
+    else:
+        call_label = f"{call_type} ({raw_status or 'update'})"
+        call_preview = f"📞 {call_label}" if not is_video else f"📹 {call_label}"
+        msg_status = WhatsAppMessage.Status.DELIVERED
+        unread_inc = 0
+
+    # Find or create session
+    session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+    if session_obj.owner is None and session_name.startswith("user_"):
+        try:
+            u_id = int(session_name.split("_")[1])
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            u = User.objects.filter(id=u_id).first()
+            if u:
+                session_obj.owner = u
+                session_obj.save(update_fields=["owner"])
+        except Exception:
+            pass
+
+    # Find or create conversation
+    conversation = WhatsAppConversation.objects.filter(
+        chat_id=target_chat_id,
+        session=session_obj,
+    ).first()
+
+    if not conversation:
+        phone_digits = _extract_phone_digits(target_chat_id)
+        matched_contact = None
+        if phone_digits and len(phone_digits) >= 8:
+            from prospects.models import ProspectContact
+            suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits[-8:]
+            matched_contact = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
+
+        is_grp = target_chat_id.endswith("@g.us")
+        phone_formatted = f"+{phone_digits}" if phone_digits else None
+        conversation = WhatsAppConversation.objects.create(
+            session=session_obj,
+            chat_id=target_chat_id,
+            phone_number=phone_formatted if not is_grp else None,
+            prospect_contact=matched_contact if not is_grp else None,
+            prospect=matched_contact.prospect if matched_contact else None,
+            is_matched=matched_contact is not None or is_grp,
+            whatsapp_name="WhatsApp Group" if is_grp else (matched_contact.contact_name if matched_contact else (phone_formatted or target_chat_id)),
+        )
+
+    # Idempotent call record handling
+    waha_call_id = f"call_{call_id}" if call_id else None
+    existing_message = None
+    if waha_call_id:
+        existing_message = WhatsAppMessage.objects.filter(
+            waha_message_id=waha_call_id,
+            conversation=conversation,
+        ).first()
+
+    body_hash = hashlib.sha256(call_label.encode("utf-8")).hexdigest()
+
+    if existing_message:
+        existing_message.body_preview = call_label
+        existing_message.full_body = call_label
+        existing_message.body_hash = body_hash
+        existing_message.status = msg_status
+        existing_message.error_code = raw_status[:50]
+        existing_message.save(update_fields=["body_preview", "full_body", "body_hash", "status", "error_code"])
+        wa_message = existing_message
+    else:
+        msg_idempotency = hashlib.sha256(
+            f"call:{session_name}:{target_chat_id}:{call_id or timezone.now().isoformat()}".encode()
+        ).hexdigest()
+
+        try:
+            with transaction.atomic():
+                wa_message = WhatsAppMessage.objects.create(
+                    idempotency_key=msg_idempotency,
+                    conversation=conversation,
+                    performed_by=None,
+                    waha_message_id=waha_call_id,
+                    direction=WhatsAppMessage.Direction.INBOUND,
+                    status=msg_status,
+                    body_preview=call_label,
+                    full_body=call_label,
+                    body_hash=body_hash,
+                    message_type="call",
+                    has_media=False,
+                    error_code=raw_status[:50],
+                )
+        except IntegrityError:
+            wa_message = WhatsAppMessage.objects.filter(idempotency_key=msg_idempotency).first()
+
+    # Update conversation metadata
+    conversation.last_message_at = timezone.now()
+    conversation.last_message_preview = call_preview
+    conversation.last_message_from_me = False
+    if unread_inc and not existing_message:
+        conversation.unread_count = conversation.unread_count + unread_inc
+    conversation.save(update_fields=["last_message_at", "last_message_preview", "last_message_from_me", "unread_count"])
+
+    if wa_message:
+        event_record.whatsapp_message = wa_message
+        event_record.save(update_fields=["whatsapp_message"])
+
+    _write_audit_log(
+        action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,
+        prospect_contact=conversation.prospect_contact,
+        prospect=conversation.prospect,
+        session_name=session_name,
+        chat_id=target_chat_id,
+        performed_by=None,
+        details={
+            "event_type": event_type,
+            "call_id": call_id,
+            "status": raw_status,
+            "isVideo": is_video,
+            "isGroup": is_group,
+            "label": call_label,
+        },
+    )
+    logger.info("Processed call event %s for %s (%s)", event_type, target_chat_id, call_label)
 
 
 def _handle_incoming_message(
