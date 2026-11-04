@@ -47,6 +47,7 @@ import re
 import urllib.parse
 import uuid
 
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
@@ -829,7 +830,6 @@ class WhatsAppSendMessageView(APIView):
                 if alt_chat_id:
                     candidate_ids.append(alt_chat_id)
 
-                from django.db.models import Q
                 target_conv = WhatsAppConversation.objects.filter(
                     session=user_session,
                     chat_id__in=candidate_ids,
@@ -841,14 +841,13 @@ class WhatsAppSendMessageView(APIView):
                     target_conv = WhatsAppConversation.objects.filter(
                         session=user_session,
                     ).filter(
-                        Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+                        Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
                     ).first()
 
                 if not target_conv:
                     existing_any = WhatsAppConversation.objects.filter(chat_id__in=candidate_ids).first()
                     matched_contact = existing_any.prospect_contact if existing_any else None
                     if not matched_contact and digits and len(digits) >= 8:
-                        from prospects.models import ProspectContact
                         suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
                         matched_contact = (
                             ProspectContact.objects.filter(phone_digits__endswith=suffix)
@@ -858,21 +857,29 @@ class WhatsAppSendMessageView(APIView):
                         if not matched_contact:
                             for c in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
                                 s_digits = re.sub(r"\D+", "", c.phone_number or "")
-                                if s_digits and (s_digits == digits or s_digits.endswith(digits[-10:]) or digits.endswith(s_digits[-10:])):
+                                if s_digits and (s_digits == digits or s_digits.endswith(suffix) or digits.endswith(s_digits[-8:])):
                                     matched_contact = c
                                     break
 
+                    if not target_conv and matched_contact:
+                        target_conv = WhatsAppConversation.objects.filter(
+                            session=user_session,
+                            prospect_contact=matched_contact,
+                            is_deleted=False,
+                        ).first()
+
                     phone_formatted = f"+{digits}" if digits else None
                     is_grp = clean_chat_id.endswith("@g.us")
-                    target_conv = WhatsAppConversation.objects.create(
-                        session=user_session,
-                        chat_id=clean_chat_id,
-                        phone_number=phone_formatted if not is_grp else None,
-                        prospect_contact=matched_contact if not is_grp else None,
-                        prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
-                        is_matched=matched_contact is not None or (existing_any.is_matched if existing_any else False) or is_grp,
-                        whatsapp_name=matched_contact.contact_name if matched_contact else (existing_any.whatsapp_name if existing_any else ("WhatsApp Group" if is_grp else "")),
-                    )
+                    if not target_conv:
+                        target_conv = WhatsAppConversation.objects.create(
+                            session=user_session,
+                            chat_id=clean_chat_id,
+                            phone_number=phone_formatted if not is_grp else None,
+                            prospect_contact=matched_contact if not is_grp else None,
+                            prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
+                            is_matched=matched_contact is not None or (existing_any.is_matched if existing_any else False) or is_grp,
+                            whatsapp_name=matched_contact.contact_name if matched_contact else (existing_any.whatsapp_name if existing_any else ("WhatsApp Group" if is_grp else "")),
+                        )
 
                 if target_conv.is_deleted:
                     target_conv.is_deleted = False
@@ -1030,11 +1037,20 @@ class WhatsAppConversationsView(APIView):
         for primary, secondary in duplicates_to_merge:
             try:
                 WhatsAppMessage.objects.filter(conversation=secondary).update(conversation=primary)
+                update_fields = []
                 if not primary.prospect_contact and secondary.prospect_contact:
                     primary.prospect_contact = secondary.prospect_contact
                     primary.prospect = secondary.prospect
                     primary.is_matched = True
-                    primary.save(update_fields=["prospect_contact", "prospect", "is_matched"])
+                    update_fields.extend(["prospect_contact", "prospect", "is_matched"])
+                if not primary.phone_number and secondary.phone_number:
+                    primary.phone_number = secondary.phone_number
+                    update_fields.append("phone_number")
+                if not primary.whatsapp_name and secondary.whatsapp_name:
+                    primary.whatsapp_name = secondary.whatsapp_name
+                    update_fields.append("whatsapp_name")
+                if update_fields:
+                    primary.save(update_fields=list(set(update_fields)))
                 secondary.is_deleted = True
                 secondary.save(update_fields=["is_deleted"])
             except Exception as merge_err:
@@ -1043,9 +1059,6 @@ class WhatsAppConversationsView(APIView):
         final_list = list(canonical_convs.values())
 
         # Opportunistic auto-matching for unmatched conversations
-        import re
-        from prospects.models import ProspectContact
-
         for c in final_list:
             if not c.is_matched or not c.prospect_contact:
                 c_phone = c.chat_id.split("@")[0].split(":")[0]
@@ -1250,10 +1263,8 @@ class WhatsAppConversationDeleteView(APIView):
             conv.phone_number = clean_phone
             update_fields.append("phone_number")
             # Attempt to auto-match with CRM ProspectContact
-            import re
             digits = re.sub(r"\D+", "", clean_phone)
             if digits and len(digits) >= 8:
-                from prospects.models import ProspectContact
                 suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
                 matched_c = (
                     ProspectContact.objects.filter(phone_digits__endswith=suffix)
@@ -1897,8 +1908,6 @@ class WhatsAppContactInfoView(APIView):
             return Response(data)
 
         # Fallback: search ProspectContact by indexed phone digits
-        from prospects.models import ProspectContact
-        import re
         digits = re.sub(r"\D+", "", clean_phone)
         matched = None
         if len(digits) >= 8:
@@ -1953,9 +1962,6 @@ class WhatsAppCRMContactsView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request):
-        from prospects.models import ProspectContact
-        from django.db.models import Q
-
         search = request.query_params.get("search", "").strip()
         qs = ProspectContact.objects.select_related("prospect").all()
 
@@ -2003,7 +2009,6 @@ class WhatsAppConversationLinkCRMView(APIView):
         contact_id = request.data.get("prospect_contact_id")
 
         if contact_id:
-            from prospects.models import ProspectContact
             try:
                 contact = ProspectContact.objects.select_related("prospect").get(id=contact_id)
             except ProspectContact.DoesNotExist:

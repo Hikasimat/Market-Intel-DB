@@ -910,22 +910,54 @@ def _handle_incoming_message(
 
     from django.db.models import Q
 
+    # Resolve active session object
+    session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
+    if not session_obj and session_name == "default":
+        session_obj = WhatsAppSession.objects.filter(status=WhatsAppSession.Status.READY, is_active=True).first()
+    if not session_obj:
+        session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+    if session_obj.owner is None and session_name.startswith("user_"):
+        try:
+            u_id = int(session_name.split("_")[1])
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            u = User.objects.filter(id=u_id).first()
+            if u:
+                session_obj.owner = u
+                session_obj.save(update_fields=["owner"])
+        except Exception:
+            pass
+
     # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
     conversation = WhatsAppConversation.objects.filter(
         chat_id__in=candidate_ids,
-        session__session_name=session_name,
+        session=session_obj,
         is_deleted=False,
     ).first()
+
+    if not conversation and session_obj.owner:
+        conversation = WhatsAppConversation.objects.filter(
+            chat_id__in=candidate_ids,
+            session__owner=session_obj.owner,
+            is_deleted=False,
+        ).first()
 
     # If not found by chat_id and not a group, match by phone digits within this session
     if not conversation and not is_group and phone_digits and len(phone_digits) >= 8:
         suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits[-8:]
         conversation = WhatsAppConversation.objects.filter(
-            session__session_name=session_name,
+            session=session_obj,
             is_deleted=False,
         ).filter(
-            Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+            Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
         ).first()
+        if not conversation and session_obj.owner:
+            conversation = WhatsAppConversation.objects.filter(
+                session__owner=session_obj.owner,
+                is_deleted=False,
+            ).filter(
+                Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
+            ).first()
 
     if not is_from_me:
         opt_out_registered = check_incoming_for_opt_out(
@@ -1084,45 +1116,64 @@ def _handle_incoming_message(
                     phone_number__icontains=suffix
                 ).select_related("prospect"):
                     stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                    if stored_digits and (stored_digits == search_digits or stored_digits.endswith(search_digits[-10:])):
+                    if stored_digits and (stored_digits == search_digits or stored_digits.endswith(suffix) or search_digits.endswith(stored_digits[-8:])):
                         matched_contact = contact
                         break
 
-        with transaction.atomic():
-            session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-            if session_obj.owner is None and session_name.startswith("user_"):
-                try:
-                    u_id = int(session_name.split("_")[1])
-                    from django.contrib.auth import get_user_model
-                    User = get_user_model()
-                    u = User.objects.filter(id=u_id).first()
-                    if u:
-                        session_obj.owner = u
-                        session_obj.save(update_fields=["owner"])
-                except Exception:
-                    pass
-
-            if is_group:
-                final_name = group_name or extracted_name or "WhatsApp Group"
-                final_phone = None
-                matched_status = True
-            else:
-                final_name = extracted_name or (matched_contact.contact_name if matched_contact else "")
-                final_phone = resolved_phone or (matched_contact.phone_number if matched_contact else None)
-                matched_status = matched_contact is not None
-
-            conversation = WhatsAppConversation.objects.create(
-                chat_id=target_chat_id,
-                phone_number=final_phone,
-                prospect_contact=matched_contact,
-                prospect=matched_contact.prospect if matched_contact else None,
+        # Check if a conversation already exists for this matched CRM contact
+        if matched_contact:
+            existing_c = WhatsAppConversation.objects.filter(
                 session=session_obj,
-                is_matched=matched_status,
-                whatsapp_name=final_name,
-            )
+                prospect_contact=matched_contact,
+                is_deleted=False,
+            ).first()
+            if not existing_c and session_obj.owner:
+                existing_c = WhatsAppConversation.objects.filter(
+                    session__owner=session_obj.owner,
+                    prospect_contact=matched_contact,
+                    is_deleted=False,
+                ).first()
+            if existing_c:
+                conversation = existing_c
 
-        is_matched = conversation.is_matched
-        prospect_contact = conversation.prospect_contact
+        if conversation:
+            is_matched = True
+            prospect_contact = matched_contact
+            conv_updates = []
+            if not conversation.phone_number and resolved_phone:
+                conversation.phone_number = resolved_phone
+                conv_updates.append("phone_number")
+            if not conversation.whatsapp_name and matched_contact:
+                conversation.whatsapp_name = matched_contact.contact_name
+                conv_updates.append("whatsapp_name")
+            if conversation.session != session_obj and session_obj.owner and session_obj.owner == conversation.session.owner:
+                conversation.session = session_obj
+                conv_updates.append("session")
+            if conv_updates:
+                conversation.save(update_fields=list(set(conv_updates)))
+        else:
+            with transaction.atomic():
+                if is_group:
+                    final_name = group_name or extracted_name or "WhatsApp Group"
+                    final_phone = None
+                    matched_status = True
+                else:
+                    final_name = extracted_name or (matched_contact.contact_name if matched_contact else "")
+                    final_phone = resolved_phone or (matched_contact.phone_number if matched_contact else (f"+{search_digits}" if search_digits else None))
+                    matched_status = matched_contact is not None
+
+                conversation = WhatsAppConversation.objects.create(
+                    chat_id=target_chat_id,
+                    phone_number=final_phone,
+                    prospect_contact=matched_contact,
+                    prospect=matched_contact.prospect if matched_contact else None,
+                    session=session_obj,
+                    is_matched=matched_status,
+                    whatsapp_name=final_name,
+                )
+
+            is_matched = conversation.is_matched
+            prospect_contact = conversation.prospect_contact
 
     if not is_matched:
         logger.info(

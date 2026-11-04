@@ -2362,12 +2362,20 @@ export default function WhatsappPage() {
             <p className="text-sm text-slate-500 max-w-md mb-6 leading-relaxed">
               Send and receive WhatsApp messages directly synchronized with your CRM leads. Select a conversation from the left or start a new chat.
             </p>
-            <button
-              onClick={() => { setShowNewChatModal(true); fetchKeyPeople(); }}
-              className="bg-[#00a884] hover:bg-emerald-700 text-white text-sm font-semibold px-6 py-2.5 rounded-full shadow transition flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" /> Start New Chat
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => { setNewChatTab('direct'); setShowNewChatModal(true); fetchKeyPeople(); }}
+                className="bg-[#00a884] hover:bg-emerald-700 text-white text-sm font-semibold px-6 py-2.5 rounded-full shadow transition flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Start New Chat
+              </button>
+              <button
+                onClick={() => { setNewChatTab('group'); setShowNewChatModal(true); fetchKeyPeople(); }}
+                className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-sm font-semibold px-6 py-2.5 rounded-full shadow-sm transition flex items-center gap-2"
+              >
+                <Users className="w-4 h-4 text-emerald-600" /> Create Group
+              </button>
+            </div>
           </div>
         )}
       </div>

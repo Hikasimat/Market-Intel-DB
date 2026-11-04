@@ -479,12 +479,19 @@ class WAHAClient:
 
     def get_chats(self, session_name: str = "default", limit: int = 50) -> list:
         """Get list of chats."""
-        _status, body = self._request(
-            "GET",
-            "/api/chats",
-            query={"session": session_name, "limit": limit},
-        )
-        return body if isinstance(body, list) else []
+        try:
+            _status, body = self._request(
+                "GET",
+                "/api/chats",
+                query={"session": session_name, "limit": limit},
+            )
+            return body if isinstance(body, list) else []
+        except WAHAServiceError as exc:
+            if exc.status_code == 404:
+                return []
+            raise
+        except Exception:
+            return []
 
     def get_messages(
         self,
@@ -493,12 +500,19 @@ class WAHAClient:
         limit: int = 50,
     ) -> list:
         """Get messages for a specific chat."""
-        _status, body = self._request(
-            "GET",
-            f"/api/chats/{chat_id}/messages",
-            query={"session": session_name, "limit": min(limit, 100)},
-        )
-        return body if isinstance(body, list) else []
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/chats/{chat_id}/messages",
+                query={"session": session_name, "limit": min(limit, 100)},
+            )
+            return body if isinstance(body, list) else []
+        except WAHAServiceError as exc:
+            if exc.status_code == 404:
+                return []
+            raise
+        except Exception:
+            return []
 
     def mark_as_read(self, session_name: str, chat_id: str, message_id: str = None) -> dict:
         """Mark messages in a chat as read via WAHA sendSeen."""

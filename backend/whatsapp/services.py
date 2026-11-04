@@ -628,7 +628,7 @@ def send_whatsapp_message(
             session=session,
             is_deleted=False,
         ).filter(
-            Q(phone_number__endswith=suffix) | Q(chat_id__startswith=suffix)
+            Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix) | Q(prospect_contact=prospect_contact)
         ).first()
 
     if not conversation:
@@ -638,16 +638,27 @@ def send_whatsapp_message(
             defaults={
                 "prospect_contact": prospect_contact,
                 "prospect": prospect_contact.prospect,
+                "phone_number": f"+{phone}" if phone else None,
+                "whatsapp_name": prospect_contact.contact_name or "",
                 "is_matched": True,
             },
         )
 
-    # Ensure conversation is matched to this contact.
-    if not conversation.is_matched:
+    # Ensure conversation is matched to this contact and phone/name are populated.
+    conv_updates = []
+    if not conversation.is_matched or not conversation.prospect_contact:
         conversation.prospect_contact = prospect_contact
         conversation.prospect = prospect_contact.prospect
         conversation.is_matched = True
-        conversation.save(update_fields=["prospect_contact", "prospect", "is_matched"])
+        conv_updates.extend(["prospect_contact", "prospect", "is_matched"])
+    if not conversation.phone_number and phone:
+        conversation.phone_number = f"+{phone}"
+        conv_updates.append("phone_number")
+    if not conversation.whatsapp_name and prospect_contact.contact_name:
+        conversation.whatsapp_name = prospect_contact.contact_name
+        conv_updates.append("whatsapp_name")
+    if conv_updates:
+        conversation.save(update_fields=list(set(conv_updates)))
 
     # ------------------------------------------------------------------
     # STEP 12: Create message record (PENDING) before sending.
