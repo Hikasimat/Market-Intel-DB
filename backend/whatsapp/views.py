@@ -898,10 +898,11 @@ class WhatsAppSendMessageView(APIView):
                 client = get_waha_client()
                 is_crm_group = (
                     raw_chat_id.startswith("crm_group_")
-                    or bool(target_conv.metadata and target_conv.metadata.get("is_crm_group"))
+                    or bool(getattr(target_conv, "metadata", None) and getattr(target_conv, "metadata", {}).get("is_crm_group"))
                 )
                 if is_crm_group:
-                    participants = (target_conv.metadata or {}).get("participants", [])
+                    from .webhooks import get_crm_group_participants
+                    participants = get_crm_group_participants(raw_chat_id) or (getattr(target_conv, "metadata", {}) or {}).get("participants", [])
                     last_res = {}
                     for p in participants:
                         p_digits = re.sub(r"\D+", "", str(p))
@@ -2233,23 +2234,16 @@ class WhatsAppGroupCreateView(APIView):
                 "is_matched": True,
                 "last_message_preview": f"Group created: {name} ({len(participants)} contacts)",
                 "last_message_at": timezone.now(),
-                "metadata": {
-                    "is_crm_group": True,
-                    "participants": participants,
-                    "group_name": name,
-                },
             }
         )
         if conv.whatsapp_name != name:
             conv.whatsapp_name = name
             conv.is_matched = True
-            conv.metadata = {
-                **(conv.metadata or {}),
-                "is_crm_group": True,
-                "participants": participants,
-                "group_name": name,
-            }
-            conv.save(update_fields=["whatsapp_name", "is_matched", "metadata"])
+            conv.save(update_fields=["whatsapp_name", "is_matched"])
+
+        if chat_id.startswith("crm_group_"):
+            from .webhooks import set_crm_group_participants
+            set_crm_group_participants(chat_id, participants, name=name)
 
         return Response({
             "group": group_res,

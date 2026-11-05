@@ -232,6 +232,47 @@ def clear_active_call(session_name: str = "default", call_id: Optional[str] = No
         pass
 
 
+CRM_GROUP_CACHE = {}
+
+def set_crm_group_participants(chat_id: str, participants: list, name: str = "") -> None:
+    """Cache CRM broadcast group participants in memory and disk cache."""
+    CRM_GROUP_CACHE[chat_id] = list(participants)
+    try:
+        import hashlib
+        fpath = os.path.join(tempfile.gettempdir(), f"crm_group_{hashlib.md5(chat_id.encode()).hexdigest()}.json")
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump({"chat_id": chat_id, "participants": list(participants), "name": name}, f)
+    except Exception:
+        pass
+
+def get_crm_group_participants(chat_id: str) -> list:
+    """Retrieve CRM broadcast group participants from memory, disk cache, or audit log."""
+    if chat_id in CRM_GROUP_CACHE:
+        return CRM_GROUP_CACHE[chat_id]
+    try:
+        import hashlib
+        fpath = os.path.join(tempfile.gettempdir(), f"crm_group_{hashlib.md5(chat_id.encode()).hexdigest()}.json")
+        if os.path.exists(fpath):
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "participants" in data:
+                CRM_GROUP_CACHE[chat_id] = data["participants"]
+                return data["participants"]
+    except Exception:
+        pass
+    try:
+        from .models import WhatsAppAuditLog
+        log = WhatsAppAuditLog.objects.filter(
+            chat_id=chat_id,
+        ).order_by("-timestamp").first()
+        if log and isinstance(log.details, dict) and "participants" in log.details:
+            CRM_GROUP_CACHE[chat_id] = log.details["participants"]
+            return log.details["participants"]
+    except Exception:
+        pass
+    return []
+
+
 def _save_media_url_to_message(message_id, media_url: str, mime_type: str):
     """Store WAHA's local media URL directly in the database - no re-download needed."""
     from whatsapp.models import WhatsAppMessage
@@ -961,7 +1002,16 @@ def _handle_incoming_message(
 
     raw_from = str(event_data.get("from") or "").strip()
     raw_to = str(event_data.get("to") or "").strip()
-    raw_body = str(event_data.get("body") or "")
+    raw_body = str(
+        event_data.get("body")
+        or event_data.get("text")
+        or event_data.get("caption")
+        or _data.get("body")
+        or _data.get("text")
+        or (event_data.get("message") or {}).get("conversation")
+        or ((event_data.get("message") or {}).get("extendedTextMessage") or {}).get("text")
+        or ""
+    ).strip()
     waha_message_id = str(event_data.get("id") or "")
     is_from_me = bool(event_data.get("fromMe", False))
 
