@@ -137,50 +137,53 @@ def _call_cache_file(session_name: str) -> str:
     return os.path.join(tempfile.gettempdir(), f"waha_active_call_{clean}.json")
 
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
-    """Retrieve currently ringing/incoming voice call for user session."""
+    """Retrieve currently ringing/active incoming voice call for user session."""
     import time
     import glob
+    import tempfile
     now = time.time()
-    # 1. Check direct session candidate and default
-    for s in (session_name, "default"):
-        cached = LATEST_CALL_CACHE.get(s)
-        if cached and (now - cached.get("received_at", 0) <= 60):
-            return cached
 
+    def _is_valid_call(data: dict, mtime: float) -> bool:
+        if not isinstance(data, dict) or not data.get("call_id"):
+            return False
+        max_age = 3600 if data.get("status") == "connected" else 60
+        ref_time = data.get("received_at") or mtime
+        return (now - ref_time) <= max_age
+
+    # 1. Check shared temp file first (multi-worker source of truth) for session & default
+    for s in (session_name, "default"):
+        if not s:
+            continue
         cache_path = _call_cache_file(s)
         try:
             if os.path.exists(cache_path):
-                age = now - os.path.getmtime(cache_path)
-                if age <= 60:
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, dict) and data.get("call_id"):
-                        LATEST_CALL_CACHE[s] = data
-                        return data
+                mtime = os.path.getmtime(cache_path)
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if _is_valid_call(data, mtime):
+                    LATEST_CALL_CACHE[s] = data
+                    return data
                 else:
+                    LATEST_CALL_CACHE.pop(s, None)
                     try:
                         os.remove(cache_path)
                     except OSError:
                         pass
+            else:
+                LATEST_CALL_CACHE.pop(s, None)
         except Exception:
             pass
 
-    # 2. Check any other active call cached in memory
-    for s, cached in list(LATEST_CALL_CACHE.items()):
-        if cached and (now - cached.get("received_at", 0) <= 60):
-            return cached
-
-    # 3. Check any active call file in temp dir
+    # 2. Check any other active call file in temp dir
     try:
         pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
         for fpath in glob.glob(pattern):
             try:
-                age = now - os.path.getmtime(fpath)
-                if age <= 60:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, dict) and data.get("call_id"):
-                        return data
+                mtime = os.path.getmtime(fpath)
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if _is_valid_call(data, mtime):
+                    return data
                 else:
                     try:
                         os.remove(fpath)
@@ -200,6 +203,8 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
         return
     call_data["received_at"] = time.time()
     for s in (session_name, "default"):
+        if not s:
+            continue
         LATEST_CALL_CACHE[s] = call_data
         try:
             cache_path = _call_cache_file(s)
@@ -207,6 +212,35 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
                 json.dump(call_data, f)
         except Exception as e:
             logger.debug("Failed to write call cache file: %s", e)
+
+
+def mark_active_call_connected(session_name: str = "default", call_id: Optional[str] = None) -> None:
+    """Mark an active incoming call as connected so polling knows it was answered, not hung up."""
+    import time
+    import glob
+    import tempfile
+    now = time.time()
+    for s, cached in list(LATEST_CALL_CACHE.items()):
+        if isinstance(cached, dict) and (not call_id or cached.get("call_id") == call_id):
+            cached["status"] = "connected"
+            cached["received_at"] = now
+            LATEST_CALL_CACHE[s] = cached
+
+    try:
+        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
+        for fpath in glob.glob(pattern):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and (not call_id or data.get("call_id") == call_id):
+                    data["status"] = "connected"
+                    data["received_at"] = now
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
     """Clear active incoming call once answered, rejected, or ended."""

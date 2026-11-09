@@ -634,71 +634,24 @@ class WAHAClient:
 
     def resolve_calling_session(self, preferred_session: str = "default") -> str:
         """
-        Dynamically determine the active WAHA calling session that is paired.
-        Checks candidate sessions in order:
-          1. preferred_session (e.g. user's own session)
-          2. Any working session from get_all_sessions()
-          3. 'default'
-        Returns the first session name reporting paired == True.
-        If none reports paired == True, returns the first working session, 'default', or preferred_session.
+        Return the preferred session directly if specified, or discover a WORKING session from WAHA.
+        Never falls back to an unconnected 'default' session when a named user session is provided.
         """
-        candidates = []
-        if preferred_session:
-            candidates.append(preferred_session)
+        if preferred_session and preferred_session != "default":
+            return preferred_session
 
-        # Check working sessions from WAHA
         try:
             sessions = self.get_all_sessions()
             if isinstance(sessions, list):
                 for s in sessions:
                     if isinstance(s, dict) and s.get("status") == "WORKING":
                         w_name = s.get("name")
-                        if w_name and w_name not in candidates:
-                            candidates.append(w_name)
-                for s in sessions:
-                    if isinstance(s, dict):
-                        w_name = s.get("name")
-                        if w_name and w_name not in candidates:
-                            candidates.append(w_name)
+                        if w_name:
+                            return w_name
         except Exception as e:
             logger.debug("Failed to list WAHA sessions during calling resolution: %s", e)
 
-        if "default" not in candidates:
-            candidates.append("default")
-
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "GET",
-                    f"/api/calling/sessions/{sess}/status",
-                    timeout=3.0,
-                )
-                if isinstance(body, dict):
-                    if body.get("paired") is True or body.get("callingSessionId") or body.get("state") in ("open", "connected"):
-                        logger.info("Resolved paired calling session: %s (paired=%s, state=%s)", sess, body.get("paired"), body.get("state"))
-                        return sess
-            except Exception:
-                continue
-
-        # If none reported paired in calling subsystem, prefer any actively WORKING Baileys session
-        working_sessions = []
-        try:
-            sessions = self.get_all_sessions()
-            if isinstance(sessions, list):
-                for s in sessions:
-                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
-                        w_name = s.get("name")
-                        if w_name and w_name not in working_sessions:
-                            working_sessions.append(w_name)
-        except Exception:
-            pass
-
-        if working_sessions:
-            if preferred_session in working_sessions:
-                return preferred_session
-            return working_sessions[0]
-
-        return candidates[0] if candidates else (preferred_session or "default")
+        return preferred_session or "default"
 
     def pair_calling(self, session_name: str) -> dict:
         """Initiate pairing for calling subsystem."""
@@ -726,51 +679,83 @@ class WAHAClient:
             logger.debug("Failed to fetch calling QR for %s: %s", session_name, e)
             return {"error": str(e)}
 
-    def _get_calling_candidates(self, session_name: str) -> list:
-        """Return candidate WAHA calling sessions prioritized by active/paired status."""
-        target_session = self.resolve_calling_session(preferred_session=session_name)
+    def _get_calling_candidates(self, session_name: str, include_working_fallbacks: bool = False) -> list:
+        """
+        Return candidate WAHA calling sessions starting with the user's own session.
+        Avoids pre-flight HTTP requests before time-sensitive call actions and never
+        appends an unconnected 'default' session when a user session is specified.
+        """
         candidates = []
-        for s in (target_session, session_name, "default"):
-            if s and s not in candidates:
-                candidates.append(s)
+        if session_name:
+            candidates.append(session_name)
 
-        try:
-            sessions = self.get_all_sessions()
-            if isinstance(sessions, list):
-                for s in sessions:
-                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
-                        w_name = s.get("name")
-                        if w_name and w_name not in candidates:
-                            candidates.append(w_name)
-        except Exception:
-            pass
+        if include_working_fallbacks or not candidates:
+            try:
+                sessions = self.get_all_sessions()
+                if isinstance(sessions, list):
+                    for s in sessions:
+                        if isinstance(s, dict) and s.get("status") == "WORKING":
+                            w_name = s.get("name")
+                            if w_name and w_name not in candidates:
+                                candidates.append(w_name)
+            except Exception:
+                pass
+
+        if not candidates:
+            candidates.append("default")
 
         return candidates
 
-    def get_calling_status(self, session_name: str) -> dict:
-        """Query status of calling subsystem for given session, falling back to paired session."""
-        candidates = self._get_calling_candidates(session_name)
+    def get_calling_status(self, session_name: str, use_cache: bool = True) -> dict:
+        """Query status of calling subsystem for given session with short TTL cache."""
+        import time
+        now = time.time()
+        cache_key = session_name or "default"
+        if use_cache:
+            cached = _CALLING_STATUS_CACHE.get(cache_key)
+            if cached and (now - cached.get("_cached_at", 0) <= 12.0):
+                return cached
 
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "GET",
-                    f"/api/calling/sessions/{sess}/status",
-                    timeout=4.0,
-                )
-                if isinstance(body, dict):
-                    if (
-                        body.get("paired") is True
-                        or body.get("callingSessionId")
-                        or body.get("state") in ("open", "connected")
-                        or sess == candidates[-1]
-                    ):
-                        body["resolved_session"] = sess
-                        return body
-            except Exception as e:
-                logger.debug("Query calling status failed for session '%s': %s", sess, e)
+        target = session_name or "default"
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/calling/sessions/{target}/status",
+                timeout=3.0,
+            )
+            if isinstance(body, dict):
+                if body.get("paired") is True or body.get("callingSessionId") or body.get("state") in ("open", "connected"):
+                    body["resolved_session"] = target
+                    body["_cached_at"] = now
+                    _CALLING_STATUS_CACHE[cache_key] = body
+                    return body
+                # If user session isn't paired yet, check if another WORKING session exists
+                for sess in self._get_calling_candidates(target, include_working_fallbacks=True):
+                    if sess == target:
+                        continue
+                    try:
+                        _s2, b2 = self._request(
+                            "GET",
+                            f"/api/calling/sessions/{sess}/status",
+                            timeout=2.5,
+                        )
+                        if isinstance(b2, dict) and (b2.get("paired") is True or b2.get("state") in ("open", "connected")):
+                            b2["resolved_session"] = sess
+                            b2["_cached_at"] = now
+                            _CALLING_STATUS_CACHE[cache_key] = b2
+                            return b2
+                    except Exception:
+                        continue
+                body["resolved_session"] = target
+                body["_cached_at"] = now
+                _CALLING_STATUS_CACHE[cache_key] = body
+                return body
+        except Exception as e:
+            logger.debug("Query calling status failed for session '%s': %s", target, e)
 
-        return {"enabled": False, "paired": False, "state": "error", "error": "No calling session available"}
+        fallback = {"enabled": False, "paired": False, "state": "error", "resolved_session": target, "error": "No calling session available", "_cached_at": now}
+        _CALLING_STATUS_CACHE[cache_key] = fallback
+        return fallback
 
     def start_call(self, session_name: str, phone: str, client_id: Optional[str] = None) -> dict:
         """Initiate outgoing voice call to a WhatsApp phone number via paired calling session."""
@@ -781,42 +766,43 @@ class WAHAClient:
         clean_phone = re.sub(r"\D+", "", phone)
         payload = {"phone": clean_phone}
 
-        target_session = self.resolve_calling_session(preferred_session=session_name)
-        candidates = []
-        for s in (target_session, session_name, "default"):
-            if s and s not in candidates:
-                candidates.append(s)
-
+        primary = session_name or "default"
+        primary_error = None
         try:
-            sessions = self.get_all_sessions()
-            if isinstance(sessions, list):
-                for s in sessions:
-                    if isinstance(s, dict) and s.get("status") in ("WORKING", "STARTING"):
-                        w_name = s.get("name")
-                        if w_name and w_name not in candidates:
-                            candidates.append(w_name)
-        except Exception:
-            pass
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{primary}/calls",
+                payload=payload,
+                extra_headers=extra_headers,
+                timeout=10.0,
+            )
+            if isinstance(body, dict):
+                body["session_name"] = primary
+                return body
+        except Exception as e:
+            primary_error = e
+            logger.info("start_call attempt failed for primary session '%s': %s", primary, e)
 
-        last_error = None
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "POST",
-                    f"/api/calling/sessions/{sess}/calls",
-                    payload=payload,
-                    extra_headers=extra_headers,
-                    timeout=10.0,
-                )
-                if isinstance(body, dict):
-                    body["session_name"] = sess
-                    return body
-            except Exception as e:
-                last_error = e
-                logger.info("start_call attempt failed for session '%s': %s", sess, e)
-                continue
+        # Only try working fallbacks if primary session was not connected
+        if primary_error and "not connected" in str(primary_error).lower():
+            for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+                if sess == primary:
+                    continue
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/{sess}/calls",
+                        payload=payload,
+                        extra_headers=extra_headers,
+                        timeout=10.0,
+                    )
+                    if isinstance(body, dict):
+                        body["session_name"] = sess
+                        return body
+                except Exception as e:
+                    logger.info("start_call fallback attempt failed for session '%s': %s", sess, e)
 
-        err_msg = str(last_error) if last_error else "Calling session is not paired."
+        err_msg = str(primary_error) if primary_error else "Calling session is not paired."
         raise WAHAServiceError(f"Failed to start call: {err_msg}")
 
     def accept_call(self, session_name: str, call_id: str, client_id: Optional[str] = None) -> dict:
@@ -825,108 +811,128 @@ class WAHAClient:
         if client_id:
             extra_headers["X-Client-Id"] = client_id
 
-        candidates = self._get_calling_candidates(session_name)
+        primary = session_name or "default"
+        primary_error = None
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{primary}/calls/{call_id}/accept",
+                extra_headers=extra_headers,
+                timeout=8.0,
+            )
+            if isinstance(body, dict):
+                body["session_name"] = primary
+                return body
+        except Exception as e:
+            primary_error = e
 
-        last_error = None
-        for sess in candidates:
+        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+            if sess == primary:
+                continue
             try:
                 _status, body = self._request(
                     "POST",
                     f"/api/calling/sessions/{sess}/calls/{call_id}/accept",
                     extra_headers=extra_headers,
-                    timeout=8.0,
+                    timeout=6.0,
                 )
                 if isinstance(body, dict):
                     body["session_name"] = sess
                     return body
-            except Exception as e:
-                last_error = e
+            except Exception:
+                continue
 
-        raise WAHAServiceError(f"Failed to accept call: {last_error}")
+        raise WAHAServiceError(f"Failed to accept call: {primary_error}")
 
     def reject_call(self, session_name: str, call_id: str) -> dict:
         """Reject an incoming voice call."""
-        candidates = self._get_calling_candidates(session_name)
+        primary = session_name or "default"
+        primary_error = None
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{primary}/calls/{call_id}/reject",
+                timeout=6.0,
+            )
+            if isinstance(body, dict):
+                return body
+        except Exception as e:
+            primary_error = e
 
-        last_error = None
-        for sess in candidates:
+        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+            if sess == primary:
+                continue
             try:
                 _status, body = self._request(
                     "POST",
                     f"/api/calling/sessions/{sess}/calls/{call_id}/reject",
-                    timeout=6.0,
-                )
-                if isinstance(body, dict):
-                    return body
-            except Exception as e:
-                last_error = e
-
-        raise WAHAServiceError(f"Failed to reject call: {last_error}")
-
-    def end_call(self, session_name: str, call_id: str) -> dict:
-        """Hang up / terminate an active voice call."""
-        candidates = self._get_calling_candidates(session_name)
-
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "DELETE",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}",
-                    timeout=6.0,
+                    timeout=5.0,
                 )
                 if isinstance(body, dict):
                     return body
             except Exception:
                 continue
+
+        raise WAHAServiceError(f"Failed to reject call: {primary_error}")
+
+    def end_call(self, session_name: str, call_id: str) -> dict:
+        """Hang up / terminate an active voice call."""
+        primary = session_name or "default"
+        try:
+            _status, body = self._request(
+                "DELETE",
+                f"/api/calling/sessions/{primary}/calls/{call_id}",
+                timeout=6.0,
+            )
+            if isinstance(body, dict):
+                return body
+        except Exception:
+            pass
 
         return {"status": "ended"}
 
     def exchange_webrtc(self, session_name: str, call_id: str, sdp_offer: str) -> dict:
         """Exchange WebRTC SDP offer to establish PCM audio data channel."""
         payload = {"sdp_offer": sdp_offer}
-        candidates = self._get_calling_candidates(session_name)
+        primary = session_name or "default"
+        primary_error = None
+        try:
+            _status, body = self._request(
+                "POST",
+                f"/api/calling/sessions/{primary}/calls/{call_id}/webrtc",
+                payload=payload,
+                timeout=8.0,
+            )
+            if isinstance(body, dict):
+                return body
+        except Exception as e:
+            primary_error = e
+            logger.info("exchange_webrtc attempt failed for session '%s': %s", primary, e)
 
-        last_error = None
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "POST",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}/webrtc",
-                    payload=payload,
-                    timeout=12.0,
-                )
-                if isinstance(body, dict):
-                    return body
-            except Exception as e:
-                last_error = e
-                logger.info("exchange_webrtc attempt failed for session '%s': %s", sess, e)
-                continue
-
-        raise WAHAServiceError(f"Failed to exchange WebRTC offer: {last_error}")
+        raise WAHAServiceError(f"Failed to exchange WebRTC offer: {primary_error}")
 
     def get_calling_history(self, session_name: str) -> list:
         """Get voice call history from WAHA calling service."""
-        candidates = self._get_calling_candidates(session_name)
-
-        for sess in candidates:
-            try:
-                _status, body = self._request(
-                    "GET",
-                    f"/api/calling/sessions/{sess}/history",
-                    timeout=6.0,
-                )
-                if isinstance(body, list):
-                    return body
-            except Exception:
-                continue
+        primary = session_name or "default"
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/calling/sessions/{primary}/history",
+                timeout=5.0,
+            )
+            if isinstance(body, list):
+                return body
+        except Exception:
+            pass
 
         return []
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton accessor
+# Module-level singleton accessor & caches
 # ---------------------------------------------------------------------------
 _client_instance: Optional[WAHAClient] = None
+_CALLING_STATUS_CACHE: dict = {}
 
 
 def get_waha_client() -> WAHAClient:

@@ -1206,20 +1206,11 @@ class WhatsAppConversationSyncView(APIView):
 
         try:
             imported_count = 0
-            offset = 0
-            limit = 5000
-
-            while True:
-                _, res = client._request(
-                    "GET", "/api/messages",
-                    query={"session": session_name, "chatId": conv.chat_id, "limit": limit, "offset": offset, "downloadMedia": "false"}
-                )
-
-                if not res:
-                    break
-
-                new_in_chunk = 0
+            res = client.get_messages(session_name, conv.chat_id, limit=100)
+            if isinstance(res, list):
                 for msg_data in res:
+                    if not isinstance(msg_data, dict):
+                        continue
                     waha_id = msg_data.get("id")
                     if not waha_id or WhatsAppMessage.objects.filter(waha_message_id=waha_id).exists():
                         continue
@@ -1252,16 +1243,12 @@ class WhatsAppConversationSyncView(APIView):
                         status=WhatsAppMessage.Status.DELIVERED,
                         created_at=created_at,
                     )
-                    new_in_chunk += 1
                     imported_count += 1
 
-                if len(res) < limit:
-                    break
-
-                offset += limit
-
-            return Response({"detail": f"Synced {imported_count} new messages."})
+            return Response({"detail": f"Synced {imported_count} new messages.", "synced": imported_count})
         except Exception as exc:
+            if "404" in str(exc) or "Not Found" in str(exc):
+                return Response({"detail": "Conversation is up to date (messages sync automatically via webhook).", "synced": 0})
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -2258,6 +2245,7 @@ class WhatsAppGroupCreateView(APIView):
 class WhatsAppCallStatusView(APIView):
     """
     Get live status of WhatsApp voice calling subsystem for user's connected session.
+    Optimized for fast 2-second frontend polling without blocking on external WAHA calls.
     """
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
@@ -2265,20 +2253,44 @@ class WhatsAppCallStatusView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
 
-        from .client import get_waha_client
-        client = get_waha_client()
-        call_status = client.get_calling_status(session_name)
-        resolved_session = call_status.get("resolved_session") or session_name
-
         from .webhooks import get_active_incoming_call
         incoming_call = get_active_incoming_call(session_name)
-        if not incoming_call and resolved_session != session_name:
-            incoming_call = get_active_incoming_call(resolved_session)
         if not incoming_call:
             incoming_call = get_active_incoming_call("default")
 
+        session_ready = session_obj.status == WhatsAppSession.Status.READY
+        force_refresh = request.query_params.get("refresh") == "true"
+
+        from .client import _CALLING_STATUS_CACHE, get_waha_client
+        import time
+        cached_status = _CALLING_STATUS_CACHE.get(session_name)
+        if not force_refresh and session_ready and not cached_status:
+            call_status = {
+                "enabled": True,
+                "paired": True,
+                "state": "open",
+                "resolved_session": session_name,
+            }
+        elif not force_refresh and cached_status and (time.time() - cached_status.get("_cached_at", 0) <= 30.0):
+            call_status = cached_status
+        else:
+            try:
+                client = get_waha_client()
+                call_status = client.get_calling_status(session_name, use_cache=not force_refresh)
+            except Exception:
+                call_status = {
+                    "enabled": True,
+                    "paired": session_ready,
+                    "state": "open" if session_ready else "not_connected",
+                    "resolved_session": session_name,
+                }
+
+        resolved_session = call_status.get("resolved_session") or session_name
+        if not incoming_call and resolved_session != session_name:
+            incoming_call = get_active_incoming_call(resolved_session)
+
         is_connected = (
-            session_obj.status == WhatsAppSession.Status.READY
+            session_ready
             or bool(call_status.get("paired"))
             or call_status.get("state") in ("open", "connected")
         )
@@ -2286,7 +2298,7 @@ class WhatsAppCallStatusView(APIView):
         return Response({
             "session_name": resolved_session,
             "connected": is_connected,
-            "paired": bool(call_status.get("paired")),
+            "paired": is_connected,
             "calling": call_status,
             "incoming_call": incoming_call,
         })
@@ -2361,9 +2373,8 @@ class WhatsAppCallAcceptView(APIView):
         from .client import get_waha_client
         client = get_waha_client()
         try:
-            from .webhooks import clear_active_call
-            clear_active_call(session_name, call_id)
-            clear_active_call("default", call_id)
+            from .webhooks import mark_active_call_connected
+            mark_active_call_connected(session_name, call_id)
             result = client.accept_call(session_name, call_id)
             return Response({
                 "status": "accepted",
