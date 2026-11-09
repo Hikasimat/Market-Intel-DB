@@ -31,6 +31,7 @@ import urllib.parse
 import mimetypes
 import os
 import re
+import tempfile
 from typing import Optional
 
 from django.core.files.base import ContentFile
@@ -469,6 +470,12 @@ ALLOWED_EVENT_TYPES = frozenset([
     "call.missed",
     "call.ended",
     "call.update",
+    "call.voice.incoming",
+    "call.voice.ringing",
+    "call.voice.active",
+    "call.voice.rejected",
+    "call.voice.missed",
+    "call.voice.ended",
 ])
 
 # Valid WhatsApp chat ID pattern.
@@ -773,9 +780,10 @@ def _handle_call_event(
         or ""
     ).strip()
     raw_from = str(
-        event_data.get("peer")
-        or event_data.get("from")
+        event_data.get("callerPhone")
         or event_data.get("caller")
+        or event_data.get("peer")
+        or event_data.get("from")
         or ""
     ).strip()
     raw_chat = str(event_data.get("chatId") or event_data.get("chat_id") or "").strip()
@@ -801,6 +809,9 @@ def _handle_call_event(
         target_chat_id = target_chat_id.replace("@s.whatsapp.net", "@c.us")
     if "@s.whatsapp.net" in raw_from:
         raw_from = raw_from.replace("@s.whatsapp.net", "@c.us")
+
+    target_chat_id = target_chat_id.lstrip("+")
+    raw_from = raw_from.lstrip("+")
 
     if PHONE_DIGITS_RE.match(target_chat_id):
         target_chat_id = f"{target_chat_id}@c.us"
@@ -972,7 +983,15 @@ def _handle_call_event(
     # Track or clear active incoming call in real-time
     if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
         clean_d = re.sub(r"\D+", "", str(raw_from or target_chat_id).split("@")[0].split(":")[0])
-        display_name = conversation.whatsapp_name if conversation and conversation.whatsapp_name else (f"+{clean_d}" if clean_d else "WhatsApp Contact")
+        display_name = (
+            conversation.prospect_contact.contact_name
+            if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
+            else (
+                conversation.whatsapp_name
+                if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id)
+                else (f"+{clean_d}" if clean_d else "WhatsApp Contact")
+            )
+        )
         incoming_payload = {
             "call_id": call_id,
             "caller_phone": f"+{clean_d}" if clean_d else "",
@@ -984,7 +1003,12 @@ def _handle_call_event(
         }
         set_active_incoming_call(session_name, incoming_payload)
         logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
-    elif is_missed or is_rejected or is_ended or is_accepted or event_type in ("call.accepted", "call.rejected", "call.missed", "call.ended", "call.voice.ended"):
+    elif is_missed or is_rejected or is_ended or is_accepted or event_type in (
+        "call.accepted", "call.voice.active",
+        "call.rejected", "call.voice.rejected",
+        "call.missed", "call.voice.missed",
+        "call.ended", "call.voice.ended",
+    ):
         clear_active_call(session_name, call_id)
         logger.info("Cleared active WhatsApp call: %s", call_id)
 

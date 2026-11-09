@@ -2274,6 +2274,8 @@ class WhatsAppCallStatusView(APIView):
         incoming_call = get_active_incoming_call(session_name)
         if not incoming_call and resolved_session != session_name:
             incoming_call = get_active_incoming_call(resolved_session)
+        if not incoming_call:
+            incoming_call = get_active_incoming_call("default")
 
         is_connected = (
             session_obj.status == WhatsAppSession.Status.READY
@@ -2349,6 +2351,8 @@ class WhatsAppCallAcceptView(APIView):
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
 
     def post(self, request, call_id):
+        if not call_id or call_id == "undefined":
+            return Response({"error": "Valid call_id is required."}, status=status.HTTP_400_BAD_REQUEST)
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
@@ -2359,6 +2363,7 @@ class WhatsAppCallAcceptView(APIView):
         try:
             from .webhooks import clear_active_call
             clear_active_call(session_name, call_id)
+            clear_active_call("default", call_id)
             result = client.accept_call(session_name, call_id)
             return Response({
                 "status": "accepted",
@@ -2375,6 +2380,8 @@ class WhatsAppCallRejectView(APIView):
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
 
     def post(self, request, call_id):
+        if not call_id or call_id == "undefined":
+            return Response({"error": "Valid call_id is required."}, status=status.HTTP_400_BAD_REQUEST)
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
@@ -2385,6 +2392,7 @@ class WhatsAppCallRejectView(APIView):
         try:
             from .webhooks import clear_active_call
             clear_active_call(session_name, call_id)
+            clear_active_call("default", call_id)
             result = client.reject_call(session_name, call_id)
             return Response({
                 "status": "rejected",
@@ -2406,10 +2414,16 @@ class WhatsAppCallEndView(APIView):
         return self._end(request, call_id)
 
     def _end(self, request, call_id):
+        if not call_id or call_id == "undefined":
+            return Response({"status": "ended"}, status=status.HTTP_200_OK)
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
         client_session = request.data.get("session_name") or request.query_params.get("session_name")
         target_session = client_session or session_name
+
+        from .webhooks import clear_active_call
+        clear_active_call(target_session, call_id)
+        clear_active_call("default", call_id)
 
         from .client import get_waha_client
         client = get_waha_client()
