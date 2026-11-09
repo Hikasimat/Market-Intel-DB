@@ -491,7 +491,7 @@ export default function WhatsappPage() {
 
   useEffect(() => {
     checkCallingStatus();
-    const interval = setInterval(checkCallingStatus, 2500);
+    const interval = setInterval(checkCallingStatus, 1200);
     return () => clearInterval(interval);
   }, [checkCallingStatus]);
 
@@ -836,19 +836,22 @@ export default function WhatsappPage() {
   }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession, showToast]);
 
   // Answer Incoming WhatsApp Voice Call (declared after initWebRTCAudioChannel)
-  const handleAcceptIncomingCall = useCallback(async () => {
-    if (!incomingCall) return;
-    const currentIncoming = incomingCall;
-    const callId = currentIncoming.call_id;
-    const sessionToUse = currentIncoming.session_name || selectedSession?.session_name || 'default';
+  const handleAcceptIncomingCall = useCallback(async (explicitCall = null) => {
+    const targetCall = explicitCall || incomingCall;
+    if (!targetCall) return;
+    const rawId = targetCall.call_id || targetCall.callId || targetCall.id || '';
+    const cleanCallId = String(rawId).replace(/^call_/, '').trim();
+    if (!cleanCallId) return;
+
+    const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
 
     setIncomingCall(null);
     setCallState({
       active: true,
       status: 'connected',
-      callId: callId,
-      peerName: currentIncoming.caller_name || 'WhatsApp Contact',
-      peerPhone: currentIncoming.caller_phone || '',
+      callId: cleanCallId,
+      peerName: targetCall.caller_name || targetCall.peerName || 'WhatsApp Contact',
+      peerPhone: targetCall.caller_phone || targetCall.peerPhone || '',
       duration: 0,
       isMuted: false,
       error: null,
@@ -856,7 +859,7 @@ export default function WhatsappPage() {
     });
 
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/accept/`, {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
         session_name: sessionToUse,
       });
     } catch (acceptErr) {
@@ -864,7 +867,7 @@ export default function WhatsappPage() {
     }
 
     try {
-      await initWebRTCAudioChannel(callId, sessionToUse);
+      await initWebRTCAudioChannel(cleanCallId, sessionToUse);
     } catch (audioErr) {
       console.error('WebRTC Audio connect error:', audioErr);
       showToast('Connected, but audio channel initialization failed.', 'error');
@@ -872,13 +875,16 @@ export default function WhatsappPage() {
   }, [incomingCall, selectedSession?.session_name, initWebRTCAudioChannel, showToast]);
 
   // Reject / Decline Incoming WhatsApp Voice Call
-  const handleRejectIncomingCall = useCallback(async () => {
-    if (!incomingCall) return;
-    const callId = incomingCall.call_id;
-    const sessionToUse = incomingCall.session_name || selectedSession?.session_name || 'default';
+  const handleRejectIncomingCall = useCallback(async (explicitCall = null) => {
+    const targetCall = explicitCall || incomingCall;
+    if (!targetCall) return;
+    const rawId = targetCall.call_id || targetCall.callId || targetCall.id || '';
+    const cleanCallId = String(rawId).replace(/^call_/, '').trim();
+    const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
     setIncomingCall(null);
+    if (!cleanCallId) return;
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/reject/`, {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/reject/`, {
         session_name: sessionToUse,
       });
       showToast('Call declined', 'info');
@@ -2136,6 +2142,19 @@ export default function WhatsappPage() {
 
               {/* Chat Actions */}
               <div className="flex items-center gap-3 text-slate-600">
+                {/* Attend Call Button in Header if incoming call */}
+                {incomingCall && !callState.active && (
+                  <button
+                    type="button"
+                    onClick={() => handleAcceptIncomingCall(incomingCall)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shadow-md animate-bounce ring-4 ring-emerald-400/40 cursor-pointer transition"
+                    title="Attend Incoming WhatsApp Call"
+                  >
+                    <PhoneCall className="w-3.5 h-3.5 animate-pulse" />
+                    <span>Attend Call</span>
+                  </button>
+                )}
+
                 {/* Voice Call Button (Strictly using connected session — no second QR) */}
                 <button
                   type="button"
@@ -2211,6 +2230,44 @@ export default function WhatsappPage() {
                 >
                   Done
                 </button>
+              </div>
+            )}
+
+            {/* Real-time Incoming Call Banner in Active Chat */}
+            {incomingCall && !callState.active && (
+              <div className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-4 py-3 flex items-center justify-between shadow-md border-b border-emerald-500/30 animate-in fade-in duration-200">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center animate-bounce">
+                    <PhoneCall className="w-5 h-5 text-white animate-pulse" />
+                  </div>
+                  <div className="text-left">
+                    <div className="text-sm font-bold flex items-center gap-2">
+                      <span>Incoming Call from {incomingCall.caller_name || incomingCall.caller_phone || 'WhatsApp Contact'}</span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-300 animate-ping" />
+                    </div>
+                    <div className="text-xs text-emerald-100 font-mono">
+                      {incomingCall.caller_phone || 'WhatsApp Voice Call'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleRejectIncomingCall(incomingCall)}
+                    className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <PhoneOff className="w-3.5 h-3.5" />
+                    <span>Decline</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleAcceptIncomingCall(incomingCall)}
+                    className="px-4 py-1.5 rounded-lg bg-white text-emerald-700 hover:bg-emerald-50 text-xs font-bold shadow-lg transition cursor-pointer flex items-center gap-1.5 ring-2 ring-white/60 animate-pulse"
+                  >
+                    <PhoneCall className="w-4 h-4 text-emerald-600" />
+                    <span>Attend Call</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -2329,6 +2386,42 @@ export default function WhatsappPage() {
                                   {msg.full_body || msg.body_preview || 'Voice call'}
                                 </span>
                                 <span className="text-[11px] text-slate-400">WhatsApp call</span>
+
+                                {/* Attend / Call back action buttons */}
+                                {incomingCall && !callState.active && (
+                                  incomingCall.call_id === msg.waha_message_id?.replace(/^call_/, '') ||
+                                  incomingCall.chat_id === selectedChat?.chat_id ||
+                                  msg.status === 'PENDING'
+                                ) ? (
+                                  <div className="flex items-center gap-2 mt-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAcceptIncomingCall(incomingCall)}
+                                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                                    >
+                                      <PhoneCall className="w-3.5 h-3.5" />
+                                      <span>Attend Call</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRejectIncomingCall(incomingCall)}
+                                      className="px-2.5 py-1.5 rounded-lg bg-red-100 hover:bg-red-200 text-red-700 font-medium text-xs flex items-center gap-1 transition cursor-pointer"
+                                    >
+                                      <PhoneOff className="w-3.5 h-3.5" />
+                                      <span>Decline</span>
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={handleStartVoiceCall}
+                                    className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
+                                    title="Call contact back"
+                                  >
+                                    <Phone className="w-3 h-3" />
+                                    <span>Call back</span>
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ) : msg.full_body || msg.body_preview ? (
@@ -3282,7 +3375,7 @@ export default function WhatsappPage() {
 
       {/* Incoming WhatsApp Call Modal */}
       {incomingCall && !callState.active && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-slate-900 text-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden border border-slate-700 p-8 flex flex-col items-center text-center relative">
             {/* Pulsing Ring Animation */}
             <div className="relative mb-6">

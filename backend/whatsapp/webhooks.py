@@ -981,20 +981,26 @@ def _handle_call_event(
     logger.info("Processed call event %s for %s (%s)", event_type, target_chat_id, call_label)
 
     # Track or clear active incoming call in real-time
-    if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
-        clean_d = re.sub(r"\D+", "", str(raw_from or target_chat_id).split("@")[0].split(":")[0])
-        display_name = (
-            conversation.prospect_contact.contact_name
-            if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
-            else (
-                conversation.whatsapp_name
-                if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id)
-                else (f"+{clean_d}" if clean_d else "WhatsApp Contact")
-            )
+    clean_d = re.sub(r"\D+", "", str(raw_from or target_chat_id).split("@")[0].split(":")[0])
+    display_name = (
+        conversation.prospect_contact.contact_name
+        if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
+        else (
+            conversation.whatsapp_name
+            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id)
+            else (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "WhatsApp Contact")
         )
+    )
+    phone_display = (
+        conversation.phone_number
+        if (conversation and conversation.phone_number)
+        else (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "")
+    )
+
+    if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
         incoming_payload = {
             "call_id": call_id,
-            "caller_phone": f"+{clean_d}" if clean_d else "",
+            "caller_phone": phone_display,
             "caller_name": display_name,
             "session_name": session_name,
             "chat_id": target_chat_id,
@@ -1003,8 +1009,19 @@ def _handle_call_event(
         }
         set_active_incoming_call(session_name, incoming_payload)
         logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
-    elif is_missed or is_rejected or is_ended or is_accepted or event_type in (
-        "call.accepted", "call.voice.active",
+    elif is_accepted or event_type in ("call.accepted", "call.voice.active") or raw_status in ("accept", "active", "answered"):
+        active_payload = {
+            "call_id": call_id,
+            "caller_phone": phone_display,
+            "caller_name": display_name,
+            "session_name": session_name,
+            "chat_id": target_chat_id,
+            "is_video": is_video,
+            "status": "connected",
+        }
+        set_active_incoming_call(session_name, active_payload)
+        logger.info("Updated active WhatsApp call to connected: %s from %s", call_id, display_name)
+    elif is_missed or is_rejected or is_ended or event_type in (
         "call.rejected", "call.voice.rejected",
         "call.missed", "call.voice.missed",
         "call.ended", "call.voice.ended",
