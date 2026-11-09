@@ -51,6 +51,7 @@ from .views import (
     WhatsAppSessionStopView,
     WhatsAppSetOutboundView,
     WhatsAppStatusView,
+    WhatsAppTwoDaySyncView,
     WhatsAppWebhookView,
 )
 
@@ -86,6 +87,7 @@ urlpatterns = [
 
     # -- Conversations (LQ / Manager) ----------------------------------------
     path("conversations/", WhatsAppConversationsView.as_view(), name="whatsapp-conversations"),
+    path("sync-history/", WhatsAppTwoDaySyncView.as_view(), name="whatsapp-sync-history"),
     path("groups/create/", WhatsAppGroupCreateView.as_view(), name="whatsapp-group-create"),
     path(
         "conversations/<uuid:conversation_id>/messages/",

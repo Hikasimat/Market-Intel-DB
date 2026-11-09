@@ -434,10 +434,54 @@ class WAHAClient:
         return _WEBHOOK_SYNC_STATE.get("configured_url")
 
     def get_recent_messages_from_stats(self, force: bool = False) -> list:
-        """Return recent messages buffered in WAHA-NoWeb-Light's memory."""
+        """
+        Return recent messages buffered in WAHA-NoWeb-Light's memory
+        (combining stats.messages and stats.webhook.recentLogs message payloads).
+        """
         stats = self.get_dashboard_stats(force=force)
-        msgs = stats.get("messages") if isinstance(stats, dict) else None
-        return msgs if isinstance(msgs, list) else []
+        if not isinstance(stats, dict):
+            return []
+
+        combined = []
+        seen_ids = set()
+
+        raw_msgs = stats.get("messages")
+        if isinstance(raw_msgs, list):
+            for m in raw_msgs:
+                if not isinstance(m, dict):
+                    continue
+                m_id = str(m.get("id") or "")
+                if m_id and m_id in seen_ids:
+                    continue
+                if m_id:
+                    seen_ids.add(m_id)
+                combined.append(m)
+
+        webhook_info = stats.get("webhook")
+        recent_logs = webhook_info.get("recentLogs") if isinstance(webhook_info, dict) else None
+        if isinstance(recent_logs, list):
+            for log_entry in recent_logs:
+                if not isinstance(log_entry, dict):
+                    continue
+                ev = str(log_entry.get("event") or "")
+                if ev not in ("message", "message.any"):
+                    continue
+                summary = log_entry.get("payloadSummary")
+                if not isinstance(summary, dict):
+                    continue
+                msg_obj = dict(summary)
+                if not msg_obj.get("session") and log_entry.get("session"):
+                    msg_obj["session"] = log_entry.get("session")
+                if not msg_obj.get("timestamp") and log_entry.get("timestamp"):
+                    msg_obj["timestamp"] = log_entry.get("timestamp")
+                m_id = str(msg_obj.get("id") or "")
+                if m_id and m_id in seen_ids:
+                    continue
+                if m_id:
+                    seen_ids.add(m_id)
+                combined.append(msg_obj)
+
+        return combined
 
     # -- Messaging -----------------------------------------------------------
 
@@ -633,22 +677,22 @@ class WAHAClient:
         self,
         session_name: str,
         chat_id: str,
-        limit: int = 50,
+        limit: int = 100,
     ) -> list:
-        """Get messages for a specific chat."""
-        try:
-            _status, body = self._request(
-                "GET",
-                f"/api/chats/{chat_id}/messages",
-                query={"session": session_name, "limit": min(limit, 100)},
-            )
-            return body if isinstance(body, list) else []
-        except WAHAServiceError as exc:
-            if exc.status_code == 404:
-                return []
-            raise
-        except Exception:
-            return []
+        """Get messages for a specific chat across WAHA endpoints or memory buffer."""
+        for path in (f"/api/{session_name}/chats/{chat_id}/messages", f"/api/chats/{chat_id}/messages"):
+            try:
+                _status, body = self._request(
+                    "GET",
+                    path,
+                    query={"session": session_name, "limit": min(limit, 500), "downloadMedia": "true"},
+                    timeout=5.0,
+                )
+                if isinstance(body, list) and body:
+                    return body
+            except Exception:
+                continue
+        return []
 
     def mark_as_read(self, session_name: str, chat_id: str, message_id: str = None) -> dict:
         """Mark messages in a chat as read via WAHA sendSeen."""
@@ -1061,16 +1105,21 @@ class WAHAClient:
     def get_calling_history(self, session_name: str) -> list:
         """Get voice call history from WAHA calling service."""
         primary = session_name or "default"
-        try:
-            _status, body = self._request(
-                "GET",
-                f"/api/calling/sessions/{primary}/history",
-                timeout=5.0,
-            )
-            if isinstance(body, list):
-                return body
-        except Exception:
-            pass
+        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+            try:
+                _status, body = self._request(
+                    "GET",
+                    f"/api/calling/sessions/{sess}/history",
+                    timeout=4.0,
+                )
+                if isinstance(body, list):
+                    return body
+                if isinstance(body, dict):
+                    items = body.get("calls") or body.get("history") or body.get("data")
+                    if isinstance(items, list):
+                        return items
+            except Exception:
+                continue
 
         return []
 

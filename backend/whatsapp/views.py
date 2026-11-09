@@ -1151,10 +1151,12 @@ class WhatsAppConversationsView(APIView):
 
 
 class WhatsAppConversationMessagesView(APIView):
-    """Get messages for a specific owned conversation."""
+    """Get messages for a specific owned conversation in chronological order."""
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request, conversation_id):
+        from django.db.models.functions import Coalesce
+
         conv, err = _get_owned_conversation(request, conversation_id)
         if err:
             return err
@@ -1163,18 +1165,22 @@ class WhatsAppConversationMessagesView(APIView):
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
         limit = min(int(request.query_params.get("limit", 2000)), 5000)
-        
+
         if conv.session and conv.session.phone_number:
-            messages = WhatsAppMessage.objects.filter(
+            base_qs = WhatsAppMessage.objects.filter(
                 conversation__chat_id=conv.chat_id,
                 conversation__session__phone_number=conv.session.phone_number,
                 is_deleted=False,
-            ).order_by("-created_at")[:limit]
+            )
         else:
-            messages = WhatsAppMessage.objects.filter(
+            base_qs = WhatsAppMessage.objects.filter(
                 conversation=conv,
                 is_deleted=False,
-            ).order_by("-created_at")[:limit]
+            )
+
+        messages = base_qs.annotate(
+            effective_ts=Coalesce("waha_timestamp", "sent_at", "created_at")
+        ).order_by("-effective_ts", "-created_at")[:limit]
 
         serializer = WhatsAppMessageSerializer(messages, many=True)
         return Response({
@@ -1184,7 +1190,10 @@ class WhatsAppConversationMessagesView(APIView):
 
 
 class WhatsAppConversationSyncView(APIView):
-    """Sync old messages from WAHA into the database (ownership enforced)."""
+    """
+    Synchronize messages from the last 2 days for a conversation from WAHA into the database,
+    preserving original message timestamps and chronological order.
+    """
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def post(self, request, conversation_id):
@@ -1195,68 +1204,73 @@ class WhatsAppConversationSyncView(APIView):
         if conv.is_deleted:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        from .client import get_waha_client
-        import hashlib
-        from datetime import datetime, timezone as dt_timezone
-
-        client = get_waha_client()
         if not conv.session or not conv.session.session_name:
             return Response({"detail": "No session associated with this conversation."}, status=status.HTTP_400_BAD_REQUEST)
 
         session_name = conv.session.session_name
+        days = int(request.data.get("days") or request.query_params.get("days") or 2)
 
         try:
-            from .webhooks import sync_recent_waha_messages
-            imported_count = 0
-            try:
-                recent_stats_msgs = client.get_recent_messages_from_stats(force=True)
-                imported_count += sync_recent_waha_messages(recent_stats_msgs, session_name)
-            except Exception:
-                pass
-            res = client.get_messages(session_name, conv.chat_id, limit=100)
-            if isinstance(res, list):
-                for msg_data in res:
-                    if not isinstance(msg_data, dict):
-                        continue
-                    waha_id = msg_data.get("id")
-                    if not waha_id or WhatsAppMessage.objects.filter(waha_message_id=waha_id).exists():
-                        continue
-
-                    direction = WhatsAppMessage.Direction.OUTBOUND if msg_data.get("fromMe") else WhatsAppMessage.Direction.INBOUND
-
-                    body = msg_data.get("body")
-                    if not body and msg_data.get("hasMedia"):
-                        body = "(Media)"
-                    elif not body:
-                        body = ""
-
-                    body_preview = body[:200]
-                    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-                    ts = msg_data.get("timestamp")
-                    if ts:
-                        created_at = datetime.fromtimestamp(ts, tz=dt_timezone.utc)
-                    else:
-                        created_at = datetime.now(dt_timezone.utc)
-
-                    WhatsAppMessage.objects.create(
-                        conversation=conv,
-                        idempotency_key=str(uuid.uuid4()),
-                        waha_message_id=waha_id,
-                        direction=direction,
-                        body_preview=body_preview,
-                        full_body=body,
-                        body_hash=body_hash,
-                        status=WhatsAppMessage.Status.DELIVERED,
-                        created_at=created_at,
-                    )
-                    imported_count += 1
-
-            return Response({"detail": f"Synced {imported_count} new messages.", "synced": imported_count})
+            from .webhooks import sync_two_day_whatsapp_history
+            sync_res = sync_two_day_whatsapp_history(
+                session_name=session_name,
+                chat_id=conv.chat_id,
+                days=days,
+                force=True,
+            )
+            imported_count = sync_res.get("synced", 0)
+            return Response({
+                "detail": f"Synced {imported_count} new messages from the last {days} days.",
+                "synced": imported_count,
+                "days": days,
+            })
         except Exception as exc:
             if "404" in str(exc) or "Not Found" in str(exc):
                 return Response({"detail": "Conversation is up to date (messages sync automatically via webhook).", "synced": 0})
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppTwoDaySyncView(APIView):
+    """
+    Synchronize all missing chat history and messages from the last 2 days across
+    the user's WhatsApp session (e.g. when returning after being offline).
+    Preserves original message timestamps and ensures strict chronological ordering.
+    POST /api/whatsapp/sync-history/
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def post(self, request):
+        user_session = _get_user_session(request.user, create=True)
+        session_name = (
+            request.data.get("session_name")
+            or (user_session.session_name if user_session else "default")
+        ).strip()
+        days = int(request.data.get("days") or request.query_params.get("days") or 2)
+        chat_id = (request.data.get("chat_id") or "").strip() or None
+
+        try:
+            from .webhooks import sync_two_day_whatsapp_history
+            result = sync_two_day_whatsapp_history(
+                session_name=session_name,
+                chat_id=chat_id,
+                days=days,
+                force=True,
+            )
+            synced_count = result.get("synced", 0)
+            return Response({
+                "detail": f"Synchronized {synced_count} messages from the last {days} days.",
+                "synced": synced_count,
+                "checked": result.get("checked", 0),
+                "days": days,
+                "cutoff": result.get("cutoff"),
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.debug("2-day history sync warning: %s", exc)
+            return Response({
+                "detail": "Message history is up to date.",
+                "synced": 0,
+                "days": days,
+            }, status=status.HTTP_200_OK)
 
 
 class WhatsAppConversationDeleteView(APIView):
@@ -2456,6 +2470,32 @@ class WhatsAppCallStartView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _resolve_call_message_record(call_id: str, call_label: str, msg_status: str, call_preview: str = "") -> None:
+    """
+    Update the database WhatsAppMessage record for a voice call when accepted, rejected, or ended
+    so it never remains stuck in PENDING ('Incoming voice call') state.
+    """
+    import hashlib
+    clean_id = str(call_id or "").replace("call_", "").strip()
+    if not clean_id:
+        return
+    candidate_ids = [clean_id, f"call_{clean_id}"]
+    body_hash = hashlib.sha256(call_label.encode("utf-8")).hexdigest()
+    try:
+        msgs = list(WhatsAppMessage.objects.filter(waha_message_id__in=candidate_ids).select_related("conversation"))
+        for m in msgs:
+            m.body_preview = call_label
+            m.full_body = call_label
+            m.body_hash = body_hash
+            m.status = msg_status
+            m.save(update_fields=["body_preview", "full_body", "body_hash", "status"])
+            if m.conversation and call_preview and (m.conversation.last_message_preview or "").startswith("📞 Incoming"):
+                m.conversation.last_message_preview = call_preview
+                m.conversation.save(update_fields=["last_message_preview"])
+    except Exception as e:
+        logger.debug("Failed to update call message record for %s: %s", clean_id, e)
+
+
 class WhatsAppCallAcceptView(APIView):
     """Accept an incoming voice call."""
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
@@ -2469,12 +2509,23 @@ class WhatsAppCallAcceptView(APIView):
         session_name = req_session or default_session
 
         from .client import get_waha_client
+        from .webhooks import clear_active_call, mark_active_call_connected, mark_call_handled
+        mark_call_handled(call_id)
+        mark_active_call_connected(session_name, call_id)
+        clear_active_call(session_name, call_id)
+        clear_active_call("default", call_id)
+        _resolve_call_message_record(
+            call_id,
+            "Answered voice call",
+            WhatsAppMessage.Status.DELIVERED,
+            "📞 Answered voice call",
+        )
+
         client = get_waha_client()
         try:
-            from .webhooks import mark_active_call_connected
-            mark_active_call_connected(session_name, call_id)
             result = client.accept_call(session_name, call_id)
             session_used = result.get("session_name") or session_name
+            clear_active_call(session_used, call_id)
             audio_ws_url = _build_audio_ws_url(request, session_used, call_id)
             return Response({
                 "status": "accepted",
@@ -2501,11 +2552,19 @@ class WhatsAppCallRejectView(APIView):
         session_name = req_session or default_session
 
         from .client import get_waha_client
+        from .webhooks import clear_active_call, mark_call_handled
+        mark_call_handled(call_id)
+        clear_active_call(session_name, call_id)
+        clear_active_call("default", call_id)
+        _resolve_call_message_record(
+            call_id,
+            "Declined voice call",
+            WhatsAppMessage.Status.FAILED,
+            "📞 Declined voice call",
+        )
+
         client = get_waha_client()
         try:
-            from .webhooks import clear_active_call
-            clear_active_call(session_name, call_id)
-            clear_active_call("default", call_id)
             result = client.reject_call(session_name, call_id)
             return Response({
                 "status": "rejected",
@@ -2534,9 +2593,17 @@ class WhatsAppCallEndView(APIView):
         client_session = request.data.get("session_name") or request.query_params.get("session_name")
         target_session = client_session or session_name
 
-        from .webhooks import clear_active_call
+        from .webhooks import clear_active_call, mark_call_handled
+        mark_call_handled(call_id)
         clear_active_call(target_session, call_id)
+        clear_active_call(session_name, call_id)
         clear_active_call("default", call_id)
+        _resolve_call_message_record(
+            call_id,
+            "Voice call",
+            WhatsAppMessage.Status.DELIVERED,
+            "📞 Voice call",
+        )
 
         from .client import get_waha_client
         client = get_waha_client()

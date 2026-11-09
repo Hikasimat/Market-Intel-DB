@@ -541,6 +541,28 @@ export default function WhatsappPage() {
     });
   }, []);
 
+  // Track handled call IDs (accepted, declined, or ended) so polling never re-shows a finished call
+  const handledCallIdsRef = useRef(
+    (() => {
+      try {
+        const saved = sessionStorage.getItem('wa_handled_call_ids');
+        return saved ? new Set(JSON.parse(saved)) : new Set();
+      } catch (_) {
+        return new Set();
+      }
+    })()
+  );
+
+  const markCallIdHandled = useCallback((rawCallId) => {
+    const clean = String(rawCallId || '').replace(/^call_/, '').trim();
+    if (!clean) return;
+    handledCallIdsRef.current.add(clean);
+    try {
+      const arr = Array.from(handledCallIdsRef.current).slice(-200);
+      sessionStorage.setItem('wa_handled_call_ids', JSON.stringify(arr));
+    } catch (_) {}
+  }, []);
+
   const checkCallingStatus = useCallback(async () => {
     try {
       const res = await api.get('/whatsapp/calls/status/');
@@ -552,12 +574,18 @@ export default function WhatsappPage() {
 
       const incoming = res.data?.incoming_call;
       if (incoming && incoming.call_id) {
-        if (incoming.status === 'connected') {
+        const cleanIncId = String(incoming.call_id).replace(/^call_/, '').trim();
+        if (
+          !cleanIncId ||
+          incoming.status !== 'ringing' ||
+          callState.active ||
+          handledCallIdsRef.current.has(cleanIncId)
+        ) {
           setIncomingCall(null);
-        } else if (!callState.active || callState.callId !== incoming.call_id) {
-          setIncomingCall(prev => {
-            if (prev?.call_id === incoming.call_id) return prev;
-            return incoming;
+        } else {
+          setIncomingCall((prev) => {
+            if (prev && String(prev.call_id).replace(/^call_/, '').trim() === cleanIncId) return prev;
+            return { ...incoming, call_id: cleanIncId };
           });
         }
       } else {
@@ -566,7 +594,7 @@ export default function WhatsappPage() {
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, [callState.active, callState.callId]);
+  }, [callState.active]);
 
   useEffect(() => {
     checkCallingStatus();
@@ -629,8 +657,10 @@ export default function WhatsappPage() {
   const handleEndCall = useCallback(async () => {
     const activeCallId = callState.callId;
     if (activeCallId) {
+      markCallIdHandled(activeCallId);
+      setIncomingCall(null);
       try {
-        await api.post(`/whatsapp/calls/${activeCallId}/end/`, {
+        await api.post(`/whatsapp/calls/${encodeURIComponent(activeCallId)}/end/`, {
           session_name: callState.sessionName,
         });
       } catch (err) {
@@ -638,7 +668,7 @@ export default function WhatsappPage() {
       }
     }
     cleanupCallSession();
-  }, [callState.callId, callState.sessionName, cleanupCallSession]);
+  }, [callState.callId, callState.sessionName, markCallIdHandled, cleanupCallSession]);
 
   const handleToggleMute = useCallback(() => {
     const nextMuted = !callState.isMuted;
@@ -904,6 +934,11 @@ export default function WhatsappPage() {
                 }
                 // Engine closes socket with 1000 "call ended" when remote party explicitly hangs up
                 if (ev.code === 1000 && ev.reason === 'call ended') {
+                  markCallIdHandled(callId);
+                  setIncomingCall(null);
+                  api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/end/`, {
+                    session_name: callSessionName,
+                  }).catch(() => {});
                   setCallState((prev) => (prev.active ? { ...prev, status: 'ended', error: 'Call ended' } : prev));
                   setTimeout(() => cleanupCallSession(), 1500);
                   return;
@@ -1088,6 +1123,7 @@ export default function WhatsappPage() {
     const cleanCallId = String(rawId).replace(/^call_/, '').trim();
     if (!cleanCallId) return;
 
+    markCallIdHandled(cleanCallId);
     const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
 
     // Auto-select caller conversation if present in conversations list
@@ -1135,7 +1171,7 @@ export default function WhatsappPage() {
       console.error('WebRTC Audio connect error:', audioErr);
       showToast('Connected, but audio channel initialization failed.', 'error');
     }
-  }, [incomingCall, selectedSession?.session_name, chats, selectedChat?.chat_id, initWebRTCAudioChannel, showToast]);
+  }, [incomingCall, selectedSession?.session_name, chats, selectedChat?.chat_id, markCallIdHandled, initWebRTCAudioChannel, showToast]);
 
   // Reject / Decline Incoming WhatsApp Voice Call
   const handleRejectIncomingCall = useCallback(async (explicitCall = null) => {
@@ -1144,6 +1180,9 @@ export default function WhatsappPage() {
     const rawId = targetCall.call_id || targetCall.callId || targetCall.id || '';
     const cleanCallId = String(rawId).replace(/^call_/, '').trim();
     const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
+    if (cleanCallId) {
+      markCallIdHandled(cleanCallId);
+    }
     setIncomingCall(null);
     if (!cleanCallId) return;
     try {
@@ -1154,7 +1193,7 @@ export default function WhatsappPage() {
     } catch (err) {
       console.warn('Decline call error:', err);
     }
-  }, [incomingCall, selectedSession?.session_name, showToast]);
+  }, [incomingCall, selectedSession?.session_name, markCallIdHandled, showToast]);
 
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
@@ -1307,7 +1346,13 @@ export default function WhatsappPage() {
     if (!isPolling) setLoadingMessages(true);
     try {
       const response = await api.get(`/whatsapp/conversations/${conversationId}/messages/`);
-      const sorted = (response.data.messages || []).reverse();
+      const rawList = Array.isArray(response.data.messages) ? response.data.messages : [];
+      // Sort strictly in ascending chronological order (oldest -> newest) using original WhatsApp timestamp
+      const sorted = [...rawList].sort((a, b) => {
+        const tsA = new Date(a.waha_timestamp || a.sent_at || a.created_at || 0).getTime();
+        const tsB = new Date(b.waha_timestamp || b.sent_at || b.created_at || 0).getTime();
+        return tsA - tsB;
+      });
       setMessages(sorted);
       if (!isPolling) {
         setTimeout(scrollToBottom, 150);
@@ -1319,11 +1364,43 @@ export default function WhatsappPage() {
     }
   }, []);
 
+  // Automatically synchronize missing messages from the last 2 days when user opens WhatsApp or returns online
+  const runTwoDayHistorySync = useCallback(async () => {
+    if (!selectedSession || selectedSession.status !== 'READY') return;
+    try {
+      const res = await api.post('/whatsapp/sync-history/', {
+        session_name: selectedSession.session_name,
+        days: 2,
+      });
+      if (res.data?.synced > 0) {
+        fetchConversations(true);
+        if (selectedChat && !String(selectedChat.id).startsWith('temp-')) {
+          fetchMessages(selectedChat.id, true);
+        }
+      }
+    } catch (_) {}
+  }, [selectedSession, selectedChat, fetchConversations, fetchMessages]);
+
   useEffect(() => {
     if (selectedSession && selectedSession.status === 'READY') {
       fetchConversations(false);
+      runTwoDayHistorySync();
     }
-  }, [selectedSession, fetchConversations]);
+  }, [selectedSession?.status, selectedSession?.session_name, fetchConversations]);
+
+  useEffect(() => {
+    const onReconnectOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        runTwoDayHistorySync();
+      }
+    };
+    window.addEventListener('online', onReconnectOrFocus);
+    document.addEventListener('visibilitychange', onReconnectOrFocus);
+    return () => {
+      window.removeEventListener('online', onReconnectOrFocus);
+      document.removeEventListener('visibilitychange', onReconnectOrFocus);
+    };
+  }, [runTwoDayHistorySync]);
 
   useEffect(() => {
     if (selectedChat) {
@@ -1372,9 +1449,10 @@ export default function WhatsappPage() {
   const handleSyncHistory = async () => {
     if (!selectedChat || String(selectedChat.id).startsWith('temp-')) return;
     try {
-      showToast('Syncing messages from WhatsApp...', 'info');
-      const response = await api.post(`/whatsapp/conversations/${selectedChat.id}/sync/`);
+      showToast('Syncing messages from the last 2 days...', 'info');
+      const response = await api.post(`/whatsapp/conversations/${selectedChat.id}/sync/`, { days: 2 });
       showToast(response.data.detail || 'Sync complete.', 'success');
+      fetchConversations(true);
       fetchMessages(selectedChat.id);
     } catch (error) {
       showToast(error.response?.data?.detail || 'Failed to sync history', 'error');
@@ -2654,11 +2732,14 @@ export default function WhatsappPage() {
                                 <span className="text-[11px] text-slate-400">WhatsApp call</span>
 
                                 {/* Attend / Call back action buttons */}
-                                {incomingCall && !callState.active && (
-                                  incomingCall.call_id === msg.waha_message_id?.replace(/^call_/, '') ||
-                                  incomingCall.chat_id === selectedChat?.chat_id ||
-                                  msg.status === 'PENDING'
-                                ) ? (
+                                {incomingCall &&
+                                  !callState.active &&
+                                  msg.waha_message_id &&
+                                  String(incomingCall.call_id).replace(/^call_/, '').trim() ===
+                                    String(msg.waha_message_id).replace(/^call_/, '').trim() &&
+                                  !handledCallIdsRef.current.has(
+                                    String(incomingCall.call_id).replace(/^call_/, '').trim()
+                                  ) ? (
                                   <div className="flex items-center gap-2 mt-2">
                                     <button
                                       type="button"
@@ -2701,7 +2782,7 @@ export default function WhatsappPage() {
                           {/* Footer with Timestamp and Status Ticks */}
                           <div className="flex items-center justify-end gap-1 mt-1 select-none">
                             <span className="text-[10px] text-slate-500 font-medium">
-                              {formatMessageTime(msg.created_at || msg.sent_at)}
+                              {formatMessageTime(msg.waha_timestamp || msg.sent_at || msg.created_at)}
                             </span>
 
                             {isMe && (

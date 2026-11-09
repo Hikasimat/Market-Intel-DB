@@ -130,23 +130,100 @@ def clear_cached_qr(session_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 LATEST_CALL_CACHE: dict = {}
+HANDLED_CALL_IDS: dict = {}
+
+
+def _normalize_call_id(call_id: Optional[str]) -> str:
+    if not call_id:
+        return ""
+    s = str(call_id).strip()
+    if s.startswith("call_"):
+        s = s[5:]
+    return s.strip()
+
+
+def _handled_calls_file() -> str:
+    return os.path.join(tempfile.gettempdir(), "waha_handled_calls.json")
+
+
+def mark_call_handled(call_id: Optional[str]) -> None:
+    """
+    Record a call_id as handled (accepted, rejected, ended, or missed) across memory and
+    shared temp storage so late/retried webhooks or polling never re-trigger an incoming call.
+    """
+    import time
+    clean_id = _normalize_call_id(call_id)
+    if not clean_id:
+        return
+    now = time.time()
+    HANDLED_CALL_IDS[clean_id] = now
+    fpath = _handled_calls_file()
+    try:
+        data = {}
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            except Exception:
+                data = {}
+        # Prune entries older than 48 hours
+        data = {k: v for k, v in data.items() if isinstance(v, (int, float)) and (now - v) < 172800}
+        data[clean_id] = now
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.debug("Failed to persist handled call ID %s: %s", clean_id, e)
+
+
+def is_call_handled(call_id: Optional[str]) -> bool:
+    """Return True if call_id has already been accepted, declined, or ended."""
+    import time
+    clean_id = _normalize_call_id(call_id)
+    if not clean_id:
+        return False
+    now = time.time()
+    ts = HANDLED_CALL_IDS.get(clean_id)
+    if ts and (now - ts) < 172800:
+        return True
+    fpath = _handled_calls_file()
+    try:
+        if os.path.exists(fpath):
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                file_ts = data.get(clean_id)
+                if isinstance(file_ts, (int, float)) and (now - file_ts) < 172800:
+                    HANDLED_CALL_IDS[clean_id] = file_ts
+                    return True
+    except Exception:
+        pass
+    return False
+
 
 def _call_cache_file(session_name: str) -> str:
-    import tempfile
     clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_name)
     return os.path.join(tempfile.gettempdir(), f"waha_active_call_{clean}.json")
 
+
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
-    """Retrieve currently ringing/active incoming voice call for user session."""
+    """Retrieve currently ringing incoming voice call for user session."""
     import time
     import glob
-    import tempfile
     now = time.time()
 
     def _is_valid_call(data: dict, mtime: float) -> bool:
-        if not isinstance(data, dict) or not data.get("call_id"):
+        if not isinstance(data, dict):
             return False
-        max_age = 7200 if data.get("status") == "connected" else 180
+        cid = _normalize_call_id(data.get("call_id"))
+        if not cid:
+            return False
+        if is_call_handled(cid):
+            return False
+        if data.get("status") != "ringing":
+            return False
+        max_age = 45
         ref_time = data.get("received_at") or mtime
         return (now - ref_time) <= max_age
 
@@ -196,11 +273,19 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
 
     return None
 
+
 def set_active_incoming_call(session_name: str, call_data: dict) -> None:
     """Persist active incoming call to memory and temp cache file."""
     import time
     if not isinstance(call_data, dict):
         return
+    clean_id = _normalize_call_id(call_data.get("call_id"))
+    if clean_id and is_call_handled(clean_id):
+        logger.debug("Skipping set_active_incoming_call for already-handled call %s", clean_id)
+        return
+    call_data = dict(call_data)
+    if clean_id:
+        call_data["call_id"] = clean_id
     call_data["received_at"] = time.time()
     for s in (session_name, "default"):
         if not s:
@@ -215,51 +300,39 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
 
 
 def mark_active_call_connected(session_name: str = "default", call_id: Optional[str] = None) -> None:
-    """Mark an active incoming call as connected so polling knows it was answered, not hung up."""
-    import time
-    import glob
-    import tempfile
-    now = time.time()
-    for s, cached in list(LATEST_CALL_CACHE.items()):
-        if isinstance(cached, dict) and (not call_id or cached.get("call_id") == call_id):
-            cached["status"] = "connected"
-            cached["received_at"] = now
-            LATEST_CALL_CACHE[s] = cached
+    """
+    Mark an incoming call as handled/connected and remove it from active ringing cache
+    so polling never re-surfaces the call banner after the user attends it.
+    """
+    if call_id:
+        mark_call_handled(call_id)
+    clear_active_call(session_name, call_id)
 
-    try:
-        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
-        for fpath in glob.glob(pattern):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and (not call_id or data.get("call_id") == call_id):
-                    data["status"] = "connected"
-                    data["received_at"] = now
-                    with open(fpath, "w", encoding="utf-8") as f:
-                        json.dump(data, f)
-            except Exception:
-                pass
-    except Exception:
-        pass
 
 def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
-    """Clear active incoming call once answered, rejected, or ended."""
+    """Clear active incoming call once answered, rejected, or ended, and tombstone its call_id."""
     import glob
+    clean_target = _normalize_call_id(call_id)
+    if clean_target:
+        mark_call_handled(clean_target)
+
     for s in list(LATEST_CALL_CACHE.keys()):
         cached = LATEST_CALL_CACHE.get(s)
-        if not call_id or (cached and cached.get("call_id") == call_id):
+        cached_id = _normalize_call_id(cached.get("call_id")) if isinstance(cached, dict) else ""
+        if not clean_target or cached_id == clean_target:
             LATEST_CALL_CACHE.pop(s, None)
 
     try:
         pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
         for fpath in glob.glob(pattern):
             try:
-                if not call_id:
+                if not clean_target:
                     os.remove(fpath)
                 else:
                     with open(fpath, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    if isinstance(data, dict) and data.get("call_id") == call_id:
+                    file_cid = _normalize_call_id(data.get("call_id")) if isinstance(data, dict) else ""
+                    if file_cid == clean_target or is_call_handled(file_cid):
                         os.remove(fpath)
             except Exception:
                 pass
@@ -790,10 +863,77 @@ def _handle_session_disconnected(event_data: dict, session_name: str, event_reco
     logger.warning("Session %s disconnected (logged_out=%s)", session_name, is_logged_out)
 
 
+def _parse_waha_timestamp(event_data: dict):
+    """
+    Extract and normalize the original WhatsApp message or call timestamp from
+    WAHA / Baileys event payloads into a timezone-aware UTC datetime.
+    Supports Unix seconds, Unix milliseconds, Baileys Long dicts ({'low': ...}),
+    and ISO-8601 strings. Falls back to timezone.now() only if no timestamp exists.
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    if not isinstance(event_data, dict):
+        return timezone.now()
+
+    _data = event_data.get("_data") if isinstance(event_data.get("_data"), dict) else {}
+    candidates = [
+        event_data.get("timestamp"),
+        _data.get("messageTimestamp"),
+        event_data.get("messageTimestamp"),
+        event_data.get("startedAt"),
+        event_data.get("endedAt"),
+        event_data.get("date"),
+        event_data.get("t"),
+        _data.get("t"),
+    ]
+
+    for raw in candidates:
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, dict):
+            raw = raw.get("low") or raw.get("value") or raw.get("timestamp")
+            if raw is None:
+                continue
+        if isinstance(raw, (int, float)):
+            val = float(raw)
+            if val <= 0:
+                continue
+            if val >= 10_000_000_000:
+                val = val / 1000.0
+            try:
+                return datetime.fromtimestamp(val, tz=dt_timezone.utc)
+            except Exception:
+                continue
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                continue
+            if re.match(r"^\d+(\.\d+)?$", s):
+                val = float(s)
+                if val <= 0:
+                    continue
+                if val >= 10_000_000_000:
+                    val = val / 1000.0
+                try:
+                    return datetime.fromtimestamp(val, tz=dt_timezone.utc)
+                except Exception:
+                    continue
+            try:
+                iso_str = s.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(iso_str)
+                if timezone.is_naive(dt):
+                    dt = dt.replace(tzinfo=dt_timezone.utc)
+                return dt
+            except Exception:
+                continue
+
+    return timezone.now()
+
+
 def _handle_call_event(
     event_data: dict,
     session_name: str,
-    event_record: WhatsAppEvent,
+    event_record: Optional[WhatsAppEvent],
     event_type: str,
 ) -> None:
     """
@@ -807,12 +947,13 @@ def _handle_call_event(
       - call.ended     (status: "terminate")
       - call.update    (generic fallback)
     """
-    call_id = str(
+    raw_call_id = str(
         event_data.get("callId")
         or event_data.get("call_id")
         or event_data.get("id")
         or ""
     ).strip()
+    call_id = _normalize_call_id(raw_call_id)
     raw_from = str(
         event_data.get("callerPhone")
         or event_data.get("caller")
@@ -866,6 +1007,13 @@ def _handle_call_event(
         event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing")
         or raw_status in ("offer", "received", "incoming", "ringing")
     )
+
+    call_dt = _parse_waha_timestamp(event_data)
+
+    # Guard against late/duplicate/retried ringing webhooks for a call that was already attended, declined, or ended
+    if is_received and call_id and is_call_handled(call_id):
+        logger.info("Ignoring late/duplicate incoming call event %s for already-handled call %s", event_type, call_id)
+        return
 
     if is_missed:
         call_label = f"Missed {call_type.lower()}"
@@ -946,9 +1094,15 @@ def _handle_call_event(
     existing_message = None
     if waha_call_id:
         existing_message = WhatsAppMessage.objects.filter(
-            waha_message_id=waha_call_id,
+            waha_message_id__in=[waha_call_id, call_id],
             conversation=conversation,
         ).first()
+
+    # Do not let a late ringing event regress an already answered/ended/declined call message back to PENDING
+    if is_received and existing_message and existing_message.status != WhatsAppMessage.Status.PENDING:
+        mark_call_handled(call_id)
+        logger.info("Ignoring late ringing event for already-resolved call message %s", call_id)
+        return
 
     body_hash = hashlib.sha256(call_label.encode("utf-8")).hexdigest()
 
@@ -958,11 +1112,15 @@ def _handle_call_event(
         existing_message.body_hash = body_hash
         existing_message.status = msg_status
         existing_message.error_code = raw_status[:50]
-        existing_message.save(update_fields=["body_preview", "full_body", "body_hash", "status", "error_code"])
+        update_fields = ["body_preview", "full_body", "body_hash", "status", "error_code"]
+        if not existing_message.waha_timestamp and call_dt:
+            existing_message.waha_timestamp = call_dt
+            update_fields.append("waha_timestamp")
+        existing_message.save(update_fields=update_fields)
         wa_message = existing_message
     else:
         msg_idempotency = hashlib.sha256(
-            f"call:{session_name}:{target_chat_id}:{call_id or timezone.now().isoformat()}".encode()
+            f"call:{session_name}:{target_chat_id}:{call_id or call_dt.isoformat()}".encode()
         ).hexdigest()
 
         try:
@@ -980,19 +1138,29 @@ def _handle_call_event(
                     message_type="call",
                     has_media=False,
                     error_code=raw_status[:50],
+                    waha_timestamp=call_dt,
+                    sent_at=call_dt,
+                    created_at=call_dt,
                 )
         except IntegrityError:
             wa_message = WhatsAppMessage.objects.filter(idempotency_key=msg_idempotency).first()
 
-    # Update conversation metadata
-    conversation.last_message_at = timezone.now()
-    conversation.last_message_preview = call_preview
-    conversation.last_message_from_me = False
+    # Update conversation metadata (preserving chronological order)
+    conv_update_fields = []
+    if not conversation.last_message_at or call_dt >= conversation.last_message_at or existing_message:
+        if not conversation.last_message_at or call_dt >= conversation.last_message_at:
+            conversation.last_message_at = call_dt
+            conv_update_fields.append("last_message_at")
+        conversation.last_message_preview = call_preview
+        conversation.last_message_from_me = False
+        conv_update_fields.extend(["last_message_preview", "last_message_from_me"])
     if unread_inc and not existing_message:
         conversation.unread_count = conversation.unread_count + unread_inc
-    conversation.save(update_fields=["last_message_at", "last_message_preview", "last_message_from_me", "unread_count"])
+        conv_update_fields.append("unread_count")
+    if conv_update_fields:
+        conversation.save(update_fields=list(set(conv_update_fields)))
 
-    if wa_message:
+    if wa_message and event_record:
         event_record.whatsapp_message = wa_message
         event_record.save(update_fields=["whatsapp_message"])
 
@@ -1030,9 +1198,10 @@ def _handle_call_event(
     )
 
     if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
-        existing_call = get_active_incoming_call(session_name)
-        if existing_call and existing_call.get("call_id") == call_id and existing_call.get("status") == "connected":
-            logger.debug("Ignoring duplicate ringing event for already-connected call %s", call_id)
+        if call_id and is_call_handled(call_id):
+            return
+        if (timezone.now() - call_dt).total_seconds() > 45:
+            logger.debug("Ignoring stale ringing call event %s (age > 45s)", call_id)
             return
         incoming_payload = {
             "call_id": call_id,
@@ -1045,32 +1214,24 @@ def _handle_call_event(
         }
         set_active_incoming_call(session_name, incoming_payload)
         logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
-    elif is_accepted or event_type in ("call.accepted", "call.voice.active") or raw_status in ("accept", "active", "answered"):
-        active_payload = {
-            "call_id": call_id,
-            "caller_phone": phone_display,
-            "caller_name": display_name,
-            "session_name": session_name,
-            "chat_id": target_chat_id,
-            "is_video": is_video,
-            "status": "connected",
-        }
-        set_active_incoming_call(session_name, active_payload)
-        logger.info("Updated active WhatsApp call to connected: %s from %s", call_id, display_name)
-    elif is_missed or is_rejected or is_ended or event_type in (
+    elif is_accepted or is_missed or is_rejected or is_ended or event_type in (
+        "call.accepted", "call.voice.active",
         "call.rejected", "call.voice.rejected",
         "call.missed", "call.voice.missed",
         "call.ended", "call.voice.ended",
-    ):
+    ) or raw_status in ("accept", "active", "answered", "reject", "declined", "rejected", "timeout", "missed", "terminate", "ended"):
+        mark_call_handled(call_id)
         clear_active_call(session_name, call_id)
-        logger.info("Cleared active WhatsApp call: %s", call_id)
+        clear_active_call("default", call_id)
+        logger.info("Cleared and tombstoned WhatsApp call: %s (%s)", call_id, event_type)
 
 
 def _handle_incoming_message(
     event_data: dict,
     session_name: str,
     event_record: Optional[WhatsAppEvent] = None,
-) -> None:
+    is_history_sync: bool = False,
+) -> bool:
     """
     Handle an incoming or sync WhatsApp message event.
     """
@@ -1489,8 +1650,10 @@ def _handle_incoming_message(
         )
 
     # -----------------------------------------------------------------------
-    # Create WhatsAppMessage record.
+    # Create WhatsAppMessage record (preserving original WhatsApp timestamp).
     # -----------------------------------------------------------------------
+    msg_dt = _parse_waha_timestamp(event_data)
+
     # Generate an idempotency key for this message.
     body_hash = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
     msg_idempotency = hashlib.sha256(
@@ -1500,13 +1663,27 @@ def _handle_incoming_message(
     existing_message = WhatsAppMessage.objects.filter(
         idempotency_key=msg_idempotency
     ).first()
+    if not existing_message and waha_message_id:
+        existing_message = WhatsAppMessage.objects.filter(
+            conversation=conversation,
+            waha_message_id=waha_message_id,
+        ).first()
 
     if existing_message:
-        # Already recorded this message.
+        # Backfill original WhatsApp timestamp if missing on previously stored record
+        ts_updates = []
+        if not existing_message.waha_timestamp and msg_dt:
+            existing_message.waha_timestamp = msg_dt
+            ts_updates.append("waha_timestamp")
+        if not existing_message.sent_at and msg_dt:
+            existing_message.sent_at = msg_dt
+            ts_updates.append("sent_at")
+        if ts_updates:
+            existing_message.save(update_fields=ts_updates)
         if event_record:
             event_record.whatsapp_message = existing_message
             event_record.save(update_fields=["whatsapp_message"])
-        return
+        return False
 
     has_media = bool(event_data.get("hasMedia", False))
     _media_url = event_data.get("mediaUrl") or (event_data.get("media") or {}).get("url") or None
@@ -1542,17 +1719,23 @@ def _handle_incoming_message(
                 media_url=_media_url,
                 media_mime_type=_mime_type,
                 error_code=(group_author_name or "")[:50] if (is_group and not is_from_me) else None,
+                waha_timestamp=msg_dt,
+                sent_at=msg_dt,
+                created_at=msg_dt,
             )
 
-            # Update conversation metadata.
-            conversation.last_message_at = timezone.now()
-            conversation.last_message_preview = raw_body[:200] if raw_body else f"[{msg_type.capitalize()}]"
-            conversation.last_message_from_me = is_from_me
-            if not is_from_me:
+            # Update conversation metadata only if this message is newer than or equal to the latest message
+            conv_meta_updates = []
+            if not conversation.last_message_at or msg_dt >= conversation.last_message_at:
+                conversation.last_message_at = msg_dt
+                conversation.last_message_preview = raw_body[:200] if raw_body else f"[{msg_type.capitalize()}]"
+                conversation.last_message_from_me = is_from_me
+                conv_meta_updates.extend(["last_message_at", "last_message_preview", "last_message_from_me"])
+            if not is_from_me and not is_history_sync:
                 conversation.unread_count = conversation.unread_count + 1
-            conversation.save(update_fields=[
-                "last_message_at", "last_message_preview", "last_message_from_me", "unread_count"
-            ])
+                conv_meta_updates.append("unread_count")
+            if conv_meta_updates:
+                conversation.save(update_fields=list(set(conv_meta_updates)))
 
             # Update session receive count.
             if not is_from_me:
@@ -1570,7 +1753,7 @@ def _handle_incoming_message(
             if event_record:
                 event_record.whatsapp_message = wa_message
                 event_record.save(update_fields=["whatsapp_message"])
-            return
+            return False
         raise
 
     if has_media and wa_message.waha_message_id:
@@ -1608,11 +1791,13 @@ def _handle_incoming_message(
     )
 
     logger.info(
-        "Incoming WhatsApp message recorded: chat_id=%s matched=%s message_id=%s",
+        "Incoming WhatsApp message recorded: chat_id=%s matched=%s message_id=%s ts=%s",
         raw_from,
         is_matched,
         wa_message.pk,
+        msg_dt.isoformat(),
     )
+    return True
 
 
 def _handle_message_ack(
@@ -1764,6 +1949,17 @@ def _handle_session_status(
         success=mapped_status == WhatsAppSession.Status.READY,
     )
 
+    if mapped_status == WhatsAppSession.Status.READY and old_status != WhatsAppSession.Status.READY:
+        try:
+            import threading
+            threading.Thread(
+                target=sync_two_day_whatsapp_history,
+                kwargs={"session_name": session_name, "days": 2, "force": True},
+                daemon=True,
+            ).start()
+        except Exception as sync_err:
+            logger.debug("Auto 2-day history sync on session READY failed: %s", sync_err)
+
 
 # Compatibility shims for F() expressions (avoid importing at module level
 # to keep this file self-contained).
@@ -1777,26 +1973,169 @@ def models_f_whatsapp(field_name):
     return F(field_name)
 
 
-def sync_recent_waha_messages(messages_list: list, default_session_name: str = "default") -> int:
+def sync_recent_waha_messages(
+    messages_list: list,
+    default_session_name: str = "default",
+    days: int = 2,
+) -> int:
     """
-    Idempotently ingest recent messages from WAHA-NoWeb-Light's memory buffer
-    (/api/dashboard/stats -> messages) so any messages missed during webhook
-    URL misconfiguration are recovered into WhatsAppMessage.
+    Idempotently ingest messages from the last `days` days (default 2 days)
+    in strict ascending chronological order (oldest -> newest), preserving
+    each message's original WhatsApp timestamp.
     """
+    from datetime import timedelta
+
     if not isinstance(messages_list, list) or not messages_list:
         return 0
-    synced = 0
-    # Process in chronological order (oldest to newest)
-    for item in reversed(messages_list):
+
+    cutoff_dt = timezone.now() - timedelta(days=max(int(days or 2), 1))
+    candidates = []
+    seen_ids = set()
+
+    for item in messages_list:
         if not isinstance(item, dict):
             continue
+        m_id = str(item.get("id") or "")
+        if m_id and m_id in seen_ids:
+            continue
+        msg_dt = _parse_waha_timestamp(item)
+        if msg_dt < cutoff_dt:
+            continue
+        if m_id:
+            seen_ids.add(m_id)
+        candidates.append((msg_dt, item))
+
+    # Sort strictly oldest -> newest so conversation history and previews are ordered chronologically
+    candidates.sort(key=lambda pair: pair[0])
+
+    synced = 0
+    for _msg_dt, item in candidates:
         sess = str(item.get("session") or default_session_name or "default").strip()
         try:
-            _handle_incoming_message(item, sess, event_record=None)
-            synced += 1
+            created = _handle_incoming_message(item, sess, event_record=None, is_history_sync=True)
+            if created:
+                synced += 1
         except Exception as exc:
             logger.debug("sync_recent_waha_messages item skip: %s", exc)
     return synced
+
+
+def sync_two_day_whatsapp_history(
+    session_name: str = "default",
+    chat_id: Optional[str] = None,
+    days: int = 2,
+    force: bool = False,
+) -> dict:
+    """
+    Synchronize WhatsApp chat history and messages from the last `days` days (default 2 days).
+    Fetches any missing chats or messages from WAHA / WAHA-NoWeb-Light, preserves original
+    message timestamps, and reconciles conversation ordering.
+    """
+    from datetime import timedelta
+    from .client import get_waha_client
+
+    client = get_waha_client()
+    cutoff_dt = timezone.now() - timedelta(days=max(int(days or 2), 1))
+    collected = []
+    seen_ids = set()
+
+    def _add_msg(m: dict, fallback_chat_id: str = ""):
+        if not isinstance(m, dict):
+            return
+        msg_copy = dict(m)
+        if fallback_chat_id and not msg_copy.get("chatId"):
+            msg_copy["chatId"] = fallback_chat_id
+        if not msg_copy.get("session"):
+            msg_copy["session"] = session_name
+        m_id = str(msg_copy.get("id") or "")
+        if m_id and m_id in seen_ids:
+            return
+        if m_id:
+            seen_ids.add(m_id)
+        collected.append(msg_copy)
+
+    # 1. Pull buffered messages and webhook logs from WAHA-NoWeb-Light stats
+    try:
+        stats_msgs = client.get_recent_messages_from_stats(force=force)
+        for m in stats_msgs:
+            if chat_id:
+                m_chat = str(m.get("chatId") or m.get("from") or m.get("to") or "")
+                m_chat = re.sub(r":[0-9]+@", "@", m_chat).replace("@s.whatsapp.net", "@c.us")
+                target_norm = re.sub(r":[0-9]+@", "@", chat_id).replace("@s.whatsapp.net", "@c.us")
+                if m_chat and target_norm and m_chat != target_norm:
+                    continue
+            _add_msg(m)
+    except Exception as e:
+        logger.debug("2-day sync stats fetch skipped: %s", e)
+
+    # 2. Pull per-chat message history if WAHA engine supports /api/chats/{chat_id}/messages
+    target_chat_ids = []
+    if chat_id:
+        target_chat_ids.append(chat_id)
+    else:
+        try:
+            recent_convs = WhatsAppConversation.objects.filter(
+                session__session_name=session_name,
+                is_deleted=False,
+            ).order_by("-last_message_at", "-updated_at")[:25]
+            for c in recent_convs:
+                if c.chat_id and not c.chat_id.startswith("crm_group_"):
+                    target_chat_ids.append(c.chat_id)
+        except Exception:
+            pass
+
+    for cid in target_chat_ids:
+        try:
+            chat_msgs = client.get_messages(session_name, cid, limit=200)
+            if isinstance(chat_msgs, list):
+                for cm in chat_msgs:
+                    _add_msg(cm, fallback_chat_id=cid)
+        except Exception:
+            pass
+
+    # 3. Filter to 2-day window, sort chronologically (oldest -> newest), and store missing messages
+    synced_count = sync_recent_waha_messages(
+        collected,
+        default_session_name=session_name,
+        days=days,
+    )
+
+    # 4. Reconcile conversation last_message_at & preview from actual latest message in DB
+    try:
+        conv_qs = WhatsAppConversation.objects.filter(
+            session__session_name=session_name,
+            is_deleted=False,
+        )
+        if chat_id:
+            conv_qs = conv_qs.filter(chat_id=chat_id)
+        for conv in conv_qs[:50]:
+            latest_msg = (
+                WhatsAppMessage.objects.filter(conversation=conv, is_deleted=False)
+                .order_by("-waha_timestamp", "-sent_at", "-created_at")
+                .first()
+            )
+            if latest_msg:
+                eff_ts = latest_msg.waha_timestamp or latest_msg.sent_at or latest_msg.created_at
+                if eff_ts and conv.last_message_at != eff_ts:
+                    conv.last_message_at = eff_ts
+                    conv.last_message_preview = (
+                        latest_msg.body_preview
+                        or latest_msg.full_body[:200]
+                        or f"[{latest_msg.message_type.capitalize()}]"
+                    )
+                    conv.last_message_from_me = (
+                        latest_msg.direction == WhatsAppMessage.Direction.OUTBOUND
+                    )
+                    conv.save(update_fields=["last_message_at", "last_message_preview", "last_message_from_me"])
+    except Exception as rec_err:
+        logger.debug("2-day sync conversation reconciliation warning: %s", rec_err)
+
+    return {
+        "synced": synced_count,
+        "checked": len(collected),
+        "days": days,
+        "cutoff": cutoff_dt.isoformat(),
+    }
 
 
 
