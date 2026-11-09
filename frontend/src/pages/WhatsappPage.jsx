@@ -855,8 +855,8 @@ export default function WhatsappPage() {
     const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
 
     // Auto-select caller conversation if present in conversations list
-    if (targetCall.chat_id && conversations?.length > 0) {
-      const match = conversations.find((c) => c.chat_id === targetCall.chat_id);
+    if (targetCall.chat_id && chats?.length > 0) {
+      const match = chats.find((c) => c.chat_id === targetCall.chat_id);
       if (match && selectedChat?.chat_id !== match.chat_id) {
         setSelectedChat(match);
       }
@@ -890,7 +890,7 @@ export default function WhatsappPage() {
       console.error('WebRTC Audio connect error:', audioErr);
       showToast('Connected, but audio channel initialization failed.', 'error');
     }
-  }, [incomingCall, selectedSession?.session_name, conversations, selectedChat?.chat_id, initWebRTCAudioChannel, showToast]);
+  }, [incomingCall, selectedSession?.session_name, chats, selectedChat?.chat_id, initWebRTCAudioChannel, showToast]);
 
   // Reject / Decline Incoming WhatsApp Voice Call
   const handleRejectIncomingCall = useCallback(async (explicitCall = null) => {
