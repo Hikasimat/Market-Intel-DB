@@ -7,9 +7,18 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.read = 0;
     this.write = 0;
     this.available = 0;
+    this.blocks = 0;
     this.port.onmessage = (e) => {
       const data = e.data;
-      if (!data || !data.length) return;
+      if (!data) return;
+      if (data.type === "clear") {
+        this.ring.fill(0);
+        this.read = 0;
+        this.write = 0;
+        this.available = 0;
+        return;
+      }
+      if (!data.length) return;
       for (let i = 0; i < data.length; i += 1) {
         this.ring[this.write] = data[i];
         this.write = (this.write + 1) % RING_SIZE;
@@ -31,12 +40,17 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       let sample = 0;
       if (this.available > 0) {
         sample = this.ring[this.read];
+        this.ring[this.read] = 0;
         this.read = (this.read + 1) % RING_SIZE;
         this.available -= 1;
       }
       for (let ch = 0; ch < channelCount; ch += 1) {
         output[ch][i] = sample;
       }
+    }
+    this.blocks = (this.blocks + 1) % 8;
+    if (this.blocks === 0) {
+      this.port.postMessage({ type: "status", available: this.available });
     }
     return true;
   }

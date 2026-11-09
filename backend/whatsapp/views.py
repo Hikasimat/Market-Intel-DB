@@ -2300,7 +2300,20 @@ def _build_audio_ws_url(request, session_name: str, call_id: str) -> str:
     else:
         ws_base = waha_url
 
-    clean_sess = quote(str(session_name or "default"), safe="")
+    resolved_sess = str(session_name or "default").strip() or "default"
+    if resolved_sess == "default":
+        try:
+            from .client import _CALLING_STATUS_CACHE
+            for cached_key, cached_val in list(_CALLING_STATUS_CACHE.items()):
+                if isinstance(cached_val, dict) and cached_val.get("paired"):
+                    cand = cached_val.get("resolved_session") or cached_key
+                    if cand and cand != "default":
+                        resolved_sess = str(cand)
+                        break
+        except Exception:
+            pass
+
+    clean_sess = quote(resolved_sess, safe="")
     clean_call = quote(str(call_id).replace("call_", ""), safe="")
     query = f"?x-api-key={quote(api_key, safe='')}" if api_key else ""
     return f"{ws_base}/api/calling/sessions/{clean_sess}/calls/{clean_call}/socket{query}"
@@ -2563,11 +2576,13 @@ class WhatsAppCallWebRTCView(APIView):
         try:
             result = client.exchange_webrtc(target_session, call_id, sdp_offer)
             sdp_answer = result.get("sdpAnswer") or result.get("sdp_answer") or ""
+            session_used = result.get("session_name") or target_session
             return Response({
                 "sdp_answer": sdp_answer,
                 "sdpAnswer": sdp_answer,
                 "call_id": call_id,
-                "audio_ws_url": _build_audio_ws_url(request, target_session, call_id),
+                "session_name": session_used,
+                "audio_ws_url": _build_audio_ws_url(request, session_used, call_id),
             }, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to exchange WebRTC offer for call %s: %s", call_id, exc)

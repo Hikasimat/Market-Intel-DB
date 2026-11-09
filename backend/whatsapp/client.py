@@ -1005,6 +1005,20 @@ class WAHAClient:
         except Exception:
             pass
 
+        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+            if sess == primary:
+                continue
+            try:
+                _status, body = self._request(
+                    "DELETE",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}",
+                    timeout=5.0,
+                )
+                if isinstance(body, dict):
+                    return body
+            except Exception:
+                continue
+
         return {"status": "ended"}
 
     def exchange_webrtc(self, session_name: str, call_id: str, sdp_offer: str) -> dict:
@@ -1020,10 +1034,27 @@ class WAHAClient:
                 timeout=8.0,
             )
             if isinstance(body, dict):
+                body["session_name"] = primary
                 return body
         except Exception as e:
             primary_error = e
             logger.info("exchange_webrtc attempt failed for session '%s': %s", primary, e)
+
+        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
+            if sess == primary:
+                continue
+            try:
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{sess}/calls/{call_id}/webrtc",
+                    payload=payload,
+                    timeout=8.0,
+                )
+                if isinstance(body, dict):
+                    body["session_name"] = sess
+                    return body
+            except Exception:
+                continue
 
         raise WAHAServiceError(f"Failed to exchange WebRTC offer: {primary_error}")
 
