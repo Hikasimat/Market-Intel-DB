@@ -3500,12 +3500,30 @@ export default function WhatsappPage() {
                     >
                       <div className="flex items-center gap-2 min-w-0 flex-1">
                         <div className="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs flex-shrink-0">
-                          {(member.name || member.phoneNumber || 'U').charAt(0).toUpperCase()}
+                          {(() => {
+                            const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
+                            let label = member.name;
+                            if (isLid(label) || !label) {
+                              label = member.is_current ? (selectedSession?.whatsapp_name || 'You') : (selectedChat?.contact_name || selectedChat?.whatsapp_name || 'U');
+                            }
+                            const clean = label.replace(/^[+]/, '').trim();
+                            return (clean.charAt(0) || 'U').toUpperCase();
+                          })()}
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
                             <span className="font-semibold text-slate-800 text-xs truncate">
-                              {member.name || member.phoneNumber}
+                              {(() => {
+                                const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
+                                if (member.is_current) {
+                                  return (member.name && !isLid(member.name)) ? member.name : (selectedSession?.whatsapp_name || 'You');
+                                }
+                                if (member.name && !isLid(member.name)) return member.name;
+                                if (member.phoneNumber && !isLid(member.phoneNumber)) return member.phoneNumber;
+                                if (selectedChat?.contact_name && !isLid(selectedChat.contact_name)) return selectedChat.contact_name;
+                                if (selectedChat?.phone_number && !isLid(selectedChat.phone_number)) return selectedChat.phone_number;
+                                return member.name || 'Member';
+                              })()}
                             </span>
                             {member.is_current && (
                               <span className="text-[9px] bg-emerald-200 text-emerald-900 font-bold px-1 py-0.2 rounded-xs">
@@ -3523,21 +3541,38 @@ export default function WhatsappPage() {
                               </span>
                             )}
                           </div>
-                          {(member.designation || member.phoneNumber) && (
-                            <p className="text-[10px] text-slate-500 truncate">
-                              {member.designation ? `${member.designation} • ` : ''}
-                              <span className="font-mono">{member.phoneNumber || ''}</span>
-                            </p>
-                          )}
+                          {(() => {
+                            const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
+                            let displayPhone = member.phoneNumber;
+                            if (isLid(displayPhone) || !displayPhone) {
+                              if (member.is_current) {
+                                displayPhone = selectedSession?.phone_number || '';
+                              } else if (selectedChat?.phone_number && !isLid(selectedChat.phone_number)) {
+                                displayPhone = selectedChat.phone_number;
+                              } else {
+                                displayPhone = '';
+                              }
+                            }
+                            return (member.designation || displayPhone) ? (
+                              <p className="text-[10px] text-slate-500 truncate">
+                                {member.designation ? `${member.designation}${displayPhone ? ' • ' : ''}` : ''}
+                                {displayPhone && <span className="font-mono">{displayPhone}</span>}
+                              </p>
+                            ) : null;
+                          })()}
                         </div>
                       </div>
 
                       <div className="flex items-center gap-1 flex-shrink-0">
-                        {!member.is_current && (member.phoneNumber || member.chatId) && (
+                        {!member.is_current && (member.phoneNumber || member.chatId || selectedChat?.phone_number) && (
                           <button
                             type="button"
                             onClick={() => {
-                              const targetId = member.phoneNumber || member.chatId;
+                              const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
+                              let targetId = member.phoneNumber;
+                              if (isLid(targetId) || !targetId) {
+                                targetId = selectedChat?.phone_number || member.chatId;
+                              }
                               handleStartNewChat(
                                 targetId,
                                 member.name || targetId,
@@ -3555,7 +3590,11 @@ export default function WhatsappPage() {
                         {(wahaContact?.is_group || selectedChat?.chat_id?.endsWith('@g.us') || selectedChat?.is_group) && !member.is_current && (
                           <button
                             type="button"
-                            onClick={() => handleRemoveGroupMember(member.phoneNumber || member.chatId, member.name)}
+                            onClick={() => {
+                              const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
+                              const remPhone = (!isLid(member.phoneNumber) ? member.phoneNumber : null) || selectedChat?.phone_number || member.phoneNumber || member.chatId;
+                              handleRemoveGroupMember(remPhone, member.name);
+                            }}
                             disabled={removingMemberPhone === (member.phoneNumber || member.chatId)}
                             className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition flex-shrink-0 cursor-pointer"
                             title={`Remove ${member.name || member.phoneNumber} from group`}

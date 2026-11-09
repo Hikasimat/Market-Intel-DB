@@ -1589,6 +1589,17 @@ def _handle_incoming_message(
             if group_name and conversation.whatsapp_name != group_name:
                 conversation.whatsapp_name = group_name
                 conv_updates.append("whatsapp_name")
+            # Map group author LID to real senderPn if available
+            if sender_pn and group_author:
+                p_lid = re.sub(r"\D+", "", str(group_author).split("@")[0].split(":")[0])
+                p_pn = re.sub(r"\D+", "", str(sender_pn).split("@")[0].split(":")[0])
+                if len(p_lid) >= 14 and 8 <= len(p_pn) <= 13:
+                    meta = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+                    lid_map = meta.get("lid_map") or {}
+                    lid_map[p_lid] = f"+{p_pn}"
+                    meta["lid_map"] = lid_map
+                    conversation.metadata = meta
+                    conv_updates.append("metadata")
         elif extracted_name and (not conversation.whatsapp_name or conversation.whatsapp_name.startswith("+") or "@" in conversation.whatsapp_name):
             conversation.whatsapp_name = extracted_name
             conv_updates.append("whatsapp_name")
