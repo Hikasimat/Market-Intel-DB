@@ -1206,19 +1206,26 @@ def _handle_call_event(
 
     # Track or clear active incoming call in real-time
     clean_d = re.sub(r"\D+", "", str(raw_from or target_chat_id).split("@")[0].split(":")[0])
+    phone_from_jid = ""
+    target_str = str(target_chat_id or raw_from or "").lower()
+    if "@c.us" in target_str or "@s.whatsapp.net" in target_str:
+        jid_digits = re.sub(r"\D+", "", target_str.split("@")[0].split(":")[0])
+        if jid_digits and not jid_digits.startswith("7658"):
+            phone_from_jid = f"+{jid_digits}"
+
     display_name = (
         conversation.prospect_contact.contact_name
         if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
         else (
             conversation.whatsapp_name
-            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id)
-            else (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "WhatsApp Contact")
+            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id and not str(conversation.whatsapp_name).startswith("+7658"))
+            else (phone_from_jid or (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "WhatsApp Contact"))
         )
     )
     phone_display = (
         conversation.phone_number
-        if (conversation and conversation.phone_number)
-        else (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "")
+        if (conversation and conversation.phone_number and not str(conversation.phone_number).startswith("+7658"))
+        else (phone_from_jid or (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else ""))
     )
 
     if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):

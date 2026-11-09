@@ -1074,10 +1074,19 @@ class WhatsAppConversationsView(APIView):
         for c in conversations:
             if not c.chat_id.endswith("@g.us"):
                 raw_d = ""
-                if c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
+                # Rule: Before the @c.us is the user mobile number (e.g. 9360239398@c.us -> 9360239398)
+                if c.chat_id and ("@c.us" in c.chat_id.lower() or "@s.whatsapp.net" in c.chat_id.lower()):
+                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                    if cand_d and not cand_d.startswith("7658"):
+                        raw_d = cand_d
+                        if not c.phone_number or str(c.phone_number).startswith("+7658"):
+                            c.phone_number = f"+{cand_d}"
+                if not raw_d and c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
                     raw_d = re.sub(r"\D+", "", str(c.phone_number))
-                elif not c.chat_id.endswith("@lid"):
-                    raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                elif not raw_d and not c.chat_id.endswith("@lid"):
+                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                    if not cand_d.startswith("7658"):
+                        raw_d = cand_d
                 if len(raw_d) >= 8 and len(raw_d) <= 13:
                     suffix = raw_d[-10:]
                     if c.prospect_contact_id:
@@ -1094,10 +1103,16 @@ class WhatsAppConversationsView(APIView):
                 key = f"contact_{c.prospect_contact_id}"
             else:
                 raw_d = ""
-                if c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
+                if c.chat_id and ("@c.us" in c.chat_id.lower() or "@s.whatsapp.net" in c.chat_id.lower()):
+                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                    if cand_d and not cand_d.startswith("7658"):
+                        raw_d = cand_d
+                if not raw_d and c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
                     raw_d = re.sub(r"\D+", "", str(c.phone_number))
-                elif not c.chat_id.endswith("@lid"):
-                    raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                elif not raw_d and not c.chat_id.endswith("@lid"):
+                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
+                    if not cand_d.startswith("7658"):
+                        raw_d = cand_d
                 suffix = raw_d[-10:] if (len(raw_d) >= 8 and len(raw_d) <= 13) else None
                 if suffix and suffix in phone_to_key:
                     key = phone_to_key[suffix]
@@ -2266,10 +2281,26 @@ class WhatsAppContactInfoView(APIView):
                     "is_current": True,
                 })
 
+        # Resolve contact mobile number: before the @c.us is the user mobile number (e.g. 9360239398@c.us -> +9360239398)
+        contact_phone = ""
+        target_jid = (conv.chat_id if conv else chat_id) or ""
+        if "@c.us" in target_jid.lower() or "@s.whatsapp.net" in target_jid.lower():
+            c_digits = re.sub(r"\D+", "", target_jid.split("@")[0].split(":")[0])
+            if c_digits and not c_digits.startswith("7658"):
+                contact_phone = f"+{c_digits}"
+        elif conv and conv.phone_number:
+            c_digits = re.sub(r"\D+", "", str(conv.phone_number))
+            if c_digits and not c_digits.startswith("7658"):
+                contact_phone = f"+{c_digits}"
+        elif contact and contact.phone_number:
+            c_digits = re.sub(r"\D+", "", str(contact.phone_number))
+            if c_digits and not c_digits.startswith("7658"):
+                contact_phone = f"+{c_digits}"
+
         data = {
             "chatId": conv.chat_id if conv else chat_id,
-            "phoneNumber": clean_phone,
-            "name": (conv.whatsapp_name if conv else "") or (contact.contact_name if contact else ""),
+            "phoneNumber": contact_phone or clean_phone,
+            "name": (contact.contact_name if contact else "") or ((conv.whatsapp_name if (conv and not str(conv.whatsapp_name).startswith("+7658")) else "") or contact_phone or ""),
             "company": prospect.company_name if prospect else "",
             "contact_name": contact.contact_name if contact else "",
             "designation": getattr(contact, "designation", "") if contact else "",

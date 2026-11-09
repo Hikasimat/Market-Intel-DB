@@ -106,7 +106,12 @@ function ContactAvatar({ chat, size = "md", avatarVersion }) {
       initials = (words[0][0] + words[words.length - 1][0]).toUpperCase();
     }
   } else {
-    const rawNum = chat.phone_number || chat.prospect_phone || chat.chat_id || "";
+    let rawNum = "";
+    if (chat.chat_id && (chat.chat_id.includes("@c.us") || chat.chat_id.includes("@s.whatsapp.net"))) {
+      rawNum = chat.chat_id.split("@")[0].split(":")[0];
+    } else {
+      rawNum = chat.phone_number || chat.prospect_phone || chat.chat_id || "";
+    }
     const cleanDigits = rawNum.replace(/\D/g, "").slice(-2);
     if (cleanDigits) initials = cleanDigits;
   }
@@ -983,7 +988,7 @@ export default function WhatsappPage() {
       return;
     }
 
-    const rawPhone = selectedChat.phone_number || (selectedChat.chat_id || '').split('@')[0].split(':')[0];
+    const rawPhone = getConversationPhoneNumber(selectedChat) || selectedChat.phone_number || (selectedChat.chat_id || '').split('@')[0].split(':')[0];
     const cleanPhone = (rawPhone || '').replace(/\D+/g, '');
     if (!cleanPhone) {
       showToast('No valid phone number found for this contact.', 'error');
@@ -1869,10 +1874,44 @@ export default function WhatsappPage() {
   const formatPhone = (val) => {
     if (!val) return '';
     if (typeof val !== 'string') return '';
-    if (val.includes('@lid')) return '';
+    if (val.includes('@lid') || val.includes('@g.us')) return '';
+    // Rule: Before the @c.us (or @s.whatsapp.net) is the user mobile number (e.g. 9360239398@c.us -> 9360239398)
     const num = val.split('@')[0].split(':')[0].replace(/\D/g, '');
-    if (!num || num.length < 7 || num.length > 15) return '';
+    if (!num || num.startsWith('7658')) return '';
     return `+${num}`;
+  };
+
+  // Extract and format the user's mobile number: before the @c.us is the contact number (e.g. 9360239398@c.us -> +9360239398)
+  const getConversationPhoneNumber = (chat) => {
+    if (!chat) return '';
+    const chatId = chat.chat_id || '';
+
+    // 1. Before the @c.us is the user mobile number
+    if (chatId && (chatId.includes('@c.us') || chatId.includes('@s.whatsapp.net'))) {
+      const num = chatId.split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (num && !num.startsWith('7658')) {
+        return `+${num}`;
+      }
+    }
+
+    // 2. From phone_number
+    if (chat.phone_number) {
+      const num = String(chat.phone_number).split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (num && !num.startsWith('7658')) {
+        return `+${num}`;
+      }
+    }
+
+    // 3. From prospect_phone
+    if (chat.prospect_phone) {
+      const num = String(chat.prospect_phone).split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (num && !num.startsWith('7658')) {
+        return `+${num}`;
+      }
+    }
+
+    // 4. Fallback formatPhone
+    return formatPhone(chatId);
   };
 
   const getContactDisplayName = (chat) => {
@@ -1889,12 +1928,12 @@ export default function WhatsappPage() {
       return chat.whatsapp_name;
     }
 
-    // 3. Known phone number
-    const phone = chat.phone_number || chat.prospect_phone || formatPhone(chat.chat_id);
-    if (phone) return phone.startsWith('+') ? phone : `+${phone}`;
+    // 3. Contact mobile number (derived from before @c.us)
+    const phone = getConversationPhoneNumber(chat);
+    if (phone) return phone;
 
     // 4. Fallback name
-    if (chat.whatsapp_name) return chat.whatsapp_name;
+    if (chat.whatsapp_name && !chat.whatsapp_name.startsWith('+7658')) return chat.whatsapp_name;
 
     return 'WhatsApp Contact';
   };
@@ -1904,8 +1943,7 @@ export default function WhatsappPage() {
     if (chat.is_group || chat.chat_id?.endsWith('@g.us')) {
       return 'WhatsApp Group';
     }
-    const rawPhone = chat.phone_number || chat.prospect_phone || formatPhone(chat.chat_id);
-    const phone = rawPhone ? (rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`) : '';
+    const phone = getConversationPhoneNumber(chat);
 
     if (chat.is_matched && chat.prospect_name) {
       const parts = [chat.prospect_name];
@@ -1929,7 +1967,7 @@ export default function WhatsappPage() {
 
     if (searchQuery) {
       const name = getContactDisplayName(chat).toLowerCase();
-      const phone = (chat.phone_number || chat.prospect_phone || formatPhone(chat.chat_id) || '').toLowerCase();
+      const phone = (getConversationPhoneNumber(chat) || '').toLowerCase();
       const comp = (chat.prospect_name || '').toLowerCase();
       const rawId = (chat.chat_id || '').toLowerCase();
       const q = searchQuery.toLowerCase();
@@ -1940,12 +1978,12 @@ export default function WhatsappPage() {
 
     // Deduplicate so chats with identical phone number never appear twice
     if (!chat.is_synthetic && !chat.chat_id?.endsWith('@g.us')) {
-      const rawD = (chat.phone_number || chat.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+      const rawD = (getConversationPhoneNumber(chat) || chat.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
       const key = rawD.length >= 10 ? rawD.slice(-10) : rawD;
       if (key) {
         return index === self.findIndex(other => {
           if (other.chat_id?.endsWith('@g.us')) return false;
-          const oRaw = (other.phone_number || other.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+          const oRaw = (getConversationPhoneNumber(other) || other.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
           const oKey = oRaw.length >= 10 ? oRaw.slice(-10) : oRaw;
           return oKey && oKey === key;
         });
@@ -3153,11 +3191,11 @@ export default function WhatsappPage() {
             {!isEditingPhone ? (
               <div className="flex items-center justify-center gap-1.5 mt-1 text-xs text-slate-600 font-mono">
                 <Phone className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-                <span>{selectedChat.phone_number || selectedChat.prospect_phone || (formatPhone(selectedChat.chat_id) || 'No phone set')}</span>
+                <span>{getConversationPhoneNumber(selectedChat) || 'No phone set'}</span>
                 <button
                   type="button"
                   onClick={() => {
-                    setEditPhoneValue(selectedChat.phone_number || selectedChat.prospect_phone || formatPhone(selectedChat.chat_id) || '');
+                    setEditPhoneValue(getConversationPhoneNumber(selectedChat) || '');
                     setIsEditingPhone(true);
                   }}
                   className="p-1 rounded-full text-slate-400 hover:text-emerald-600 hover:bg-slate-100 transition"
