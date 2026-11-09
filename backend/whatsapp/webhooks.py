@@ -962,22 +962,20 @@ def _handle_call_event(
         event_record.whatsapp_message = wa_message
         event_record.save(update_fields=["whatsapp_message"])
 
-    _write_audit_log(
-        action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,
-        prospect_contact=conversation.prospect_contact,
-        prospect=conversation.prospect,
-        session_name=session_name,
-        chat_id=target_chat_id,
-        performed_by=None,
-        details={
-            "event_type": event_type,
-            "call_id": call_id,
-            "status": raw_status,
-            "isVideo": is_video,
-            "isGroup": is_group,
-            "label": call_label,
-        },
-    )
+    try:
+        _write_audit_log(
+            action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,
+            prospect_contact=conversation.prospect_contact,
+            session_name=session_name,
+            chat_id=target_chat_id,
+            performed_by=None,
+            message_id=wa_message.pk if wa_message else None,
+            success=True,
+            result_detail=f"{event_type}:{call_label}:{call_id}"[:500],
+        )
+    except Exception as audit_err:
+        logger.debug("Call event audit logging non-fatal error: %s", audit_err)
+
     logger.info("Processed call event %s for %s (%s)", event_type, target_chat_id, call_label)
 
     # Track or clear active incoming call in real-time
