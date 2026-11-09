@@ -11,6 +11,7 @@ Security principles:
 """
 
 from rest_framework import serializers
+import re
 
 from .models import (
     WhatsAppAuditLog,
@@ -156,17 +157,26 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
     def get_is_group(self, obj):
         return bool(obj.chat_id and obj.chat_id.endswith("@g.us"))
 
+    def _is_lid(self, val):
+        if not val:
+            return False
+        digits = re.sub(r"\D+", "", str(val))
+        return len(digits) > 13 or digits.startswith(("7658", "2262", "2167"))
+
     def get_contact_name(self, obj):
         if obj.chat_id and obj.chat_id.endswith("@g.us"):
             return getattr(obj, "whatsapp_name", None) or "WhatsApp Group"
         if obj.prospect_contact and obj.prospect_contact.contact_name:
             return obj.prospect_contact.contact_name
-        if getattr(obj, "whatsapp_name", None) and not str(obj.whatsapp_name).startswith("+7658") and not "@" in str(obj.whatsapp_name):
-            return obj.whatsapp_name
+        w_name = getattr(obj, "whatsapp_name", None)
+        if w_name and not self._is_lid(w_name) and "@" not in str(w_name):
+            return w_name
         phone = self.get_phone_number(obj)
         if phone:
             return phone
-        return getattr(obj, "whatsapp_name", None) or None
+        if w_name and not self._is_lid(w_name):
+            return w_name
+        return "WhatsApp Contact"
 
     def get_prospect_name(self, obj):
         if obj.prospect and obj.prospect.company_name:
@@ -182,26 +192,26 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
             if "@c.us" in cid.lower() or "@s.whatsapp.net" in cid.lower():
                 raw = cid.split("@")[0].split(":")[0]
                 digits = re.sub(r"\D+", "", raw)
-                if digits and not digits.startswith("7658"):
+                if digits and not self._is_lid(digits):
                     return f"+{digits}" if not raw.startswith("+") else raw
 
         if obj.prospect_contact:
             val = getattr(obj.prospect_contact, 'phone_number', None) or getattr(obj.prospect_contact, 'phone', None)
             if val:
                 digits = re.sub(r"\D+", "", str(val))
-                if digits and not digits.startswith("7658"):
+                if digits and not self._is_lid(digits):
                     return f"+{digits}" if not str(val).startswith("+") else str(val)
 
         if obj.phone_number:
             raw = str(obj.phone_number).strip()
             digits = re.sub(r"\D+", "", raw)
-            if digits and not digits.startswith("7658"):
+            if digits and not self._is_lid(digits):
                 return f"+{digits}" if not raw.startswith("+") else raw
 
         if obj.chat_id and not obj.chat_id.endswith('@lid') and not obj.chat_id.endswith('@g.us'):
             digits = obj.chat_id.split('@')[0].split(':')[0]
             digits = re.sub(r"\D+", "", digits)
-            if digits and not digits.startswith("7658"):
+            if digits and not self._is_lid(digits):
                 return f"+{digits}"
 
         return None

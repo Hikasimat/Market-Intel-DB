@@ -668,22 +668,32 @@ def _validate_event_schema(payload: dict) -> tuple[str, str, dict]:
     return event_type, session_name, event_data
 
 
+def _is_lid(val: str) -> bool:
+    if not val:
+        return False
+    digits = re.sub(r"\D+", "", str(val))
+    return len(digits) > 13 or digits.startswith(("7658", "2262", "2167")) or str(val).endswith("@lid")
+
+
 def _extract_phone_digits(chat_id: str) -> Optional[str]:
     """
     Safely extract phone digits from a WhatsApp chat ID.
-
-    Returns None if the chat ID is not a valid individual contact.
+    Per user rule: before the @c.us (or @s.whatsapp.net) is the user mobile number.
+    @lid JIDs are internal WhatsApp device identifiers and NOT phone numbers.
     """
     if not isinstance(chat_id, str):
         return None
 
-    # Only process individual chats (not groups).
-    if not (chat_id.endswith("@c.us") or chat_id.endswith("@lid") or chat_id.endswith("@s.whatsapp.net")):
+    # Only process individual chats with @c.us or @s.whatsapp.net (NOT @lid or @g.us)
+    if not (chat_id.endswith("@c.us") or chat_id.endswith("@s.whatsapp.net")):
         return None
 
     digits = chat_id.split("@")[0].split(":")[0]
 
     if not PHONE_DIGITS_RE.match(digits):
+        return None
+
+    if _is_lid(digits):
         return None
 
     return digits
@@ -1080,21 +1090,80 @@ def _handle_call_event(
         except Exception:
             pass
 
-    # Find or create conversation strictly for this user session
+    # 1. Resolve phone digits if available (from @c.us or @s.whatsapp.net)
+    phone_digits = _extract_phone_digits(target_chat_id)
+    if not phone_digits and raw_from:
+        phone_digits = _extract_phone_digits(raw_from)
+
+    # 2. If target_chat_id is @lid or phone_digits is not yet found, check event_data phone fields
+    resolved_phone = None
+    for k in ("callerPhone", "phoneNumber", "senderPn", "participantPn", "callerPn", "phone"):
+        cand = event_data.get(k)
+        if cand and not str(cand).endswith("@lid"):
+            cand_d = re.sub(r"\D+", "", str(cand).split("@")[0].split(":")[0])
+            if 8 <= len(cand_d) <= 13 and not _is_lid(cand_d):
+                phone_digits = cand_d
+                resolved_phone = f"+{cand_d}"
+                break
+
+    # 3. If target_chat_id is @lid and still no phone_digits, query WAHA contact info
+    push_name = str(event_data.get("callerName") or event_data.get("name") or event_data.get("pushName") or "").strip()
+    if (not phone_digits or target_chat_id.endswith("@lid")) and not target_chat_id.endswith("@g.us"):
+        try:
+            from .client import get_waha_client
+            w_client = get_waha_client()
+            c_info = w_client.get_contact_info(session_name, target_chat_id)
+            if isinstance(c_info, dict):
+                if not push_name:
+                    push_name = str(c_info.get("name") or c_info.get("pushname") or "").strip()
+                for field in ("number", "phone", "id"):
+                    val = c_info.get(field)
+                    if val and not str(val).endswith("@lid"):
+                        d = re.sub(r"\D+", "", str(val).split("@")[0].split(":")[0])
+                        if 8 <= len(d) <= 13 and not _is_lid(d):
+                            phone_digits = d
+                            resolved_phone = f"+{d}"
+                            break
+        except Exception:
+            pass
+
+    # 4. Build candidate chat IDs to match existing conversations
+    candidate_chat_ids = [target_chat_id]
+    if "@s.whatsapp.net" in target_chat_id:
+        candidate_chat_ids.append(target_chat_id.replace("@s.whatsapp.net", "@c.us"))
+    elif "@c.us" in target_chat_id:
+        candidate_chat_ids.append(target_chat_id.replace("@c.us", "@s.whatsapp.net"))
+    if phone_digits:
+        candidate_chat_ids.extend([f"{phone_digits}@c.us", f"{phone_digits}@s.whatsapp.net"])
+
+    # 5. Find or create conversation strictly for this user session
     conversation = WhatsAppConversation.objects.filter(
-        chat_id=target_chat_id,
+        chat_id__in=candidate_chat_ids,
         session=session_obj,
         is_deleted=False,
-    ).first()
+    ).order_by("-updated_at").first()
     if not conversation and session_obj.owner:
         conversation = WhatsAppConversation.objects.filter(
-            chat_id=target_chat_id,
+            chat_id__in=candidate_chat_ids,
             session__owner=session_obj.owner,
             is_deleted=False,
-        ).first()
+        ).order_by("-updated_at").first()
 
-    if not conversation:
-        phone_digits = _extract_phone_digits(target_chat_id)
+    # If still not found by chat_id, but we have phone_digits, search by phone_number
+    if not conversation and phone_digits:
+        suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits[-8:]
+        conversation = WhatsAppConversation.objects.filter(
+            session=session_obj,
+            phone_number__icontains=suffix,
+            is_deleted=False,
+        ).exclude(chat_id__endswith="@g.us").first()
+
+    if conversation:
+        # If conversation exists but has no valid phone or has an LID stored, update it
+        if phone_digits and (not conversation.phone_number or _is_lid(conversation.phone_number)):
+            conversation.phone_number = f"+{phone_digits}"
+            conversation.save(update_fields=["phone_number"])
+    else:
         matched_contact = None
         if phone_digits and len(phone_digits) >= 8:
             from prospects.models import ProspectContact
@@ -1102,15 +1171,22 @@ def _handle_call_event(
             matched_contact = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
 
         is_grp = target_chat_id.endswith("@g.us")
+        canonical_chat_id = f"{phone_digits}@c.us" if (phone_digits and target_chat_id.endswith("@lid")) else target_chat_id
         phone_formatted = f"+{phone_digits}" if phone_digits else None
+        initial_name = (
+            "WhatsApp Group" if is_grp
+            else (matched_contact.contact_name if matched_contact
+            else (push_name if push_name and not _is_lid(push_name) and "@" not in push_name
+            else (phone_formatted or "WhatsApp Contact")))
+        )
         conversation = WhatsAppConversation.objects.create(
             session=session_obj,
-            chat_id=target_chat_id,
+            chat_id=canonical_chat_id,
             phone_number=phone_formatted if not is_grp else None,
             prospect_contact=matched_contact if not is_grp else None,
             prospect=matched_contact.prospect if matched_contact else None,
             is_matched=matched_contact is not None or is_grp,
-            whatsapp_name="WhatsApp Group" if is_grp else (matched_contact.contact_name if matched_contact else (phone_formatted or target_chat_id)),
+            whatsapp_name=initial_name,
         )
 
     # Idempotent call record handling
@@ -1210,22 +1286,22 @@ def _handle_call_event(
     target_str = str(target_chat_id or raw_from or "").lower()
     if "@c.us" in target_str or "@s.whatsapp.net" in target_str:
         jid_digits = re.sub(r"\D+", "", target_str.split("@")[0].split(":")[0])
-        if jid_digits and not jid_digits.startswith("7658"):
+        if jid_digits and not _is_lid(jid_digits):
             phone_from_jid = f"+{jid_digits}"
 
+    phone_display = (
+        conversation.phone_number
+        if (conversation and conversation.phone_number and not _is_lid(conversation.phone_number))
+        else (phone_from_jid or (f"+{phone_digits}" if (phone_digits and not _is_lid(phone_digits)) else ""))
+    )
     display_name = (
         conversation.prospect_contact.contact_name
         if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
         else (
             conversation.whatsapp_name
-            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id and not str(conversation.whatsapp_name).startswith("+7658"))
-            else (phone_from_jid or (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else "WhatsApp Contact"))
+            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id and not _is_lid(conversation.whatsapp_name) and "@" not in conversation.whatsapp_name)
+            else (phone_display or (push_name if push_name and not _is_lid(push_name) else "WhatsApp Contact"))
         )
-    )
-    phone_display = (
-        conversation.phone_number
-        if (conversation and conversation.phone_number and not str(conversation.phone_number).startswith("+7658"))
-        else (phone_from_jid or (f"+{clean_d}" if clean_d and not str(target_chat_id).endswith("@lid") else ""))
     )
 
     if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
@@ -1403,7 +1479,7 @@ def _handle_incoming_message(
                 chat_id=target_chat_id,
                 phone_number__isnull=False
             ).exclude(phone_number="").first()
-            if existing_saved and existing_saved.phone_number and not str(existing_saved.phone_number).startswith("+7658"):
+            if existing_saved and existing_saved.phone_number and not _is_lid(existing_saved.phone_number):
                 resolved_phone = existing_saved.phone_number
                 phone_digits = re.sub(r"\D+", "", resolved_phone)
 
@@ -1426,7 +1502,7 @@ def _handle_incoming_message(
                     whatsapp_name__iexact=p_name,
                     is_deleted=False,
                 ).exclude(chat_id__endswith="@g.us").first()
-                if named_conv and named_conv.phone_number and not str(named_conv.phone_number).startswith("+7658"):
+                if named_conv and named_conv.phone_number and not _is_lid(named_conv.phone_number):
                     resolved_phone = named_conv.phone_number
                     phone_digits = re.sub(r"\D+", "", resolved_phone)
                     conversation = named_conv
@@ -1441,7 +1517,7 @@ def _handle_incoming_message(
                 last_message_at__gte=recent_cutoff,
                 last_message_from_me=True,
             ).exclude(chat_id__endswith="@g.us").exclude(chat_id=target_chat_id).order_by("-last_message_at").first()
-            if recent_outbound and recent_outbound.phone_number and not str(recent_outbound.phone_number).startswith("+7658"):
+            if recent_outbound and recent_outbound.phone_number and not _is_lid(recent_outbound.phone_number):
                 resolved_phone = recent_outbound.phone_number
                 phone_digits = re.sub(r"\D+", "", resolved_phone)
                 conversation = recent_outbound
@@ -1586,7 +1662,7 @@ def _handle_incoming_message(
             chat_id=target_chat_id,
             phone_number__isnull=False
         ).exclude(phone_number="").first()
-        if existing_saved and existing_saved.phone_number and not str(existing_saved.phone_number).startswith("+7658"):
+        if existing_saved and existing_saved.phone_number and not _is_lid(existing_saved.phone_number):
             resolved_phone = existing_saved.phone_number
 
     search_digits = re.sub(r"\D+", "", resolved_phone or phone_digits or "")

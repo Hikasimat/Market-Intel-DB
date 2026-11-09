@@ -1871,13 +1871,22 @@ export default function WhatsappPage() {
     }
   };
 
+  const isLidNumber = (val) => {
+    if (!val) return false;
+    const str = String(val).trim();
+    if (str.endsWith('@lid')) return true;
+    const digits = str.replace(/\D/g, '');
+    if (!digits) return false;
+    return digits.length > 13 || digits.startsWith('7658') || digits.startsWith('2262') || digits.startsWith('2167');
+  };
+
   const formatPhone = (val) => {
     if (!val) return '';
     if (typeof val !== 'string') return '';
     if (val.includes('@lid') || val.includes('@g.us')) return '';
     // Rule: Before the @c.us (or @s.whatsapp.net) is the user mobile number (e.g. 9360239398@c.us -> 9360239398)
     const num = val.split('@')[0].split(':')[0].replace(/\D/g, '');
-    if (!num || num.startsWith('7658')) return '';
+    if (!num || isLidNumber(num)) return '';
     return `+${num}`;
   };
 
@@ -1889,23 +1898,23 @@ export default function WhatsappPage() {
     // 1. Before the @c.us is the user mobile number
     if (chatId && (chatId.includes('@c.us') || chatId.includes('@s.whatsapp.net'))) {
       const num = chatId.split('@')[0].split(':')[0].replace(/\D/g, '');
-      if (num && !num.startsWith('7658')) {
+      if (num && !isLidNumber(num)) {
         return `+${num}`;
       }
     }
 
-    // 2. From phone_number
-    if (chat.phone_number) {
-      const num = String(chat.phone_number).split('@')[0].split(':')[0].replace(/\D/g, '');
-      if (num && !num.startsWith('7658')) {
-        return `+${num}`;
-      }
-    }
-
-    // 3. From prospect_phone
+    // 2. From prospect_phone (trusted CRM contact)
     if (chat.prospect_phone) {
       const num = String(chat.prospect_phone).split('@')[0].split(':')[0].replace(/\D/g, '');
-      if (num && !num.startsWith('7658')) {
+      if (num && !isLidNumber(num)) {
+        return `+${num}`;
+      }
+    }
+
+    // 3. From phone_number
+    if (chat.phone_number) {
+      const num = String(chat.phone_number).split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (num && !isLidNumber(num)) {
         return `+${num}`;
       }
     }
@@ -1921,10 +1930,10 @@ export default function WhatsappPage() {
       return chat.whatsapp_name || chat.contact_name || 'WhatsApp Group';
     }
     // 1. CRM Key Person Name (e.g. "Mohanraj")
-    if (chat.contact_name) return chat.contact_name;
+    if (chat.contact_name && !isLidNumber(chat.contact_name)) return chat.contact_name;
 
     // 2. WhatsApp Profile PushName (e.g. "Rocky", "Mohanraj")
-    if (chat.whatsapp_name && !chat.whatsapp_name.startsWith('+') && !chat.whatsapp_name.includes('@')) {
+    if (chat.whatsapp_name && !chat.whatsapp_name.startsWith('+') && !chat.whatsapp_name.includes('@') && !isLidNumber(chat.whatsapp_name)) {
       return chat.whatsapp_name;
     }
 
@@ -1933,7 +1942,7 @@ export default function WhatsappPage() {
     if (phone) return phone;
 
     // 4. Fallback name
-    if (chat.whatsapp_name && !chat.whatsapp_name.startsWith('+7658')) return chat.whatsapp_name;
+    if (chat.whatsapp_name && !isLidNumber(chat.whatsapp_name) && !chat.whatsapp_name.includes('@')) return chat.whatsapp_name;
 
     return 'WhatsApp Contact';
   };
@@ -3465,9 +3474,8 @@ export default function WhatsappPage() {
                       <div className="flex items-center gap-2 min-w-0 flex-1">
                         <div className="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs flex-shrink-0">
                           {(() => {
-                            const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
                             let label = member.name;
-                            if (isLid(label) || !label) {
+                            if (isLidNumber(label) || !label) {
                               label = member.is_current ? (selectedSession?.whatsapp_name || 'You') : (selectedChat?.contact_name || selectedChat?.whatsapp_name || 'U');
                             }
                             const clean = label.replace(/^[+]/, '').trim();
@@ -3478,14 +3486,13 @@ export default function WhatsappPage() {
                           <div className="flex items-center gap-1.5">
                             <span className="font-semibold text-slate-800 text-xs truncate">
                               {(() => {
-                                const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
                                 if (member.is_current) {
-                                  return (member.name && !isLid(member.name)) ? member.name : (selectedSession?.whatsapp_name || 'You');
+                                  return (member.name && !isLidNumber(member.name)) ? member.name : (selectedSession?.whatsapp_name || 'You');
                                 }
-                                if (member.name && !isLid(member.name)) return member.name;
-                                if (member.phoneNumber && !isLid(member.phoneNumber)) return member.phoneNumber;
-                                if (selectedChat?.contact_name && !isLid(selectedChat.contact_name)) return selectedChat.contact_name;
-                                if (selectedChat?.phone_number && !isLid(selectedChat.phone_number)) return selectedChat.phone_number;
+                                if (member.name && !isLidNumber(member.name)) return member.name;
+                                if (member.phoneNumber && !isLidNumber(member.phoneNumber)) return member.phoneNumber;
+                                if (selectedChat?.contact_name && !isLidNumber(selectedChat.contact_name)) return selectedChat.contact_name;
+                                if (selectedChat?.phone_number && !isLidNumber(selectedChat.phone_number)) return selectedChat.phone_number;
                                 return member.name || 'Member';
                               })()}
                             </span>
@@ -3506,12 +3513,11 @@ export default function WhatsappPage() {
                             )}
                           </div>
                           {(() => {
-                            const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
                             let displayPhone = member.phoneNumber;
-                            if (isLid(displayPhone) || !displayPhone) {
+                            if (isLidNumber(displayPhone) || !displayPhone) {
                               if (member.is_current) {
                                 displayPhone = selectedSession?.phone_number || '';
-                              } else if (selectedChat?.phone_number && !isLid(selectedChat.phone_number)) {
+                              } else if (selectedChat?.phone_number && !isLidNumber(selectedChat.phone_number)) {
                                 displayPhone = selectedChat.phone_number;
                               } else {
                                 displayPhone = '';
@@ -3532,9 +3538,8 @@ export default function WhatsappPage() {
                           <button
                             type="button"
                             onClick={() => {
-                              const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
                               let targetId = member.phoneNumber;
-                              if (isLid(targetId) || !targetId) {
+                              if (isLidNumber(targetId) || !targetId) {
                                 targetId = selectedChat?.phone_number || member.chatId;
                               }
                               handleStartNewChat(
@@ -3555,8 +3560,7 @@ export default function WhatsappPage() {
                           <button
                             type="button"
                             onClick={() => {
-                              const isLid = (val) => val && (String(val).replace(/\D/g, '').length > 13 || String(val).startsWith('+2262') || String(val).startsWith('+2167') || String(val).startsWith('+7658'));
-                              const remPhone = (!isLid(member.phoneNumber) ? member.phoneNumber : null) || selectedChat?.phone_number || member.phoneNumber || member.chatId;
+                              const remPhone = (!isLidNumber(member.phoneNumber) ? member.phoneNumber : null) || selectedChat?.phone_number || member.phoneNumber || member.chatId;
                               handleRemoveGroupMember(remPhone, member.name);
                             }}
                             disabled={removingMemberPhone === (member.phoneNumber || member.chatId)}
