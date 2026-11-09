@@ -331,6 +331,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       let sample = 0;
       if (this.available > 0) {
         sample = this.ring[this.read];
+        this.ring[this.read] = 0;
         this.read = (this.read + 1) % RING_SIZE;
         this.available -= 1;
       }
@@ -473,6 +474,7 @@ export default function WhatsappPage() {
     }
     if (callMediaRef.current.audioWs) {
       try {
+        callMediaRef.current.audioWs.onclose = null;
         callMediaRef.current.audioWs.close();
       } catch (_) {}
     }
@@ -547,17 +549,11 @@ export default function WhatsappPage() {
         }
       } else {
         setIncomingCall(null);
-        if (callState.active && callState.isIncoming && callState.status === 'connected' && callState.duration >= 4) {
-          setCallState(prev => ({ ...prev, status: 'ended', error: 'Call ended' }));
-          setTimeout(() => {
-            cleanupCallSession();
-          }, 3000);
-        }
       }
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, [callState.active, callState.callId, callState.isIncoming, callState.status, callState.duration, cleanupCallSession]);
+  }, [callState.active, callState.callId]);
 
   useEffect(() => {
     checkCallingStatus();
@@ -644,11 +640,35 @@ export default function WhatsappPage() {
 
   const initWebRTCAudioChannel = useCallback(async (callId, callSessionName, audioWsUrl = '') => {
     try {
-      // 1. Mic capture
+      // Close any previous transport/context before initializing to prevent duplicate channels
+      if (callMediaRef.current.audioWs) {
+        try {
+          callMediaRef.current.audioWs.onclose = null;
+          callMediaRef.current.audioWs.close();
+        } catch (_) {}
+        callMediaRef.current.audioWs = null;
+      }
+      if (callMediaRef.current.dataChannel) {
+        try { callMediaRef.current.dataChannel.close(); } catch (_) {}
+        callMediaRef.current.dataChannel = null;
+      }
+      if (callMediaRef.current.peerConnection) {
+        try { callMediaRef.current.peerConnection.close(); } catch (_) {}
+        callMediaRef.current.peerConnection = null;
+      }
+
+      // 1. Mic capture with hardware/browser acoustic echo cancellation
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 16000,
+        },
       });
       callMediaRef.current.micStream = stream;
+      callMediaRef.current.lastRemoteSpeechAt = 0;
 
       // 2. Audio Context at 16000 Hz
       const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
@@ -674,69 +694,10 @@ export default function WhatsappPage() {
 
       await ctx.resume();
 
-      // 3. Resilient WebSocket Audio Bridge (bypasses AWS EC2 / Docker UDP NAT blocks)
-      let audioWs = null;
-      if (audioWsUrl) {
-        try {
-          audioWs = new WebSocket(audioWsUrl);
-          audioWs.binaryType = 'arraybuffer';
-          callMediaRef.current.audioWs = audioWs;
-          audioWs.onopen = () => {
-            if (ctx.state === 'suspended') {
-              ctx.resume().catch(() => {});
-            }
-          };
-        } catch (wsErr) {
-          console.warn('Resilient audio WebSocket init warning:', wsErr);
-        }
-      }
-
-      // 4. Peer Connection with PCM DataChannel (secondary / local fallback)
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-        ]
-      });
-      callMediaRef.current.peerConnection = pc;
-
-      const dc = pc.createDataChannel('pcm', { ordered: true });
-      dc.binaryType = 'arraybuffer';
-      callMediaRef.current.dataChannel = dc;
-
-      // Connect mic to captureNode
-      const micSource = ctx.createMediaStreamSource(stream);
-      const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
-      captureNode.port.onmessage = (e) => {
-        if (callMediaRef.current.isMuted) return;
-        const pcmBytes = float32ToInt16LE(e.data);
-        const ws = callMediaRef.current.audioWs;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(pcmBytes);
-        } else if (dc && dc.readyState === 'open') {
-          dc.send(pcmBytes);
-        }
-      };
-      micSource.connect(captureNode);
-
-      // Prevent local feedback loop
-      const silenceGain = ctx.createGain();
-      silenceGain.gain.value = 0;
-      captureNode.connect(silenceGain);
-      silenceGain.connect(ctx.destination);
-
-      // Playback incoming audio through both AudioContext destination and MediaStream Audio element
+      // Playback incoming audio strictly once through AudioContext destination
+      // (avoiding secondary <audio> element prevents double playback and allows browser AEC to cancel speaker output)
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
       playbackNode.connect(ctx.destination);
-      try {
-        const streamDest = ctx.createMediaStreamDestination();
-        playbackNode.connect(streamDest);
-        const remoteAudioEl = new Audio();
-        remoteAudioEl.autoplay = true;
-        remoteAudioEl.playsInline = true;
-        remoteAudioEl.srcObject = streamDest.stream;
-        remoteAudioEl.play().catch(() => {});
-        callMediaRef.current.remoteAudioEl = remoteAudioEl;
-      } catch (_) {}
 
       const playIncomingBuffer = async (rawData) => {
         if (ctx.state === 'suspended') {
@@ -748,86 +709,173 @@ export default function WhatsappPage() {
         }
         const floats = int16LEToFloat32(buf);
         if (floats && floats.length) {
+          let peak = 0;
+          for (let i = 0; i < floats.length; i += 1) {
+            const abs = Math.abs(floats[i]);
+            if (abs > peak) peak = abs;
+          }
+          if (peak > 0.015) {
+            callMediaRef.current.lastRemoteSpeechAt = performance.now();
+          }
           playbackNode.port.postMessage(floats);
         }
       };
 
-      if (audioWs) {
-        audioWs.onmessage = (e) => {
-          playIncomingBuffer(e.data);
-        };
+      // Connect mic to captureNode with acoustic echo gate so speaker bleed cannot loop back
+      const micSource = ctx.createMediaStreamSource(stream);
+      const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
+      captureNode.port.onmessage = (e) => {
+        if (callMediaRef.current.isMuted) return;
+        const samples = e.data;
+        if (!samples || !samples.length) return;
+
+        // Suppress acoustic speaker-to-mic bleed while remote speech is actively playing (+180ms room tail)
+        const sinceRemoteSpeech = performance.now() - (callMediaRef.current.lastRemoteSpeechAt || 0);
+        if (sinceRemoteSpeech < 180) {
+          return;
+        }
+
+        const pcmBytes = float32ToInt16LE(samples);
+        const ws = callMediaRef.current.audioWs;
+        const dc = callMediaRef.current.dataChannel;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(pcmBytes);
+        } else if (dc && dc.readyState === 'open') {
+          dc.send(pcmBytes);
+        }
+      };
+      micSource.connect(captureNode);
+
+      // Prevent local mic monitoring feedback
+      const silenceGain = ctx.createGain();
+      silenceGain.gain.value = 0;
+      captureNode.connect(silenceGain);
+      silenceGain.connect(ctx.destination);
+
+      // 3. Connect primary WebSocket Audio Bridge (bypasses UDP NAT blocks and avoids Pion ICE timeout killing the call)
+      let wsConnected = false;
+      if (audioWsUrl) {
+        wsConnected = await new Promise((resolve) => {
+          let settled = false;
+          const finish = (ok) => {
+            if (!settled) {
+              settled = true;
+              resolve(ok);
+            }
+          };
+          const connectSocket = (isReconnect = false) => {
+            try {
+              const ws = new WebSocket(audioWsUrl);
+              ws.binaryType = 'arraybuffer';
+              callMediaRef.current.audioWs = ws;
+
+              ws.onopen = () => {
+                if (ctx.state === 'suspended') {
+                  ctx.resume().catch(() => {});
+                }
+                finish(true);
+              };
+              ws.onmessage = (e) => {
+                playIncomingBuffer(e.data);
+              };
+              ws.onerror = () => {
+                if (!isReconnect) finish(false);
+              };
+              ws.onclose = (ev) => {
+                if (!isReconnect && !settled) {
+                  finish(false);
+                  return;
+                }
+                // Engine closes socket with 1000 "call ended" when remote party hangs up
+                if (ev.code === 1000 && ev.reason === 'call ended') {
+                  setCallState((prev) => (prev.active ? { ...prev, status: 'ended', error: 'Call ended' } : prev));
+                  setTimeout(() => cleanupCallSession(), 1500);
+                  return;
+                }
+                // Reconnect automatically if proxy idle timeout drops socket while call is still active
+                if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
+                  setTimeout(() => {
+                    if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
+                      connectSocket(true);
+                    }
+                  }, 500);
+                }
+              };
+            } catch (_) {
+              finish(false);
+            }
+          };
+          connectSocket(false);
+          setTimeout(() => finish(false), 2500);
+        });
       }
 
-      dc.onopen = () => {
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-      };
-      dc.onmessage = (e) => {
-        const ws = callMediaRef.current.audioWs;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          playIncomingBuffer(e.data);
-        }
-      };
+      // 4. Only negotiate WebRTC DataChannel if WebSocket audio bridge is unavailable
+      // (Avoids starting Pion WebRTC PeerConnection when WS is active, because Pion's OnTerminalICE kills the call if UDP ICE fails)
+      if (!wsConnected) {
+        const pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+          ]
+        });
+        callMediaRef.current.peerConnection = pc;
 
-      pc.ondatachannel = (event) => {
-        const remoteDc = event.channel;
-        remoteDc.binaryType = 'arraybuffer';
-        remoteDc.onopen = () => {
+        const dc = pc.createDataChannel('pcm', { ordered: true });
+        dc.binaryType = 'arraybuffer';
+        callMediaRef.current.dataChannel = dc;
+
+        dc.onopen = () => {
           if (ctx.state === 'suspended') {
             ctx.resume().catch(() => {});
           }
         };
-        remoteDc.onmessage = (e) => {
-          const ws = callMediaRef.current.audioWs;
-          if (!ws || ws.readyState !== WebSocket.OPEN) {
-            playIncomingBuffer(e.data);
-          }
+        dc.onmessage = (e) => {
+          playIncomingBuffer(e.data);
         };
-      };
 
-      // 5. Offer / Answer SDP exchange
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      await new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') resolve();
-        else {
-          const checkIce = () => {
-            if (pc.iceGatheringState === 'complete') {
-              pc.removeEventListener('icegatheringstatechange', checkIce);
-              resolve();
+        pc.ondatachannel = (event) => {
+          const remoteDc = event.channel;
+          remoteDc.binaryType = 'arraybuffer';
+          remoteDc.onopen = () => {
+            if (ctx.state === 'suspended') {
+              ctx.resume().catch(() => {});
             }
           };
-          pc.addEventListener('icegatheringstatechange', checkIce);
-          setTimeout(resolve, 800); // 800ms fast ICE gathering timeout
-        }
-      });
+          remoteDc.onmessage = (e) => {
+            playIncomingBuffer(e.data);
+          };
+        };
 
-      const sdpOffer = pc.localDescription?.sdp || '';
-      try {
-        const webrtcRes = await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/webrtc/`, {
-          sdp_offer: sdpOffer,
-          session_name: callSessionName,
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === 'complete') resolve();
+          else {
+            const checkIce = () => {
+              if (pc.iceGatheringState === 'complete') {
+                pc.removeEventListener('icegatheringstatechange', checkIce);
+                resolve();
+              }
+            };
+            pc.addEventListener('icegatheringstatechange', checkIce);
+            setTimeout(resolve, 800);
+          }
         });
 
-        // If audioWs wasn't opened yet and webrtc endpoint returned audio_ws_url, connect it
-        const fallbackWsUrl = webrtcRes.data?.audio_ws_url;
-        if (fallbackWsUrl && (!callMediaRef.current.audioWs || callMediaRef.current.audioWs.readyState > WebSocket.OPEN)) {
-          try {
-            const ws2 = new WebSocket(fallbackWsUrl);
-            ws2.binaryType = 'arraybuffer';
-            ws2.onmessage = (e) => playIncomingBuffer(e.data);
-            callMediaRef.current.audioWs = ws2;
-          } catch (_) {}
+        const sdpOffer = pc.localDescription?.sdp || '';
+        try {
+          const webrtcRes = await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/webrtc/`, {
+            sdp_offer: sdpOffer,
+            session_name: callSessionName,
+          });
+          const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
+          if (sdpAnswer) {
+            await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
+          }
+        } catch (webrtcErr) {
+          console.warn('WebRTC SDP negotiation warning:', webrtcErr);
         }
-
-        const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
-        if (sdpAnswer) {
-          await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
-        }
-      } catch (webrtcErr) {
-        console.warn('WebRTC SDP negotiation warning (WebSocket audio stream active):', webrtcErr);
       }
 
       setCallState((prev) => ({
@@ -841,7 +889,7 @@ export default function WhatsappPage() {
         status: 'connected',
       }));
     }
-  }, []);
+  }, [cleanupCallSession]);
 
   const handleStartVoiceCall = useCallback(async () => {
     if (!selectedChat) return;

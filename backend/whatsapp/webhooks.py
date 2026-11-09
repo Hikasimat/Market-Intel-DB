@@ -146,7 +146,7 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
     def _is_valid_call(data: dict, mtime: float) -> bool:
         if not isinstance(data, dict) or not data.get("call_id"):
             return False
-        max_age = 3600 if data.get("status") == "connected" else 60
+        max_age = 7200 if data.get("status") == "connected" else 180
         ref_time = data.get("received_at") or mtime
         return (now - ref_time) <= max_age
 
@@ -1030,6 +1030,10 @@ def _handle_call_event(
     )
 
     if is_received or event_type in ("call.received", "call.ringing", "call.voice.incoming", "call.voice.ringing") or raw_status in ("offer", "ringing"):
+        existing_call = get_active_incoming_call(session_name)
+        if existing_call and existing_call.get("call_id") == call_id and existing_call.get("status") == "connected":
+            logger.debug("Ignoring duplicate ringing event for already-connected call %s", call_id)
+            return
         incoming_payload = {
             "call_id": call_id,
             "caller_phone": phone_display,
