@@ -464,6 +464,55 @@ export default function WhatsappPage() {
   const [isCallingPaired, setIsCallingPaired] = useState(false);
   const [incomingCall, setIncomingCall] = useState(null); // { call_id, caller_name, caller_phone, session_name, is_video }
 
+  const cleanupCallSession = useCallback(() => {
+    if (callMediaRef.current.timerInterval) {
+      clearInterval(callMediaRef.current.timerInterval);
+    }
+    if (callMediaRef.current.micStream) {
+      callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
+    }
+    if (callMediaRef.current.dataChannel) {
+      try {
+        callMediaRef.current.dataChannel.close();
+      } catch (_) {}
+    }
+    if (callMediaRef.current.peerConnection) {
+      try {
+        callMediaRef.current.peerConnection.close();
+      } catch (_) {}
+    }
+    if (callMediaRef.current.audioCtx) {
+      callMediaRef.current.audioCtx.close().catch(() => {});
+    }
+    if (callMediaRef.current.captureBlobUrl) {
+      try { URL.revokeObjectURL(callMediaRef.current.captureBlobUrl); } catch (_) {}
+    }
+    if (callMediaRef.current.playbackBlobUrl) {
+      try { URL.revokeObjectURL(callMediaRef.current.playbackBlobUrl); } catch (_) {}
+    }
+    callMediaRef.current = {
+      peerConnection: null,
+      dataChannel: null,
+      audioCtx: null,
+      micStream: null,
+      timerInterval: null,
+      captureBlobUrl: null,
+      playbackBlobUrl: null,
+    };
+    setCallState({
+      active: false,
+      status: 'idle',
+      callId: null,
+      sessionName: null,
+      peerName: '',
+      peerPhone: '',
+      duration: 0,
+      isMuted: false,
+      error: null,
+      isIncoming: false,
+    });
+  }, []);
+
   const checkCallingStatus = useCallback(async () => {
     try {
       const res = await api.get('/whatsapp/calls/status/');
@@ -483,11 +532,17 @@ export default function WhatsappPage() {
         }
       } else {
         setIncomingCall(null);
+        if (callState.active && callState.isIncoming && callState.status === 'connected') {
+          setCallState(prev => ({ ...prev, status: 'ended', error: 'Call ended' }));
+          setTimeout(() => {
+            cleanupCallSession();
+          }, 3000);
+        }
       }
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, [callState.active, callState.callId]);
+  }, [callState.active, callState.callId, callState.isIncoming, callState.status, cleanupCallSession]);
 
   useEffect(() => {
     checkCallingStatus();
@@ -545,53 +600,7 @@ export default function WhatsappPage() {
     };
   }, [callState.active, callState.status]);
 
-  const cleanupCallSession = useCallback(() => {
-    if (callMediaRef.current.timerInterval) {
-      clearInterval(callMediaRef.current.timerInterval);
-    }
-    if (callMediaRef.current.micStream) {
-      callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
-    }
-    if (callMediaRef.current.dataChannel) {
-      try {
-        callMediaRef.current.dataChannel.close();
-      } catch (_) {}
-    }
-    if (callMediaRef.current.peerConnection) {
-      try {
-        callMediaRef.current.peerConnection.close();
-      } catch (_) {}
-    }
-    if (callMediaRef.current.audioCtx) {
-      callMediaRef.current.audioCtx.close().catch(() => {});
-    }
-    if (callMediaRef.current.captureBlobUrl) {
-      try { URL.revokeObjectURL(callMediaRef.current.captureBlobUrl); } catch (_) {}
-    }
-    if (callMediaRef.current.playbackBlobUrl) {
-      try { URL.revokeObjectURL(callMediaRef.current.playbackBlobUrl); } catch (_) {}
-    }
-    callMediaRef.current = {
-      peerConnection: null,
-      dataChannel: null,
-      audioCtx: null,
-      micStream: null,
-      timerInterval: null,
-      captureBlobUrl: null,
-      playbackBlobUrl: null,
-    };
-    setCallState({
-      active: false,
-      status: 'idle',
-      callId: null,
-      sessionName: null,
-      peerName: '',
-      peerPhone: '',
-      duration: 0,
-      isMuted: false,
-      error: null,
-    });
-  }, []);
+
 
   const handleEndCall = useCallback(async () => {
     const activeCallId = callState.callId;
@@ -845,6 +854,14 @@ export default function WhatsappPage() {
 
     const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
 
+    // Auto-select caller conversation if present in conversations list
+    if (targetCall.chat_id && conversations?.length > 0) {
+      const match = conversations.find((c) => c.chat_id === targetCall.chat_id);
+      if (match && selectedChat?.chat_id !== match.chat_id) {
+        setSelectedChat(match);
+      }
+    }
+
     setIncomingCall(null);
     setCallState({
       active: true,
@@ -856,6 +873,7 @@ export default function WhatsappPage() {
       isMuted: false,
       error: null,
       sessionName: sessionToUse,
+      isIncoming: true,
     });
 
     try {
@@ -872,7 +890,7 @@ export default function WhatsappPage() {
       console.error('WebRTC Audio connect error:', audioErr);
       showToast('Connected, but audio channel initialization failed.', 'error');
     }
-  }, [incomingCall, selectedSession?.session_name, initWebRTCAudioChannel, showToast]);
+  }, [incomingCall, selectedSession?.session_name, conversations, selectedChat?.chat_id, initWebRTCAudioChannel, showToast]);
 
   // Reject / Decline Incoming WhatsApp Voice Call
   const handleRejectIncomingCall = useCallback(async (explicitCall = null) => {
@@ -3373,132 +3391,133 @@ export default function WhatsappPage() {
         </div>
       )}
 
-      {/* Incoming WhatsApp Call Modal */}
-      {incomingCall && !callState.active && (
-        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-slate-900 text-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden border border-slate-700 p-8 flex flex-col items-center text-center relative">
-            {/* Pulsing Ring Animation */}
-            <div className="relative mb-6">
-              <span className="absolute -inset-4 rounded-full bg-emerald-500/20 animate-ping" />
-              <span className="absolute -inset-8 rounded-full bg-emerald-500/10 animate-pulse" />
-              <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-lg border-2 border-emerald-400/50">
-                <PhoneCall className="w-12 h-12 text-white animate-bounce" />
-              </div>
-            </div>
-
-            {/* Caller Information */}
-            <h3 className="text-xl font-bold text-white mb-1">
-              {incomingCall.caller_name || 'WhatsApp Caller'}
-            </h3>
-            <p className="text-sm font-mono text-emerald-400 mb-2">
-              {incomingCall.caller_phone || 'WhatsApp Voice Call'}
-            </p>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium mb-8">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Incoming WhatsApp Call...
-            </div>
-
-            {/* Action Buttons: Decline & Answer */}
-            <div className="flex items-center justify-center gap-8 w-full">
-              {/* Decline Button */}
-              <div className="flex flex-col items-center gap-2">
-                <button
-                  onClick={handleRejectIncomingCall}
-                  className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 cursor-pointer"
-                  title="Decline Call"
-                >
-                  <PhoneOff className="w-7 h-7" />
-                </button>
-                <span className="text-xs font-medium text-slate-300">Decline</span>
-              </div>
-
-              {/* Answer Button */}
-              <div className="flex flex-col items-center gap-2">
-                <button
-                  onClick={handleAcceptIncomingCall}
-                  className="w-16 h-16 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white flex items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 cursor-pointer ring-4 ring-emerald-500/30"
-                  title="Answer Call"
-                >
-                  <PhoneCall className="w-7 h-7" />
-                </button>
-                <span className="text-xs font-semibold text-emerald-400">Answer</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Floating Active Voice Call Overlay (WhatsApp VoIP) */}
-      {callState.active && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300">
-          <div className="bg-slate-900/95 backdrop-blur-md text-white rounded-2xl shadow-2xl border border-slate-700/60 p-5 w-80 flex flex-col items-center">
-            {/* Call Header Indicator */}
+      {/* Floating Voice Call Overlay (WhatsApp Web / VoIP style: handles both incoming & active calls) */}
+      {(callState.active || incomingCall) && (
+        <div className="fixed bottom-6 right-6 z-[100] animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <div
+            className={`bg-slate-900/95 backdrop-blur-md text-white rounded-2xl shadow-2xl p-5 w-80 flex flex-col items-center transition-all ${
+              incomingCall && !callState.active
+                ? 'border-2 border-emerald-500/60 ring-4 ring-emerald-500/25 shadow-emerald-950/60'
+                : 'border border-slate-700/60 shadow-slate-950/50'
+            }`}
+          >
+            {/* Header: Service label + Status / Duration */}
             <div className="flex items-center justify-between w-full mb-3 text-xs text-slate-400">
               <span className="flex items-center gap-1.5 text-emerald-400 font-semibold uppercase tracking-wider text-[11px]">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
-                WhatsApp Voice
+                {incomingCall && !callState.active ? 'Incoming Call' : 'WhatsApp Voice'}
               </span>
-              <span className="font-mono text-slate-300">
-                {String(Math.floor(callState.duration / 60)).padStart(2, '0')}:
-                {String(callState.duration % 60).padStart(2, '0')}
+              <span className="font-mono text-slate-300 text-xs">
+                {incomingCall && !callState.active ? (
+                  <span className="text-emerald-400 font-sans font-semibold animate-pulse">Ringing...</span>
+                ) : (
+                  `${String(Math.floor(callState.duration / 60)).padStart(2, '0')}:${String(
+                    callState.duration % 60
+                  ).padStart(2, '0')}`
+                )}
               </span>
             </div>
 
-            {/* Avatar & Peer Info */}
-            <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-emerald-900/40 mb-3">
-              {callState.peerName ? callState.peerName.charAt(0).toUpperCase() : <Phone className="w-7 h-7" />}
+            {/* Avatar with Animated Pulse */}
+            <div className="relative mb-3">
+              {incomingCall && !callState.active && (
+                <>
+                  <span className="absolute -inset-2 rounded-full bg-emerald-500/30 animate-ping pointer-events-none" />
+                  <span className="absolute -inset-4 rounded-full bg-emerald-500/15 animate-pulse pointer-events-none" />
+                </>
+              )}
+              <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-emerald-900/40 relative z-10">
+                {(incomingCall?.caller_name || callState.peerName) ? (
+                  (incomingCall?.caller_name || callState.peerName).charAt(0).toUpperCase()
+                ) : (
+                  <Phone className="w-7 h-7" />
+                )}
+              </div>
             </div>
 
-            <h3 className="font-semibold text-base text-slate-100 text-center truncate w-full">
-              {callState.peerName || 'WhatsApp Contact'}
+            {/* Contact Name & Phone */}
+            <h3 className="font-semibold text-base text-slate-100 text-center truncate w-full px-2">
+              {incomingCall?.caller_name || callState.peerName || 'WhatsApp Contact'}
             </h3>
-            <p className="text-xs text-slate-400 font-mono mb-3 truncate w-full text-center">
-              {callState.peerPhone}
+            <p className="text-xs text-slate-400 font-mono mb-3 truncate w-full text-center px-2">
+              {incomingCall?.caller_phone || callState.peerPhone || 'WhatsApp Voice Call'}
             </p>
 
             {/* Call Status Badge */}
             <div className="mb-4">
-              {callState.status === 'calling' && (
+              {incomingCall && !callState.active ? (
+                <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-semibold border border-emerald-500/40 flex items-center gap-1.5 animate-pulse">
+                  <PhoneCall className="w-3.5 h-3.5 text-emerald-400" /> Incoming WhatsApp Call...
+                </span>
+              ) : callState.status === 'calling' ? (
                 <span className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs font-medium border border-amber-500/30 flex items-center gap-1.5 animate-pulse">
                   <PhoneCall className="w-3 h-3" /> Calling / Ringing...
                 </span>
-              )}
-              {callState.status === 'connected' && (
+              ) : callState.status === 'connected' ? (
                 <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-medium border border-emerald-500/30 flex items-center gap-1.5">
                   <Phone className="w-3 h-3" /> Audio Connected
                 </span>
-              )}
-              {callState.status === 'ended' && (
+              ) : callState.status === 'ended' ? (
                 <span className="px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 text-xs font-medium border border-rose-500/30">
                   {callState.error || 'Call Ended'}
                 </span>
-              )}
+              ) : null}
             </div>
 
-            {/* Action Buttons */}
-            <div className="flex items-center gap-4 w-full justify-center">
-              <button
-                type="button"
-                onClick={handleToggleMute}
-                className={`p-3 rounded-full transition shadow-md flex items-center justify-center ${
-                  callState.isMuted
-                    ? 'bg-rose-500 text-white hover:bg-rose-600'
-                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                }`}
-                title={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
-              >
-                {callState.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-              </button>
+            {/* Action Buttons: Incoming (Decline + Attend) vs Active (Mute + Hangup) */}
+            {incomingCall && !callState.active ? (
+              <div className="flex items-center gap-8 w-full justify-center pt-1 pb-1">
+                {/* Decline Button */}
+                <div className="flex flex-col items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleRejectIncomingCall(incomingCall)}
+                    className="w-12 h-12 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition-all shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer hover:scale-110 active:scale-95"
+                    title="Decline Call"
+                  >
+                    <PhoneOff className="w-6 h-6" />
+                  </button>
+                  <span className="text-[11px] font-medium text-slate-300">Decline</span>
+                </div>
 
-              <button
-                type="button"
-                onClick={handleEndCall}
-                className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer"
-                title="Hang up call"
-              >
-                <PhoneOff className="w-5 h-5" />
-              </button>
-            </div>
+                {/* Attend Call Button */}
+                <div className="flex flex-col items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleAcceptIncomingCall(incomingCall)}
+                    className="w-12 h-12 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white transition-all shadow-lg shadow-emerald-900/50 flex items-center justify-center cursor-pointer ring-4 ring-emerald-400/40 animate-bounce hover:scale-110 active:scale-95"
+                    title="Attend Call"
+                  >
+                    <PhoneCall className="w-6 h-6" />
+                  </button>
+                  <span className="text-[11px] font-semibold text-emerald-400">Attend Call</span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-4 w-full justify-center">
+                <button
+                  type="button"
+                  onClick={handleToggleMute}
+                  className={`p-3 rounded-full transition shadow-md flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 ${
+                    callState.isMuted
+                      ? 'bg-rose-500 text-white hover:bg-rose-600'
+                      : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                  }`}
+                  title={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                >
+                  {callState.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleEndCall}
+                  className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95"
+                  title="Hang up call"
+                >
+                  <PhoneOff className="w-5 h-5" />
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
