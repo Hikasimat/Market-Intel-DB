@@ -1037,19 +1037,22 @@ class WhatsAppConversationsView(APIView):
 
         # Build reverse phone mapping so conversations with and without contact share the same deduplication key
         phone_to_key = {}
+        name_to_key = {}
         for c in conversations:
             if not c.chat_id.endswith("@g.us"):
                 raw_d = ""
-                if c.phone_number:
+                if c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
                     raw_d = re.sub(r"\D+", "", str(c.phone_number))
                 elif not c.chat_id.endswith("@lid"):
                     raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                if len(raw_d) >= 8:
+                if len(raw_d) >= 8 and len(raw_d) <= 13:
                     suffix = raw_d[-10:]
                     if c.prospect_contact_id:
                         phone_to_key[suffix] = f"contact_{c.prospect_contact_id}"
                     elif suffix not in phone_to_key:
                         phone_to_key[suffix] = f"phone_{suffix}"
+                    if c.whatsapp_name and not c.whatsapp_name.startswith("+"):
+                        name_to_key[c.whatsapp_name.lower().strip()] = phone_to_key[suffix]
 
         for c in conversations:
             if c.chat_id.endswith("@g.us"):
@@ -1058,13 +1061,15 @@ class WhatsAppConversationsView(APIView):
                 key = f"contact_{c.prospect_contact_id}"
             else:
                 raw_d = ""
-                if c.phone_number:
+                if c.phone_number and not str(c.phone_number).startswith("+7658") and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
                     raw_d = re.sub(r"\D+", "", str(c.phone_number))
                 elif not c.chat_id.endswith("@lid"):
                     raw_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                suffix = raw_d[-10:] if len(raw_d) >= 8 else None
+                suffix = raw_d[-10:] if (len(raw_d) >= 8 and len(raw_d) <= 13) else None
                 if suffix and suffix in phone_to_key:
                     key = phone_to_key[suffix]
+                elif c.whatsapp_name and c.whatsapp_name.lower().strip() in name_to_key:
+                    key = name_to_key[c.whatsapp_name.lower().strip()]
                 else:
                     key = c.chat_id
 
@@ -1072,8 +1077,12 @@ class WhatsAppConversationsView(APIView):
                 canonical_convs[key] = c
             else:
                 existing = canonical_convs[key]
-                # Prioritize conversation with prospect_contact
-                if c.prospect_contact and not existing.prospect_contact:
+                # Prioritize real phone conversation over @lid conversation as primary
+                if not c.chat_id.endswith("@lid") and existing.chat_id.endswith("@lid"):
+                    primary, secondary = c, existing
+                elif c.chat_id.endswith("@lid") and not existing.chat_id.endswith("@lid"):
+                    primary, secondary = existing, c
+                elif c.prospect_contact and not existing.prospect_contact:
                     primary, secondary = c, existing
                 elif existing.prospect_contact and not c.prospect_contact:
                     primary, secondary = existing, c
@@ -1093,7 +1102,7 @@ class WhatsAppConversationsView(APIView):
                     primary.prospect = secondary.prospect
                     primary.is_matched = True
                     update_fields.extend(["prospect_contact", "prospect", "is_matched"])
-                if not primary.phone_number and secondary.phone_number:
+                if not primary.phone_number and secondary.phone_number and not str(secondary.phone_number).startswith("+7658"):
                     primary.phone_number = secondary.phone_number
                     update_fields.append("phone_number")
                 if not primary.whatsapp_name and secondary.whatsapp_name:
@@ -2360,6 +2369,130 @@ class WhatsAppGroupCreateView(APIView):
             "group": group_res,
             "conversation": WhatsAppConversationSerializer(conv).data,
         }, status=status.HTTP_201_CREATED)
+
+
+class WhatsAppGroupAddParticipantView(APIView):
+    """
+    Add a user/participant to a WhatsApp group or CRM group.
+    POST /api/whatsapp/groups/<chat_id>/participants/add/
+    Payload: {"phone": "+919003619221"} or {"participants": ["919003619221"]}
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, chat_id):
+        user_session = _get_user_session(request.user, create=True)
+        session_name = user_session.session_name if user_session else "default"
+
+        phones = request.data.get("participants") or []
+        if isinstance(phones, str):
+            phones = [phones]
+        single_phone = request.data.get("phone")
+        if single_phone:
+            phones.append(single_phone)
+
+        clean_phones = []
+        for p in phones:
+            d = re.sub(r"\D+", "", str(p))
+            if len(d) >= 7:
+                clean_phones.append(d)
+
+        if not clean_phones:
+            return Response({"error": "At least one valid phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. CRM internal group handling
+        if chat_id.startswith("crm_group_"):
+            from .webhooks import get_crm_group_participants, set_crm_group_participants
+            current_parts = get_crm_group_participants(chat_id) or []
+            for cp in clean_phones:
+                if cp not in current_parts:
+                    current_parts.append(cp)
+            set_crm_group_participants(chat_id, current_parts)
+            return Response({"status": "success", "added": clean_phones, "participants": current_parts})
+
+        # 2. Real WhatsApp group (@g.us)
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            res = client.add_group_participants(session_name, chat_id, clean_phones)
+            return Response({"status": "success", "result": res, "added": clean_phones}, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to add participant to group %s: %s", chat_id, exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppGroupRemoveParticipantView(APIView):
+    """
+    Remove a user/participant from a WhatsApp group or CRM group.
+    POST /api/whatsapp/groups/<chat_id>/participants/remove/
+    Payload: {"phone": "+919003619221"} or {"participants": ["919003619221"]}
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request, chat_id):
+        user_session = _get_user_session(request.user, create=True)
+        session_name = user_session.session_name if user_session else "default"
+
+        phones = request.data.get("participants") or []
+        if isinstance(phones, str):
+            phones = [phones]
+        single_phone = request.data.get("phone")
+        if single_phone:
+            phones.append(single_phone)
+
+        clean_phones = []
+        for p in phones:
+            d = re.sub(r"\D+", "", str(p))
+            if len(d) >= 7:
+                clean_phones.append(d)
+            elif "@" in str(p):
+                clean_phones.append(str(p).split("@")[0].split(":")[0])
+
+        if not clean_phones:
+            return Response({"error": "At least one valid phone number or participant ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. CRM internal group handling
+        if chat_id.startswith("crm_group_"):
+            from .webhooks import get_crm_group_participants, set_crm_group_participants
+            current_parts = [cp for cp in (get_crm_group_participants(chat_id) or []) if re.sub(r"\D+", "", str(cp)) not in clean_phones]
+            set_crm_group_participants(chat_id, current_parts)
+            return Response({"status": "success", "removed": clean_phones, "participants": current_parts})
+
+        # 2. Real WhatsApp group (@g.us)
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            res = client.remove_group_participants(session_name, chat_id, clean_phones)
+            return Response({"status": "success", "result": res, "removed": clean_phones}, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.error("Failed to remove participant from group %s: %s", chat_id, exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WhatsAppGroupInviteLinkView(APIView):
+    """
+    Get or generate an invite link for a WhatsApp group or CRM group.
+    GET /api/whatsapp/groups/<chat_id>/invite-link/
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def get(self, request, chat_id):
+        user_session = _get_user_session(request.user, create=True)
+        session_name = user_session.session_name if user_session else "default"
+
+        if chat_id.startswith("crm_group_"):
+            invite_link = request.build_absolute_uri(f"/whatsapp/groups/{chat_id}/join/")
+            return Response({"code": chat_id, "link": invite_link})
+
+        from .client import get_waha_client
+        client = get_waha_client()
+        try:
+            res = client.get_group_invite_link(session_name, chat_id)
+            code = res.get("code") or ""
+            link = res.get("link") or (f"https://chat.whatsapp.com/{code}" if code else "")
+            return Response({"code": code, "link": link})
+        except Exception as exc:
+            logger.error("Failed to get invite link for group %s: %s", chat_id, exc)
+            return Response({"error": str(exc), "link": ""}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ---------------------------------------------------------------------------

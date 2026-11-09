@@ -30,6 +30,9 @@ import {
   ExternalLink,
   User,
   Users,
+  UserPlus,
+  UserMinus,
+  Copy,
   MessageSquare,
   LogOut,
   ArrowLeft,
@@ -418,6 +421,14 @@ export default function WhatsappPage() {
   const [groupPhoneInput, setGroupPhoneInput] = useState('');
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [keyPeople, setKeyPeople] = useState([]);
+
+  // Group Management (Add/Remove User, Invite Link)
+  const [showAddMemberInput, setShowAddMemberInput] = useState(false);
+  const [newMemberPhone, setNewMemberPhone] = useState('');
+  const [addingMember, setAddingMember] = useState(false);
+  const [removingMemberPhone, setRemovingMemberPhone] = useState(null);
+  const [groupInviteLink, setGroupInviteLink] = useState('');
+  const [loadingInviteLink, setLoadingInviteLink] = useState(false);
   const [loadingKeyPeople, setLoadingKeyPeople] = useState(false);
 
   // Avatar & CRM Linking
@@ -1786,6 +1797,71 @@ export default function WhatsappPage() {
       setSavingPhone(false);
     }
   };
+
+  // Fetch group invite link
+  const fetchGroupInviteLink = useCallback(async (chatId) => {
+    if (!chatId) return;
+    const isGroup = chatId.endsWith('@g.us') || chatId.startsWith('crm_group_');
+    if (!isGroup) return;
+    setLoadingInviteLink(true);
+    try {
+      const res = await api.get(`/whatsapp/groups/${encodeURIComponent(chatId)}/invite-link/`);
+      if (res.data?.link) {
+        setGroupInviteLink(res.data.link);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch group invite link:', err);
+      setGroupInviteLink('');
+    } finally {
+      setLoadingInviteLink(false);
+    }
+  }, []);
+
+  // Add participant to group
+  const handleAddGroupMember = async () => {
+    if (!newMemberPhone.trim() || !selectedChat?.chat_id) return;
+    setAddingMember(true);
+    try {
+      await api.post(`/whatsapp/groups/${encodeURIComponent(selectedChat.chat_id)}/participants/add/`, {
+        phone: newMemberPhone.trim(),
+      });
+      showToast('Member added to group successfully!', 'success');
+      setNewMemberPhone('');
+      setShowAddMemberInput(false);
+      const res = await api.get(`/whatsapp/contact-info/${encodeURIComponent(selectedChat.chat_id)}/`);
+      if (res.data) setWahaContact(res.data);
+    } catch (err) {
+      showToast(err.response?.data?.error || err.response?.data?.detail || 'Failed to add member to group.', 'error');
+    } finally {
+      setAddingMember(false);
+    }
+  };
+
+  // Remove participant from group
+  const handleRemoveGroupMember = async (memberPhone, memberName = '') => {
+    if (!memberPhone || !selectedChat?.chat_id) return;
+    const displayName = memberName || memberPhone;
+    if (!window.confirm(`Are you sure you want to remove ${displayName} from this group?`)) return;
+    setRemovingMemberPhone(memberPhone);
+    try {
+      await api.post(`/whatsapp/groups/${encodeURIComponent(selectedChat.chat_id)}/participants/remove/`, {
+        phone: memberPhone,
+      });
+      showToast('Member removed from group successfully!', 'success');
+      const res = await api.get(`/whatsapp/contact-info/${encodeURIComponent(selectedChat.chat_id)}/`);
+      if (res.data) setWahaContact(res.data);
+    } catch (err) {
+      showToast(err.response?.data?.error || err.response?.data?.detail || 'Failed to remove member from group.', 'error');
+    } finally {
+      setRemovingMemberPhone(null);
+    }
+  };
+
+  useEffect(() => {
+    if (showProfilePanel && selectedChat?.chat_id && (selectedChat.chat_id.endsWith('@g.us') || selectedChat.chat_id.startsWith('crm_group_') || selectedChat.is_group)) {
+      fetchGroupInviteLink(selectedChat.chat_id);
+    }
+  }, [showProfilePanel, selectedChat?.chat_id, selectedChat?.is_group, fetchGroupInviteLink]);
 
   const handleStartNewChat = (chatId, contactName, prospectName, contactId = null) => {
     let formattedId = chatId.trim();
@@ -3291,6 +3367,62 @@ export default function WhatsappPage() {
               )}
             </div>
 
+            {/* Group Invite Link */}
+            {(wahaContact?.is_group || selectedChat?.chat_id?.endsWith('@g.us') || selectedChat?.is_group) && (
+              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-700 text-[11px] flex items-center gap-1.5 uppercase tracking-wider">
+                    <LinkIcon className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Group Invite Link</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => fetchGroupInviteLink(selectedChat.chat_id)}
+                    className="p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-800 transition cursor-pointer"
+                    title="Refresh invite link"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${loadingInviteLink ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+                {groupInviteLink ? (
+                  <div className="flex items-center gap-1.5 bg-white p-2 rounded-lg border border-slate-200">
+                    <input
+                      type="text"
+                      readOnly
+                      value={groupInviteLink}
+                      className="text-[11px] font-mono text-slate-700 bg-transparent flex-1 truncate outline-none select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(groupInviteLink);
+                        showToast('Invite link copied to clipboard!', 'success');
+                      }}
+                      className="px-2 py-1 bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white rounded-md transition flex items-center gap-1 text-[11px] font-medium cursor-pointer"
+                      title="Copy Link"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between bg-white p-2 rounded-lg border border-slate-200">
+                    <span className="text-[11px] text-slate-500 italic">
+                      {loadingInviteLink ? 'Fetching invite link...' : 'No invite link loaded'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => fetchGroupInviteLink(selectedChat.chat_id)}
+                      disabled={loadingInviteLink}
+                      className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded text-[11px] font-semibold transition cursor-pointer"
+                    >
+                      Get Link
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Associated Members Section */}
             <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 space-y-3">
               <div className="flex items-center justify-between border-b border-slate-200/70 pb-2">
@@ -3298,10 +3430,55 @@ export default function WhatsappPage() {
                   <Users className="w-3.5 h-3.5 text-emerald-600" />
                   <span>{wahaContact?.is_group ? 'Group Members' : 'Profile Members / Team'}</span>
                 </span>
-                <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-1.5 py-0.5 rounded-full">
-                  {wahaContact?.members?.length || 0}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-1.5 py-0.5 rounded-full">
+                    {wahaContact?.members?.length || 0}
+                  </span>
+                  {(wahaContact?.is_group || selectedChat?.chat_id?.endsWith('@g.us') || selectedChat?.is_group) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddMemberInput(!showAddMemberInput)}
+                      className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold flex items-center gap-1 shadow-xs transition cursor-pointer"
+                      title="Add user to group"
+                    >
+                      <UserPlus className="w-3 h-3" />
+                      <span>Add</span>
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {/* Add member inline input */}
+              {showAddMemberInput && (wahaContact?.is_group || selectedChat?.chat_id?.endsWith('@g.us') || selectedChat?.is_group) && (
+                <div className="p-2 bg-white rounded-lg border border-emerald-300 shadow-xs space-y-2">
+                  <span className="text-[10px] font-semibold text-slate-600 block">Add User / Phone Number</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      placeholder="e.g. +919876543210"
+                      value={newMemberPhone}
+                      onChange={(e) => setNewMemberPhone(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddGroupMember()}
+                      className="flex-1 px-2 py-1 text-xs border border-slate-300 rounded-md outline-none focus:border-emerald-500 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddGroupMember}
+                      disabled={addingMember || !newMemberPhone.trim()}
+                      className="px-2.5 py-1 bg-[#00a884] hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-md shadow-xs transition cursor-pointer"
+                    >
+                      {addingMember ? 'Adding...' : 'Add'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowAddMemberInput(false); setNewMemberPhone(''); }}
+                      className="px-2 py-1 text-xs text-slate-500 hover:text-slate-800 rounded-md transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {wahaContact?.company && !wahaContact?.is_group && (
                 <div className="text-[11px] text-slate-500 flex items-center gap-1">
@@ -3355,25 +3532,38 @@ export default function WhatsappPage() {
                         </div>
                       </div>
 
-                      {!member.is_current && (member.phoneNumber || member.chatId) && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const targetId = member.phoneNumber || member.chatId;
-                            handleStartNewChat(
-                              targetId,
-                              member.name || targetId,
-                              member.company || selectedChat.whatsapp_name || 'Direct WhatsApp',
-                              member.id
-                            );
-                            setShowProfilePanel(false);
-                          }}
-                          className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white transition flex-shrink-0 cursor-pointer"
-                          title={`Chat with ${member.name || member.phoneNumber}`}
-                        >
-                          <MessageSquare className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {!member.is_current && (member.phoneNumber || member.chatId) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const targetId = member.phoneNumber || member.chatId;
+                              handleStartNewChat(
+                                targetId,
+                                member.name || targetId,
+                                member.company || selectedChat.whatsapp_name || 'Direct WhatsApp',
+                                member.id
+                              );
+                              setShowProfilePanel(false);
+                            }}
+                            className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white transition flex-shrink-0 cursor-pointer"
+                            title={`Chat with ${member.name || member.phoneNumber}`}
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {(wahaContact?.is_group || selectedChat?.chat_id?.endsWith('@g.us') || selectedChat?.is_group) && !member.is_current && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGroupMember(member.phoneNumber || member.chatId, member.name)}
+                            disabled={removingMemberPhone === (member.phoneNumber || member.chatId)}
+                            className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition flex-shrink-0 cursor-pointer"
+                            title={`Remove ${member.name || member.phoneNumber} from group`}
+                          >
+                            <UserMinus className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

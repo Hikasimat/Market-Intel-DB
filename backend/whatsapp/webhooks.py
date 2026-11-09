@@ -209,8 +209,9 @@ def _call_cache_file(session_name: str) -> str:
 
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
     """
-    Retrieve currently ringing incoming voice call strictly for the user's isolated session.
-    Never falls back to other sessions or global wildcards to preserve strict user data isolation.
+    Retrieve currently ringing incoming voice call for the user's session.
+    Checks user session first, then falls back to 'default' session to ensure
+    unknown callers without an existing conversation ring immediately.
     """
     import time
     now = time.time()
@@ -232,26 +233,30 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
         ref_time = data.get("received_at") or mtime
         return (now - ref_time) <= max_age
 
-    # Check shared temp file strictly for this specific session
-    cache_path = _call_cache_file(session_name)
-    try:
-        if os.path.exists(cache_path):
-            mtime = os.path.getmtime(cache_path)
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if _is_valid_call(data, mtime):
-                LATEST_CALL_CACHE[session_name] = data
-                return data
+    sessions_to_check = [session_name]
+    if session_name and session_name != "default":
+        sessions_to_check.append("default")
+
+    for s in sessions_to_check:
+        cache_path = _call_cache_file(s)
+        try:
+            if os.path.exists(cache_path):
+                mtime = os.path.getmtime(cache_path)
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if _is_valid_call(data, mtime):
+                    LATEST_CALL_CACHE[s] = data
+                    return data
+                else:
+                    LATEST_CALL_CACHE.pop(s, None)
+                    try:
+                        os.remove(cache_path)
+                    except OSError:
+                        pass
             else:
-                LATEST_CALL_CACHE.pop(session_name, None)
-                try:
-                    os.remove(cache_path)
-                except OSError:
-                    pass
-        else:
-            LATEST_CALL_CACHE.pop(session_name, None)
-    except Exception:
-        pass
+                LATEST_CALL_CACHE.pop(s, None)
+        except Exception:
+            pass
 
     return None
 
@@ -1026,8 +1031,27 @@ def _handle_call_event(
         msg_status = WhatsAppMessage.Status.DELIVERED
         unread_inc = 0
 
-    # Find or create session
-    session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+    # Find or resolve session
+    session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
+    if not session_obj or session_name == "default":
+        existing_any = WhatsAppConversation.objects.filter(
+            chat_id=target_chat_id,
+            is_deleted=False,
+        ).select_related("session").first()
+        if existing_any and existing_any.session:
+            session_obj = existing_any.session
+            session_name = session_obj.session_name
+        else:
+            active_sess = WhatsAppSession.objects.filter(
+                status=WhatsAppSession.Status.READY,
+                is_active=True,
+            ).first()
+            if active_sess:
+                session_obj = active_sess
+                session_name = active_sess.session_name
+
+    if not session_obj:
+        session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
     if session_obj.owner is None:
         try:
             from django.contrib.auth import get_user_model
@@ -1200,6 +1224,8 @@ def _handle_call_event(
             "status": "ringing",
         }
         set_active_incoming_call(session_name, incoming_payload)
+        if session_name != "default":
+            set_active_incoming_call("default", incoming_payload)
         logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
     elif is_accepted or is_missed or is_rejected or is_ended or event_type in (
         "call.accepted", "call.voice.active",
@@ -1336,15 +1362,69 @@ def _handle_incoming_message(
             resolved_phone = f"+{d}"
             phone_digits = d
 
-    # If @lid without sender_pn, look up if any existing conversation has this @lid or phone
+    # If @lid without sender_pn, correlate with real phone number across WAHA, CRM, and active conversations
     if not resolved_phone and target_chat_id.endswith("@lid"):
-        existing_saved = WhatsAppConversation.objects.filter(
-            chat_id=target_chat_id,
-            phone_number__isnull=False
-        ).exclude(phone_number="").first()
-        if existing_saved and existing_saved.phone_number:
-            resolved_phone = existing_saved.phone_number
-            phone_digits = re.sub(r"\D+", "", resolved_phone)
+        # 1. Query WAHA contact info for real number
+        try:
+            from .client import get_waha_client
+            w_client = get_waha_client()
+            c_info = w_client.get_contact_info(session_name, target_chat_id)
+            c_num = c_info.get("number") or c_info.get("phone") or ""
+            c_d = re.sub(r"\D+", "", str(c_num).split("@")[0].split(":")[0])
+            if len(c_d) >= 8 and not str(c_num).endswith("@lid"):
+                resolved_phone = f"+{c_d}"
+                phone_digits = c_d
+        except Exception:
+            pass
+
+        # 2. Check if any existing conversation already has this @lid saved
+        if not resolved_phone:
+            existing_saved = WhatsAppConversation.objects.filter(
+                chat_id=target_chat_id,
+                phone_number__isnull=False
+            ).exclude(phone_number="").first()
+            if existing_saved and existing_saved.phone_number and not str(existing_saved.phone_number).startswith("+7658"):
+                resolved_phone = existing_saved.phone_number
+                phone_digits = re.sub(r"\D+", "", resolved_phone)
+
+        # 3. Check pushName against CRM contact or existing conversation whatsapp_name
+        p_name = (
+            _data.get("pushName")
+            or event_data.get("pushName")
+            or _data.get("notifyName")
+            or ""
+        ).strip()
+        if not resolved_phone and p_name:
+            from prospects.models import ProspectContact
+            crm_match = ProspectContact.objects.filter(contact_name__iexact=p_name).first()
+            if crm_match and crm_match.phone_number:
+                resolved_phone = crm_match.phone_number
+                phone_digits = re.sub(r"\D+", "", resolved_phone)
+            else:
+                named_conv = WhatsAppConversation.objects.filter(
+                    session=session_obj,
+                    whatsapp_name__iexact=p_name,
+                    is_deleted=False,
+                ).exclude(chat_id__endswith="@g.us").first()
+                if named_conv and named_conv.phone_number and not str(named_conv.phone_number).startswith("+7658"):
+                    resolved_phone = named_conv.phone_number
+                    phone_digits = re.sub(r"\D+", "", resolved_phone)
+                    conversation = named_conv
+
+        # 4. Correlate with recently messaged 1-on-1 chat in this session (e.g. from "+ New Chat")
+        if not resolved_phone and not conversation:
+            from datetime import timedelta
+            recent_cutoff = timezone.now() - timedelta(hours=3)
+            recent_outbound = WhatsAppConversation.objects.filter(
+                session=session_obj,
+                is_deleted=False,
+                last_message_at__gte=recent_cutoff,
+                last_message_from_me=True,
+            ).exclude(chat_id__endswith="@g.us").exclude(chat_id=target_chat_id).order_by("-last_message_at").first()
+            if recent_outbound and recent_outbound.phone_number and not str(recent_outbound.phone_number).startswith("+7658"):
+                resolved_phone = recent_outbound.phone_number
+                phone_digits = re.sub(r"\D+", "", resolved_phone)
+                conversation = recent_outbound
 
     # Build candidate JIDs for 1-on-1 chats to match @s.whatsapp.net, @c.us, and @lid
     alt_chat_id = None
@@ -1486,8 +1566,7 @@ def _handle_incoming_message(
             chat_id=target_chat_id,
             phone_number__isnull=False
         ).exclude(phone_number="").first()
-        if existing_saved:
-            resolved_phone = existing_saved.phone_number
+        if existing_saved and existing_saved.phone_number and not str(existing_saved.phone_number).startswith("+7658"):
             resolved_phone = existing_saved.phone_number
 
     search_digits = re.sub(r"\D+", "", resolved_phone or phone_digits or "")

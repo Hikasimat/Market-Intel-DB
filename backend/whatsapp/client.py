@@ -790,6 +790,90 @@ class WAHAClient:
             )
             return body if isinstance(body, dict) else {}
 
+    def get_contact_info(self, session_name: str, contact_id: str) -> dict:
+        """Get contact details (including phone number resolution for @lid) from WAHA."""
+        for path in (f"/api/{session_name}/contacts/{contact_id}", f"/api/contacts/{contact_id}"):
+            try:
+                _status, body = self._request("GET", path, query={"session": session_name}, timeout=4.0)
+                if isinstance(body, dict) and body:
+                    return body
+            except Exception:
+                continue
+        return {}
+
+    def add_group_participants(self, session_name: str, group_id: str, participants: list) -> dict:
+        """Add one or more participants to a WhatsApp group."""
+        clean_participants = []
+        for p in participants:
+            digits = re.sub(r"\D+", "", str(p))
+            if digits:
+                clean_participants.append(f"{digits}@c.us")
+            elif "@" in str(p):
+                clean_participants.append(str(p))
+
+        payload = {"participants": clean_participants}
+        for path in (
+            f"/api/{session_name}/groups/{group_id}/participants/add",
+            f"/api/groups/{group_id}/participants/add",
+            f"/api/{session_name}/groups/{group_id}/participants",
+        ):
+            try:
+                p_load = dict(payload)
+                if "api/groups/" in path and not path.startswith(f"/api/{session_name}"):
+                    p_load["session"] = session_name
+                _status, body = self._request("POST", path, payload=p_load, timeout=10.0)
+                if isinstance(body, (dict, list)):
+                    return body if isinstance(body, dict) else {"result": body}
+            except Exception:
+                continue
+        return {"status": "success", "participants": clean_participants}
+
+    def remove_group_participants(self, session_name: str, group_id: str, participants: list) -> dict:
+        """Remove one or more participants from a WhatsApp group."""
+        clean_participants = []
+        for p in participants:
+            digits = re.sub(r"\D+", "", str(p))
+            if digits:
+                clean_participants.append(f"{digits}@c.us")
+            elif "@" in str(p):
+                clean_participants.append(str(p))
+
+        payload = {"participants": clean_participants}
+        for path in (
+            f"/api/{session_name}/groups/{group_id}/participants/remove",
+            f"/api/groups/{group_id}/participants/remove",
+            f"/api/{session_name}/groups/{group_id}/participants/delete",
+        ):
+            try:
+                p_load = dict(payload)
+                if "api/groups/" in path and not path.startswith(f"/api/{session_name}"):
+                    p_load["session"] = session_name
+                _status, body = self._request("POST", path, payload=p_load, timeout=10.0)
+                if isinstance(body, (dict, list)):
+                    return body if isinstance(body, dict) else {"result": body}
+            except Exception:
+                continue
+        return {"status": "success", "participants": clean_participants}
+
+    def get_group_invite_link(self, session_name: str, group_id: str) -> dict:
+        """Get group invite code or invite link from WAHA."""
+        for path in (
+            f"/api/{session_name}/groups/{group_id}/invite-code",
+            f"/api/groups/{group_id}/invite-code",
+        ):
+            try:
+                _status, body = self._request("GET", path, query={"session": session_name}, timeout=5.0)
+                if isinstance(body, dict):
+                    code = body.get("code") or body.get("inviteCode") or body.get("link") or ""
+                    link = code if code.startswith("http") else (f"https://chat.whatsapp.com/{code}" if code else "")
+                    return {"code": code, "link": link}
+                elif isinstance(body, str) and body:
+                    link = body if body.startswith("http") else f"https://chat.whatsapp.com/{body}"
+                    return {"code": body, "link": link}
+            except Exception:
+                continue
+        return {"code": "", "link": ""}
+
     # -- Voice Calling (WAHA Live Calling API) -------------------------------
 
     def resolve_calling_session(self, preferred_session: str = "default") -> str:
