@@ -194,14 +194,14 @@ def _get_owned_session(request, session_id=None, session_name=None):
     Retrieve an active WhatsAppSession for the requesting user.
     Strictly enforces session ownership: users only access their own session.
     """
-    qs = WhatsAppSession.objects.filter(is_active=True)
+    qs = WhatsAppSession.objects.filter(is_active=True, owner=request.user)
     if session_id:
         sess = qs.filter(pk=session_id).first()
-        if sess and (request.user.is_superuser or sess.owner == request.user):
+        if sess:
             return sess
     if session_name:
         sess = qs.filter(session_name=session_name).first()
-        if sess and (request.user.is_superuser or sess.owner == request.user):
+        if sess:
             return sess
 
     return _get_user_session(request.user, create=True)
@@ -221,7 +221,12 @@ def _get_owned_conversation(request, conversation_id):
             {"detail": "Conversation not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
-    if not request.user.is_superuser and conv.session and conv.session.owner and conv.session.owner != request.user:
+    user_sess = _get_user_session(request.user, create=True)
+    is_owner = (
+        (conv.session and conv.session.owner == request.user)
+        or (conv.session and user_sess and conv.session_id == user_sess.id)
+    )
+    if not is_owner:
         return None, Response(
             {"detail": "Conversation not found or not owned by you."},
             status=status.HTTP_404_NOT_FOUND,
@@ -1022,11 +1027,8 @@ class WhatsAppConversationsView(APIView):
             except Exception as e:
                 logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
-        if user.is_superuser and session_id:
-            qs = qs.filter(session_id=session_id)
-        else:
-            # Strictly scoped to current user's session!
-            qs = qs.filter(session=user_session)
+        # Strictly scoped to current user's session and ownership
+        qs = qs.filter(Q(session=user_session) | Q(session__owner=user))
 
         # Deduplicate conversations by canonical phone digits / contact / group ID and auto-merge duplicate threads
         conversations = list(qs)
@@ -1166,10 +1168,9 @@ class WhatsAppConversationMessagesView(APIView):
 
         limit = min(int(request.query_params.get("limit", 2000)), 5000)
 
-        if conv.session and conv.session.phone_number:
+        if conv.session:
             base_qs = WhatsAppMessage.objects.filter(
-                conversation__chat_id=conv.chat_id,
-                conversation__session__phone_number=conv.session.phone_number,
+                Q(conversation=conv) | Q(conversation__session=conv.session, conversation__chat_id=conv.chat_id),
                 is_deleted=False,
             )
         else:
@@ -1938,82 +1939,184 @@ class WhatsAppProfilePicView(APIView):
 
 class WhatsAppContactInfoView(APIView):
     """
-    Get contact details & CRM linking information for a WhatsApp chat.
+    Get contact details, CRM linking information, and all associated members for a WhatsApp chat.
     GET /api/whatsapp/contact-info/<chat_id>/
     """
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request, chat_id):
-        conv = WhatsAppConversation.objects.filter(chat_id=chat_id).select_related(
-            "prospect_contact", "prospect"
-        ).first()
+        user_session = _get_user_session(request.user, create=True)
+        # Strictly scope conversation lookup to current user's session
+        conv = WhatsAppConversation.objects.filter(
+            chat_id=chat_id,
+            session=user_session,
+        ).select_related("prospect_contact", "prospect").first()
+        if not conv and user_session and user_session.owner:
+            conv = WhatsAppConversation.objects.filter(
+                chat_id=chat_id,
+                session__owner=user_session.owner,
+            ).select_related("prospect_contact", "prospect").first()
 
         clean_phone = chat_id.split("@")[0].split(":")[0]
+        contact = conv.prospect_contact if conv else None
+        prospect = (conv.prospect or (contact.prospect if contact else None)) if conv else None
+        is_group = chat_id.endswith("@g.us") or (conv and conv.chat_id.endswith("@g.us"))
 
-        if conv:
-            contact = conv.prospect_contact
-            prospect = conv.prospect or (contact.prospect if contact else None)
+        if not contact and not is_group:
+            # Fallback: search ProspectContact by indexed phone digits
+            digits = re.sub(r"\D+", "", clean_phone)
+            if len(digits) >= 8:
+                suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+                contact = (
+                    ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                    .select_related("prospect")
+                    .first()
+                )
+                if not contact:
+                    for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                        stored = re.sub(r"\D+", "", pc.phone_number or "")
+                        if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
+                            contact = pc
+                            break
+                if contact and not prospect:
+                    prospect = contact.prospect
 
-            data = {
-                "chatId": conv.chat_id,
-                "phoneNumber": clean_phone,
-                "name": conv.whatsapp_name or (contact.contact_name if contact else ""),
-                "company": prospect.company_name if prospect else "",
-                "contact_name": contact.contact_name if contact else "",
-                "designation": getattr(contact, "designation", "") if contact else "",
-                "official_email": getattr(contact, "official_email", "") if contact else "",
-                "is_matched": conv.is_matched,
-                "prospect_id": str(prospect.id) if prospect else None,
-                "prospect_contact_id": str(contact.id) if contact else None,
-                "custom_avatar_url": conv.custom_avatar_url or "",
-            }
-            return Response(data)
+        # -------------------------------------------------------------------
+        # Build Associated Members List
+        # -------------------------------------------------------------------
+        members = []
+        seen_member_phones = set()
 
-        # Fallback: search ProspectContact by indexed phone digits
-        digits = re.sub(r"\D+", "", clean_phone)
-        matched = None
-        if len(digits) >= 8:
-            suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-            matched = (
-                ProspectContact.objects.filter(phone_digits__endswith=suffix)
-                .select_related("prospect")
-                .first()
-            )
-            if not matched:
-                for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                    stored = re.sub(r"\D+", "", pc.phone_number or "")
-                    if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
-                        matched = pc
-                        break
+        if is_group:
+            # 1. Fetch group participants from WAHA
+            from .client import get_waha_client
+            client = get_waha_client()
+            group_info = {}
+            try:
+                group_info = client.get_group_info(user_session.session_name, chat_id)
+            except Exception as e:
+                logger.debug("Failed to get group info from WAHA for %s: %s", chat_id, e)
 
-        if matched:
-            return Response({
-                "chatId": chat_id,
-                "phoneNumber": clean_phone,
-                "name": matched.contact_name,
-                "company": matched.prospect.company_name if matched.prospect else "",
-                "contact_name": matched.contact_name,
-                "designation": matched.designation or "",
-                "official_email": matched.official_email or "",
-                "is_matched": True,
-                "prospect_id": str(matched.prospect_id) if matched.prospect_id else None,
-                "prospect_contact_id": str(matched.id),
-                "custom_avatar_url": "",
-            })
+            raw_participants = group_info.get("participants") if isinstance(group_info, dict) else []
+            for p in (raw_participants or []):
+                if not isinstance(p, dict):
+                    continue
+                p_id = str(p.get("id") or p.get("jid") or "").strip()
+                p_phone = re.sub(r"\D+", "", p_id.split("@")[0].split(":")[0])
+                if not p_phone or p_phone in seen_member_phones:
+                    continue
+                seen_member_phones.add(p_phone)
 
-        return Response({
-            "chatId": chat_id,
+                is_admin = p.get("admin") in ("admin", "superadmin")
+                suffix = p_phone[-10:] if len(p_phone) >= 10 else p_phone[-8:]
+
+                matched_crm = None
+                if len(p_phone) >= 8:
+                    matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
+                    if not matched_crm:
+                        for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                            stored = re.sub(r"\D+", "", pc.phone_number or "")
+                            if stored and (stored == p_phone or stored.endswith(suffix)):
+                                matched_crm = pc
+                                break
+
+                display_name = (
+                    matched_crm.contact_name
+                    if matched_crm
+                    else (p.get("name") or p.get("notifyName") or f"+{p_phone}")
+                )
+                members.append({
+                    "id": str(matched_crm.id) if matched_crm else p_id,
+                    "chatId": f"{p_phone}@c.us",
+                    "phoneNumber": f"+{p_phone}",
+                    "name": display_name,
+                    "designation": matched_crm.designation if matched_crm else ("Group Admin" if is_admin else "Participant"),
+                    "official_email": matched_crm.official_email if matched_crm else "",
+                    "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else "",
+                    "is_admin": is_admin,
+                    "is_current": False,
+                })
+
+            # If WAHA returned no participants (or offline), fallback to distinct senders in DB
+            if not members and conv:
+                from .models import WhatsAppMessage
+                db_senders = list(
+                    WhatsAppMessage.objects.filter(conversation=conv)
+                    .exclude(sender_phone="")
+                    .values_list("sender_phone", flat=True)
+                    .distinct()
+                )
+                for sender in db_senders:
+                    s_digits = re.sub(r"\D+", "", str(sender))
+                    if not s_digits or s_digits in seen_member_phones:
+                        continue
+                    seen_member_phones.add(s_digits)
+                    suffix = s_digits[-10:] if len(s_digits) >= 10 else s_digits[-8:]
+                    matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first() if len(s_digits) >= 8 else None
+                    members.append({
+                        "id": str(matched_crm.id) if matched_crm else f"{s_digits}@c.us",
+                        "chatId": f"{s_digits}@c.us",
+                        "phoneNumber": f"+{s_digits}",
+                        "name": matched_crm.contact_name if matched_crm else f"+{s_digits}",
+                        "designation": matched_crm.designation if matched_crm else "Participant",
+                        "official_email": matched_crm.official_email if matched_crm else "",
+                        "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else "",
+                        "is_admin": False,
+                        "is_current": False,
+                    })
+        else:
+            # 1-on-1 Contact: Fetch all Key People / Team Members from the same organization
+            if prospect:
+                colleagues = ProspectContact.objects.filter(
+                    prospect=prospect,
+                    is_deleted=False,
+                ).order_by("-is_primary", "contact_name")
+
+                for col in colleagues:
+                    col_phone = re.sub(r"\D+", "", str(col.phone_number or ""))
+                    is_cur = bool(contact and col.id == contact.id)
+                    members.append({
+                        "id": str(col.id),
+                        "chatId": f"{col_phone}@c.us" if col_phone else "",
+                        "phoneNumber": col.phone_number or "",
+                        "name": col.contact_name,
+                        "designation": col.designation or ("Key Person" if col.is_primary else ""),
+                        "official_email": col.official_email or "",
+                        "company": prospect.company_name,
+                        "is_admin": False,
+                        "is_primary": bool(col.is_primary),
+                        "is_current": is_cur,
+                    })
+            elif contact:
+                members.append({
+                    "id": str(contact.id),
+                    "chatId": f"{clean_phone}@c.us",
+                    "phoneNumber": contact.phone_number or f"+{clean_phone}",
+                    "name": contact.contact_name,
+                    "designation": contact.designation or "",
+                    "official_email": contact.official_email or "",
+                    "company": "",
+                    "is_admin": False,
+                    "is_primary": False,
+                    "is_current": True,
+                })
+
+        data = {
+            "chatId": conv.chat_id if conv else chat_id,
             "phoneNumber": clean_phone,
-            "name": "",
-            "company": "",
-            "contact_name": "",
-            "designation": "",
-            "official_email": "",
-            "is_matched": False,
-            "prospect_id": None,
-            "prospect_contact_id": None,
-            "custom_avatar_url": "",
-        })
+            "name": (conv.whatsapp_name if conv else "") or (contact.contact_name if contact else ""),
+            "company": prospect.company_name if prospect else "",
+            "contact_name": contact.contact_name if contact else "",
+            "designation": getattr(contact, "designation", "") if contact else "",
+            "official_email": getattr(contact, "official_email", "") if contact else "",
+            "is_matched": (conv.is_matched if conv else False) or (contact is not None) or is_group,
+            "prospect_id": str(prospect.id) if prospect else None,
+            "prospect_contact_id": str(contact.id) if contact else None,
+            "custom_avatar_url": conv.custom_avatar_url if conv else "",
+            "is_group": is_group,
+            "members": members,
+        }
+        return Response(data)
 
 
 class WhatsAppCRMContactsView(APIView):
@@ -2362,8 +2465,6 @@ class WhatsAppCallStatusView(APIView):
                 logger.debug("Periodic webhook/message sync skipped: %s", sync_err)
 
         incoming_call = get_active_incoming_call(session_name)
-        if not incoming_call:
-            incoming_call = get_active_incoming_call("default")
 
         session_ready = session_obj.status == WhatsAppSession.Status.READY
         force_refresh = request.query_params.get("refresh") == "true"
@@ -2390,9 +2491,7 @@ class WhatsAppCallStatusView(APIView):
                     "resolved_session": session_name,
                 }
 
-        resolved_session = call_status.get("resolved_session") or session_name
-        if not incoming_call and resolved_session != session_name:
-            incoming_call = get_active_incoming_call(resolved_session)
+        resolved_session = session_name
 
         if isinstance(incoming_call, dict) and incoming_call.get("call_id"):
             incoming_call = dict(incoming_call)
@@ -2425,7 +2524,7 @@ class WhatsAppCallStartView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or "").strip()
-        session_name = req_session or default_session
+        session_name = default_session if (not req_session or req_session == "default") else req_session
 
         phone = request.data.get("phone") or ""
         chat_id = request.data.get("chat_id") or ""
@@ -2506,7 +2605,7 @@ class WhatsAppCallAcceptView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
-        session_name = req_session or default_session
+        session_name = default_session if (not req_session or req_session == "default") else req_session
 
         from .client import get_waha_client
         from .webhooks import clear_active_call, mark_active_call_connected, mark_call_handled
@@ -2549,7 +2648,7 @@ class WhatsAppCallRejectView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
-        session_name = req_session or default_session
+        session_name = default_session if (not req_session or req_session == "default") else req_session
 
         from .client import get_waha_client
         from .webhooks import clear_active_call, mark_call_handled

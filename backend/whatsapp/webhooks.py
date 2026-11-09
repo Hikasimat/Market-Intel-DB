@@ -208,10 +208,15 @@ def _call_cache_file(session_name: str) -> str:
 
 
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
-    """Retrieve currently ringing incoming voice call for user session."""
+    """
+    Retrieve currently ringing incoming voice call strictly for the user's isolated session.
+    Never falls back to other sessions or global wildcards to preserve strict user data isolation.
+    """
     import time
-    import glob
     now = time.time()
+
+    if not session_name:
+        return None
 
     def _is_valid_call(data: dict, mtime: float) -> bool:
         if not isinstance(data, dict):
@@ -227,47 +232,24 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
         ref_time = data.get("received_at") or mtime
         return (now - ref_time) <= max_age
 
-    # 1. Check shared temp file first (multi-worker source of truth) for session & default
-    for s in (session_name, "default"):
-        if not s:
-            continue
-        cache_path = _call_cache_file(s)
-        try:
-            if os.path.exists(cache_path):
-                mtime = os.path.getmtime(cache_path)
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if _is_valid_call(data, mtime):
-                    LATEST_CALL_CACHE[s] = data
-                    return data
-                else:
-                    LATEST_CALL_CACHE.pop(s, None)
-                    try:
-                        os.remove(cache_path)
-                    except OSError:
-                        pass
-            else:
-                LATEST_CALL_CACHE.pop(s, None)
-        except Exception:
-            pass
-
-    # 2. Check any other active call file in temp dir
+    # Check shared temp file strictly for this specific session
+    cache_path = _call_cache_file(session_name)
     try:
-        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
-        for fpath in glob.glob(pattern):
-            try:
-                mtime = os.path.getmtime(fpath)
-                with open(fpath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if _is_valid_call(data, mtime):
-                    return data
-                else:
-                    try:
-                        os.remove(fpath)
-                    except OSError:
-                        pass
-            except Exception:
-                pass
+        if os.path.exists(cache_path):
+            mtime = os.path.getmtime(cache_path)
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if _is_valid_call(data, mtime):
+                LATEST_CALL_CACHE[session_name] = data
+                return data
+            else:
+                LATEST_CALL_CACHE.pop(session_name, None)
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+        else:
+            LATEST_CALL_CACHE.pop(session_name, None)
     except Exception:
         pass
 
@@ -287,16 +269,14 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
     if clean_id:
         call_data["call_id"] = clean_id
     call_data["received_at"] = time.time()
-    for s in (session_name, "default"):
-        if not s:
-            continue
-        LATEST_CALL_CACHE[s] = call_data
-        try:
-            cache_path = _call_cache_file(s)
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(call_data, f)
-        except Exception as e:
-            logger.debug("Failed to write call cache file: %s", e)
+    s = session_name or "default"
+    LATEST_CALL_CACHE[s] = call_data
+    try:
+        cache_path = _call_cache_file(s)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(call_data, f)
+    except Exception as e:
+        logger.debug("Failed to write call cache file: %s", e)
 
 
 def mark_active_call_connected(session_name: str = "default", call_id: Optional[str] = None) -> None:
@@ -1063,11 +1043,18 @@ def _handle_call_event(
         except Exception:
             pass
 
-    # Find or create conversation
-    conversation = (
-        WhatsAppConversation.objects.filter(chat_id=target_chat_id, session=session_obj, is_deleted=False).first()
-        or WhatsAppConversation.objects.filter(chat_id=target_chat_id, is_deleted=False).first()
-    )
+    # Find or create conversation strictly for this user session
+    conversation = WhatsAppConversation.objects.filter(
+        chat_id=target_chat_id,
+        session=session_obj,
+        is_deleted=False,
+    ).first()
+    if not conversation and session_obj.owner:
+        conversation = WhatsAppConversation.objects.filter(
+            chat_id=target_chat_id,
+            session__owner=session_obj.owner,
+            is_deleted=False,
+        ).first()
 
     if not conversation:
         phone_digits = _extract_phone_digits(target_chat_id)
@@ -2010,7 +1997,11 @@ def sync_recent_waha_messages(
 
     synced = 0
     for _msg_dt, item in candidates:
-        sess = str(item.get("session") or default_session_name or "default").strip()
+        item_sess = str(item.get("session") or "").strip()
+        if default_session_name and item_sess and item_sess != default_session_name:
+            # Skip messages belonging to a different user session
+            continue
+        sess = item_sess or default_session_name or "default"
         try:
             created = _handle_incoming_message(item, sess, event_record=None, is_history_sync=True)
             if created:
@@ -2030,6 +2021,7 @@ def sync_two_day_whatsapp_history(
     Synchronize WhatsApp chat history and messages from the last `days` days (default 2 days).
     Fetches any missing chats or messages from WAHA / WAHA-NoWeb-Light, preserves original
     message timestamps, and reconciles conversation ordering.
+    Strictly isolated to `session_name`.
     """
     from datetime import timedelta
     from .client import get_waha_client
@@ -2041,6 +2033,10 @@ def sync_two_day_whatsapp_history(
 
     def _add_msg(m: dict, fallback_chat_id: str = ""):
         if not isinstance(m, dict):
+            return
+        m_sess = str(m.get("session") or "").strip()
+        if m_sess and session_name and m_sess != session_name:
+            # Strictly ignore messages from other user sessions
             return
         msg_copy = dict(m)
         if fallback_chat_id and not msg_copy.get("chatId"):

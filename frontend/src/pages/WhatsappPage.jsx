@@ -1077,11 +1077,11 @@ export default function WhatsappPage() {
       const startRes = await api.post('/whatsapp/calls/start/', {
         phone: cleanPhone,
         chat_id: selectedChat.chat_id,
-        session_name: selectedSession?.session_name || 'default',
+        session_name: selectedSession?.session_name || undefined,
       });
 
       const newCallId = startRes.data?.call_id || startRes.data?.callId;
-      const resolvedSession = startRes.data?.session_name || selectedSession?.session_name || 'default';
+      const resolvedSession = startRes.data?.session_name || selectedSession?.session_name;
       const audioWsUrl = startRes.data?.audio_ws_url || '';
       if (!newCallId) {
         throw new Error(startRes.data?.error || 'No call ID returned by WhatsApp calling service');
@@ -1414,7 +1414,7 @@ export default function WhatsappPage() {
       if (selectedChat.chat_id) {
         api.get(`/whatsapp/contact-info/${selectedChat.chat_id}/`)
           .then(r => {
-            if (r.data?.phoneNumber) setWahaContact(r.data);
+            if (r.data) setWahaContact(r.data);
           })
           .catch(err => console.error('Contact info error:', err));
       }
@@ -2468,11 +2468,15 @@ export default function WhatsappPage() {
           <>
             {/* Authentic Chat Header */}
             <div className="h-16 px-4 bg-[#f0f2f5] border-b border-[#e9edef] flex items-center justify-between z-10 shadow-sm">
-              <div className="flex items-center gap-3 min-w-0">
+              <div
+                onClick={() => setShowProfilePanel(true)}
+                className="flex items-center gap-3 min-w-0 cursor-pointer hover:opacity-85 transition select-none group"
+                title="Click to view contact profile and members"
+              >
                 <ContactAvatar chat={selectedChat} size="sm" avatarVersion={avatarVersion} />
 
                 <div className="min-w-0">
-                  <h2 className="font-semibold text-slate-800 text-sm truncate">
+                  <h2 className="font-semibold text-slate-800 text-sm truncate group-hover:text-emerald-700 transition">
                     {getContactDisplayName(selectedChat)}
                   </h2>
                   <p className="text-xs text-slate-500 truncate">
@@ -3284,6 +3288,103 @@ export default function WhatsappPage() {
                     <LinkIcon className="w-3.5 h-3.5" /> Link to CRM Contact
                   </button>
                 </div>
+              )}
+            </div>
+
+            {/* Associated Members Section */}
+            <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-200/70 pb-2">
+                <span className="font-semibold text-slate-700 text-[11px] flex items-center gap-1.5 uppercase tracking-wider">
+                  <Users className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{wahaContact?.is_group ? 'Group Members' : 'Profile Members / Team'}</span>
+                </span>
+                <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-1.5 py-0.5 rounded-full">
+                  {wahaContact?.members?.length || 0}
+                </span>
+              </div>
+
+              {wahaContact?.company && !wahaContact?.is_group && (
+                <div className="text-[11px] text-slate-500 flex items-center gap-1">
+                  <Building className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                  <span className="truncate font-medium text-slate-700">{wahaContact.company}</span>
+                </div>
+              )}
+
+              {wahaContact?.members && wahaContact.members.length > 0 ? (
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {wahaContact.members.map((member, idx) => (
+                    <div
+                      key={member.id || idx}
+                      className={`p-2 rounded-lg border transition flex items-center justify-between gap-2 ${
+                        member.is_current
+                          ? 'bg-emerald-50/70 border-emerald-200'
+                          : 'bg-white border-slate-200 hover:border-emerald-300 hover:shadow-xs'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div className="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                          {(member.name || member.phoneNumber || 'U').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-800 text-xs truncate">
+                              {member.name || member.phoneNumber}
+                            </span>
+                            {member.is_current && (
+                              <span className="text-[9px] bg-emerald-200 text-emerald-900 font-bold px-1 py-0.2 rounded-xs">
+                                Active
+                              </span>
+                            )}
+                            {member.is_admin && (
+                              <span className="text-[9px] bg-amber-100 text-amber-800 font-bold px-1 py-0.2 rounded-xs">
+                                Admin
+                              </span>
+                            )}
+                            {member.is_primary && !member.is_current && (
+                              <span className="text-[9px] bg-blue-100 text-blue-800 font-bold px-1 py-0.2 rounded-xs">
+                                Primary
+                              </span>
+                            )}
+                          </div>
+                          {(member.designation || member.phoneNumber) && (
+                            <p className="text-[10px] text-slate-500 truncate">
+                              {member.designation ? `${member.designation} • ` : ''}
+                              <span className="font-mono">{member.phoneNumber || ''}</span>
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {!member.is_current && (member.phoneNumber || member.chatId) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const targetId = member.phoneNumber || member.chatId;
+                            handleStartNewChat(
+                              targetId,
+                              member.name || targetId,
+                              member.company || selectedChat.whatsapp_name || 'Direct WhatsApp',
+                              member.id
+                            );
+                            setShowProfilePanel(false);
+                          }}
+                          className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white transition flex-shrink-0 cursor-pointer"
+                          title={`Chat with ${member.name || member.phoneNumber}`}
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-500 py-2 text-center italic">
+                  {wahaContact?.is_group
+                    ? 'No participants found'
+                    : selectedChat.is_matched
+                    ? 'No other members recorded for this company'
+                    : 'Link this contact to CRM to view associated members'}
+                </p>
               )}
             </div>
 
