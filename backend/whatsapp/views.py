@@ -794,6 +794,7 @@ class WhatsAppSendMessageView(APIView):
                     intent_tag="manual",
                     request_id=_get_request_id(request),
                     ip_address=_get_client_ip(request),
+                    chat_id_override=raw_chat_id,
                 )
                 return Response(
                     WhatsAppMessageSerializer(wa_message).data,
@@ -1205,7 +1206,13 @@ class WhatsAppConversationSyncView(APIView):
         session_name = conv.session.session_name
 
         try:
+            from .webhooks import sync_recent_waha_messages
             imported_count = 0
+            try:
+                recent_stats_msgs = client.get_recent_messages_from_stats(force=True)
+                imported_count += sync_recent_waha_messages(recent_stats_msgs, session_name)
+            except Exception:
+                pass
             res = client.get_messages(session_name, conv.chat_id, limit=100)
             if isinstance(res, list):
                 for msg_data in res:
@@ -2242,6 +2249,63 @@ class WhatsAppGroupCreateView(APIView):
 # WhatsApp Voice Calling Views
 # ---------------------------------------------------------------------------
 
+_LAST_WEBHOOK_AND_MSG_SYNC_TS: float = 0.0
+
+
+def _resolve_target_webhook_url(request) -> str:
+    """Resolve the public or local Django webhook endpoint URL for WAHA."""
+    try:
+        host = (request.get_host() or "").lower()
+        origin = (request.META.get("HTTP_ORIGIN") or "").lower()
+        if "hikasimat.com" in host or "hikasimat.com" in origin:
+            return "https://marketintel.hikasimat.com/api/whatsapp/webhook/"
+        built = request.build_absolute_uri("/api/whatsapp/webhook/")
+        return built.replace("marketinteldbapp.hikasimat.com", "marketintel.hikasimat.com")
+    except Exception:
+        return ""
+
+
+def _build_audio_ws_url(request, session_name: str, call_id: str) -> str:
+    """
+    Construct the authenticated WebSocket URL for WAHA-NoWeb-Light's AudioSocketGateway
+    (/api/calling/sessions/<session>/calls/<callId>/socket?x-api-key=<key>) so browser
+    voice audio bypasses AWS EC2 / Docker UDP NAT restrictions in production.
+    """
+    if not call_id or call_id == "undefined":
+        return ""
+    from urllib.parse import quote
+    waha_url = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:3000").strip().rstrip("/")
+    api_key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "").strip()
+    host = ""
+    origin = ""
+    try:
+        host = (request.get_host() or "").lower()
+        origin = (request.META.get("HTTP_ORIGIN") or "").lower()
+    except Exception:
+        pass
+
+    is_prod_req = "hikasimat.com" in host or "hikasimat.com" in origin
+    is_internal_waha = any(
+        h in waha_url.lower() for h in ("localhost", "127.0.0.1", "host.docker.internal", "172.17.")
+    )
+
+    if is_prod_req and is_internal_waha:
+        ws_base = os.environ.get(
+            "WHATSAPP_PUBLIC_WS_URL", "wss://marketinteldbwhatsapp.hikasimat.com"
+        ).strip().rstrip("/")
+    elif waha_url.startswith("https://"):
+        ws_base = "wss://" + waha_url[len("https://"):]
+    elif waha_url.startswith("http://"):
+        ws_base = "ws://" + waha_url[len("http://"):]
+    else:
+        ws_base = waha_url
+
+    clean_sess = quote(str(session_name or "default"), safe="")
+    clean_call = quote(str(call_id).replace("call_", ""), safe="")
+    query = f"?x-api-key={quote(api_key, safe='')}" if api_key else ""
+    return f"{ws_base}/api/calling/sessions/{clean_sess}/calls/{clean_call}/socket{query}"
+
+
 class WhatsAppCallStatusView(APIView):
     """
     Get live status of WhatsApp voice calling subsystem for user's connected session.
@@ -2250,10 +2314,26 @@ class WhatsAppCallStatusView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request):
+        global _LAST_WEBHOOK_AND_MSG_SYNC_TS
         session_obj = _get_user_session(request.user, create=True)
         session_name = session_obj.session_name
 
-        from .webhooks import get_active_incoming_call
+        from .client import _CALLING_STATUS_CACHE, get_waha_client
+        from .webhooks import get_active_incoming_call, sync_recent_waha_messages
+        import time
+
+        now = time.time()
+        if now - _LAST_WEBHOOK_AND_MSG_SYNC_TS >= 20.0:
+            _LAST_WEBHOOK_AND_MSG_SYNC_TS = now
+            try:
+                client = get_waha_client()
+                client.ensure_webhook_configured(_resolve_target_webhook_url(request))
+                recent_msgs = client.get_recent_messages_from_stats()
+                if recent_msgs:
+                    sync_recent_waha_messages(recent_msgs, session_name)
+            except Exception as sync_err:
+                logger.debug("Periodic webhook/message sync skipped: %s", sync_err)
+
         incoming_call = get_active_incoming_call(session_name)
         if not incoming_call:
             incoming_call = get_active_incoming_call("default")
@@ -2261,8 +2341,6 @@ class WhatsAppCallStatusView(APIView):
         session_ready = session_obj.status == WhatsAppSession.Status.READY
         force_refresh = request.query_params.get("refresh") == "true"
 
-        from .client import _CALLING_STATUS_CACHE, get_waha_client
-        import time
         cached_status = _CALLING_STATUS_CACHE.get(session_name)
         if not force_refresh and session_ready and not cached_status:
             call_status = {
@@ -2271,7 +2349,7 @@ class WhatsAppCallStatusView(APIView):
                 "state": "open",
                 "resolved_session": session_name,
             }
-        elif not force_refresh and cached_status and (time.time() - cached_status.get("_cached_at", 0) <= 30.0):
+        elif not force_refresh and cached_status and (now - cached_status.get("_cached_at", 0) <= 30.0):
             call_status = cached_status
         else:
             try:
@@ -2288,6 +2366,11 @@ class WhatsAppCallStatusView(APIView):
         resolved_session = call_status.get("resolved_session") or session_name
         if not incoming_call and resolved_session != session_name:
             incoming_call = get_active_incoming_call(resolved_session)
+
+        if isinstance(incoming_call, dict) and incoming_call.get("call_id"):
+            incoming_call = dict(incoming_call)
+            inc_sess = incoming_call.get("session_name") or resolved_session
+            incoming_call["audio_ws_url"] = _build_audio_ws_url(request, inc_sess, incoming_call["call_id"])
 
         is_connected = (
             session_ready
@@ -2335,11 +2418,13 @@ class WhatsAppCallStartView(APIView):
             result = client.start_call(session_name, clean_phone)
             call_id = result.get("callId") or result.get("call_id") or ""
             session_used = result.get("session_name") or session_name
+            audio_ws_url = _build_audio_ws_url(request, session_used, call_id)
             return Response({
                 "status": "calling",
                 "call_id": call_id,
                 "phone": clean_phone,
                 "session_name": session_used,
+                "audio_ws_url": audio_ws_url,
                 "result": result,
             }, status=status.HTTP_200_OK)
         except Exception as exc:
@@ -2376,9 +2461,13 @@ class WhatsAppCallAcceptView(APIView):
             from .webhooks import mark_active_call_connected
             mark_active_call_connected(session_name, call_id)
             result = client.accept_call(session_name, call_id)
+            session_used = result.get("session_name") or session_name
+            audio_ws_url = _build_audio_ws_url(request, session_used, call_id)
             return Response({
                 "status": "accepted",
                 "call_id": call_id,
+                "session_name": session_used,
+                "audio_ws_url": audio_ws_url,
                 "result": result,
             }, status=status.HTTP_200_OK)
         except Exception as exc:
@@ -2478,6 +2567,7 @@ class WhatsAppCallWebRTCView(APIView):
                 "sdp_answer": sdp_answer,
                 "sdpAnswer": sdp_answer,
                 "call_id": call_id,
+                "audio_ws_url": _build_audio_ws_url(request, target_session, call_id),
             }, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to exchange WebRTC offer for call %s: %s", call_id, exc)

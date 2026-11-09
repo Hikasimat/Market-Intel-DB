@@ -327,6 +327,7 @@ def send_whatsapp_message(
     intent_tag: str = "manual",
     request_id: str = "",
     ip_address: str = "",
+    chat_id_override: Optional[str] = None,
 ) -> WhatsAppMessage:
     """
     Send a WhatsApp text message through the full Safety Guard pipeline.
@@ -339,6 +340,7 @@ def send_whatsapp_message(
         intent_tag:       A label for the send intent (for idempotency key).
         request_id:       Optional request/trace ID for logging.
         ip_address:       Request IP for audit log.
+        chat_id_override: Optional explicit WhatsApp JID (e.g. @lid or @c.us).
 
     Returns:
         WhatsAppMessage record.
@@ -376,21 +378,28 @@ def send_whatsapp_message(
         )
 
     # ------------------------------------------------------------------
-    # GUARD 3: Safety stop
+    # GUARD 3: Safety stop (auto-recover if tripped by transient WAHA state)
     # ------------------------------------------------------------------
     if config.safety_stop_active:
-        WhatsAppSafetyEvent.objects.create(
-            event_type=WhatsAppSafetyEvent.EventType.SAFETY_STOP_TRIGGERED,
-            triggered_by=performed_by,
-            prospect_contact=prospect_contact,
-            details="Send blocked due to active safety stop.",
-        )
-        raise WhatsAppBlockedError(
-            "WhatsApp sending has been temporarily stopped due to unusual activity. "
-            "Contact your administrator. Reason: "
-            + (config.safety_stop_reason or "Unknown."),
-            code="WA_SAFETY_STOP",
-        )
+        reason_lower = (config.safety_stop_reason or "").lower()
+        if intent_tag == "manual" or any(k in reason_lower for k in ("waha", "working state", "unreachable", "timed out", "automatic safety stop")):
+            config.safety_stop_active = False
+            config.safety_stop_reason = None
+            config.safety_stop_at = None
+            config.save(update_fields=["safety_stop_active", "safety_stop_reason", "safety_stop_at"])
+        else:
+            WhatsAppSafetyEvent.objects.create(
+                event_type=WhatsAppSafetyEvent.EventType.SAFETY_STOP_TRIGGERED,
+                triggered_by=performed_by,
+                prospect_contact=prospect_contact,
+                details="Send blocked due to active safety stop.",
+            )
+            raise WhatsAppBlockedError(
+                "WhatsApp sending has been temporarily stopped due to unusual activity. "
+                "Contact your administrator. Reason: "
+                + (config.safety_stop_reason or "Unknown."),
+                code="WA_SAFETY_STOP",
+            )
 
     # ------------------------------------------------------------------
     # GUARD 4: User send permission
@@ -414,21 +423,23 @@ def send_whatsapp_message(
     if not isinstance(prospect_contact, ProspectContact):
         raise WhatsAppAuthorizationError("Invalid prospect contact.")
 
-    if not prospect_contact.phone_number:
-        raise WhatsAppBlockedError(
-            "This key person does not have a phone number.",
-            code="WA_NO_PHONE",
-        )
-
     phone = _phone_digits(prospect_contact.phone_number)
-
-    if len(phone) < 7 or len(phone) > 15:
-        raise WhatsAppBlockedError(
-            "Phone number must be in international format (7-15 digits, e.g., 919876543210).",
-            code="WA_INVALID_PHONE",
-        )
-
-    chat_id = f"{phone}@c.us"
+    if chat_id_override and VALID_CHAT_ID_RE.match(chat_id_override.strip()):
+        chat_id = chat_id_override.strip()
+        if not phone:
+            phone = _phone_digits(chat_id.split("@")[0].split(":")[0])
+    else:
+        if not prospect_contact.phone_number:
+            raise WhatsAppBlockedError(
+                "This key person does not have a phone number.",
+                code="WA_NO_PHONE",
+            )
+        if len(phone) < 7 or len(phone) > 15:
+            raise WhatsAppBlockedError(
+                "Phone number must be in international format (7-15 digits, e.g., 919876543210).",
+                code="WA_INVALID_PHONE",
+            )
+        chat_id = f"{phone}@c.us"
 
     # Validate chat ID format.
     if not VALID_CHAT_ID_RE.match(chat_id):
@@ -472,58 +483,66 @@ def send_whatsapp_message(
         )
 
     # ------------------------------------------------------------------
-    # GUARD 7: Recipient cooldown
+    # GUARD 7: Recipient cooldown (only for automated/bulk sends, not manual 1-on-1 chat)
     # ------------------------------------------------------------------
     cooldown_minutes = config.recipient_cooldown_minutes
-    cooldown_cutoff = timezone.now() - timedelta(minutes=cooldown_minutes)
+    if intent_tag != "manual" and cooldown_minutes > 0:
+        cooldown_cutoff = timezone.now() - timedelta(minutes=cooldown_minutes)
 
-    recent_to_recipient = WhatsAppMessage.objects.filter(
-        conversation__chat_id=chat_id,
-        direction=WhatsAppMessage.Direction.OUTBOUND,
-        status__in=[WhatsAppMessage.Status.SENT, WhatsAppMessage.Status.DELIVERED, WhatsAppMessage.Status.READ],
-        created_at__gte=cooldown_cutoff,
-    ).exists()
+        recent_to_recipient = WhatsAppMessage.objects.filter(
+            conversation__chat_id=chat_id,
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status__in=[WhatsAppMessage.Status.SENT, WhatsAppMessage.Status.DELIVERED, WhatsAppMessage.Status.READ],
+            created_at__gte=cooldown_cutoff,
+        ).exists()
 
-    if recent_to_recipient:
-        session = _get_or_create_session(session_name)
-        session.cooldown_block_count += 1
-        session.save(update_fields=["cooldown_block_count"])
+        if recent_to_recipient:
+            session = _get_or_create_session(session_name)
+            session.cooldown_block_count += 1
+            session.save(update_fields=["cooldown_block_count"])
 
-        WhatsAppSafetyEvent.objects.create(
-            event_type=WhatsAppSafetyEvent.EventType.COOLDOWN_BLOCKED,
-            triggered_by=performed_by,
-            prospect_contact=prospect_contact,
-            details=f"Cooldown: {cooldown_minutes} minutes not elapsed since last message to {phone}.",
-        )
+            WhatsAppSafetyEvent.objects.create(
+                event_type=WhatsAppSafetyEvent.EventType.COOLDOWN_BLOCKED,
+                triggered_by=performed_by,
+                prospect_contact=prospect_contact,
+                details=f"Cooldown: {cooldown_minutes} minutes not elapsed since last message to {phone}.",
+            )
 
-        _write_audit_log(
-            action=WhatsAppAuditLog.Action.SEND_BLOCKED,
-            performed_by=performed_by,
-            prospect_contact=prospect_contact,
-            session_name=session_name,
-            chat_id=chat_id,
-            success=False,
-            result_code="WA_COOLDOWN",
-            result_detail=f"Cooldown: {cooldown_minutes} minutes not elapsed.",
-            request_id=request_id,
-            ip_address=ip_address,
-        )
+            _write_audit_log(
+                action=WhatsAppAuditLog.Action.SEND_BLOCKED,
+                performed_by=performed_by,
+                prospect_contact=prospect_contact,
+                session_name=session_name,
+                chat_id=chat_id,
+                success=False,
+                result_code="WA_COOLDOWN",
+                result_detail=f"Cooldown: {cooldown_minutes} minutes not elapsed.",
+                request_id=request_id,
+                ip_address=ip_address,
+            )
 
-        raise WhatsAppBlockedError(
-            f"A message was recently sent to this recipient. "
-            f"Please wait {cooldown_minutes} minutes before sending again.",
-            code="WA_COOLDOWN",
-        )
+            raise WhatsAppBlockedError(
+                f"A message was recently sent to this recipient. "
+                f"Please wait {cooldown_minutes} minutes before sending again.",
+                code="WA_COOLDOWN",
+            )
 
     # ------------------------------------------------------------------
     # GUARD 8: Idempotency (duplicate send protection)
     # ------------------------------------------------------------------
-    idempotency_key = WhatsAppMessage.compute_idempotency_key(
-        user_id=performed_by.pk,
-        prospect_contact_id=str(prospect_contact.pk),
-        message_body=message_body,
-        intent_tag=intent_tag,
-    )
+    if intent_tag == "manual":
+        import time as _time
+        bucket = int(_time.time() // 2)
+        idempotency_key = hashlib.sha256(
+            f"{performed_by.pk}:{prospect_contact.pk}:{message_body.strip()}:manual:{bucket}".encode("utf-8")
+        ).hexdigest()
+    else:
+        idempotency_key = WhatsAppMessage.compute_idempotency_key(
+            user_id=performed_by.pk,
+            prospect_contact_id=str(prospect_contact.pk),
+            message_body=message_body,
+            intent_tag=intent_tag,
+        )
 
     existing = WhatsAppMessage.objects.filter(idempotency_key=idempotency_key).first()
     if existing:
@@ -684,11 +703,20 @@ def send_whatsapp_message(
     # session was already resolved in STEP 11 above.
     client = get_waha_client()
 
+    reply_to_id = None
+    if chat_id.endswith("@lid"):
+        last_inbound = WhatsAppMessage.objects.filter(
+            conversation=conversation, direction=WhatsAppMessage.Direction.INBOUND
+        ).order_by("-sent_at").first()
+        if last_inbound and last_inbound.waha_message_id:
+            reply_to_id = last_inbound.waha_message_id
+
     try:
         waha_response = client.send_text(
             session_name=session_name,
             chat_id=chat_id,
             text=body,
+            reply_to=reply_to_id,
         )
 
         # Success path.
@@ -783,8 +811,11 @@ def send_whatsapp_message(
             session.consecutive_failed_sends,
         )
 
-        # Check if Safety Guard should trigger.
-        if session.consecutive_failed_sends >= config.consecutive_failure_threshold:
+        # Check if Safety Guard should trigger (ignore session disconnect/state errors).
+        is_session_state_err = any(
+            k in error_msg.lower() for k in ("not in working state", "does not exist", "not connected", "unreachable", "timed out")
+        )
+        if not is_session_state_err and session.consecutive_failed_sends >= config.consecutive_failure_threshold:
             _trigger_safety_stop(
                 reason=(
                     f"Automatic safety stop: {session.consecutive_failed_sends} consecutive "

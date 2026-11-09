@@ -1065,7 +1065,7 @@ def _handle_call_event(
 def _handle_incoming_message(
     event_data: dict,
     session_name: str,
-    event_record: WhatsAppEvent,
+    event_record: Optional[WhatsAppEvent] = None,
 ) -> None:
     """
     Handle an incoming or sync WhatsApp message event.
@@ -1087,6 +1087,15 @@ def _handle_incoming_message(
     ).strip()
     waha_message_id = str(event_data.get("id") or "")
     is_from_me = bool(event_data.get("fromMe", False))
+
+    has_media_early = bool(
+        event_data.get("hasMedia", False)
+        or event_data.get("mediaUrl")
+        or (event_data.get("media") or {}).get("url")
+    )
+    if not raw_body and not has_media_early:
+        # Ignore empty Baileys protocol/system sync messages (e.g. history/key sync)
+        return
 
     # 1. Resolve Group Chat ID (@g.us) if this message belongs to a WhatsApp Group
     group_chat_id = None
@@ -1490,8 +1499,9 @@ def _handle_incoming_message(
 
     if existing_message:
         # Already recorded this message.
-        event_record.whatsapp_message = existing_message
-        event_record.save(update_fields=["whatsapp_message"])
+        if event_record:
+            event_record.whatsapp_message = existing_message
+            event_record.save(update_fields=["whatsapp_message"])
         return
 
     has_media = bool(event_data.get("hasMedia", False))
@@ -1546,14 +1556,16 @@ def _handle_incoming_message(
                     receive_count=models_f_whatsapp("receive_count") + 1
                 )
 
-            event_record.whatsapp_message = wa_message
-            event_record.save(update_fields=["whatsapp_message"])
+            if event_record:
+                event_record.whatsapp_message = wa_message
+                event_record.save(update_fields=["whatsapp_message"])
     except IntegrityError:
         # Concurrent webhook already created this message
         wa_message = WhatsAppMessage.objects.filter(idempotency_key=msg_idempotency).first()
         if wa_message:
-            event_record.whatsapp_message = wa_message
-            event_record.save(update_fields=["whatsapp_message"])
+            if event_record:
+                event_record.whatsapp_message = wa_message
+                event_record.save(update_fields=["whatsapp_message"])
             return
         raise
 
@@ -1759,5 +1771,28 @@ def models_f(field_name):
 def models_f_whatsapp(field_name):
     from django.db.models import F
     return F(field_name)
+
+
+def sync_recent_waha_messages(messages_list: list, default_session_name: str = "default") -> int:
+    """
+    Idempotently ingest recent messages from WAHA-NoWeb-Light's memory buffer
+    (/api/dashboard/stats -> messages) so any messages missed during webhook
+    URL misconfiguration are recovered into WhatsAppMessage.
+    """
+    if not isinstance(messages_list, list) or not messages_list:
+        return 0
+    synced = 0
+    # Process in chronological order (oldest to newest)
+    for item in reversed(messages_list):
+        if not isinstance(item, dict):
+            continue
+        sess = str(item.get("session") or default_session_name or "default").strip()
+        try:
+            _handle_incoming_message(item, sess, event_record=None)
+            synced += 1
+        except Exception as exc:
+            logger.debug("sync_recent_waha_messages item skip: %s", exc)
+    return synced
+
 
 

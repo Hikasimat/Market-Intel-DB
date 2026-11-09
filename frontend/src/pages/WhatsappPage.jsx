@@ -471,6 +471,17 @@ export default function WhatsappPage() {
     if (callMediaRef.current.micStream) {
       callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
     }
+    if (callMediaRef.current.audioWs) {
+      try {
+        callMediaRef.current.audioWs.close();
+      } catch (_) {}
+    }
+    if (callMediaRef.current.remoteAudioEl) {
+      try {
+        callMediaRef.current.remoteAudioEl.pause();
+        callMediaRef.current.remoteAudioEl.srcObject = null;
+      } catch (_) {}
+    }
     if (callMediaRef.current.dataChannel) {
       try {
         callMediaRef.current.dataChannel.close();
@@ -493,6 +504,8 @@ export default function WhatsappPage() {
     callMediaRef.current = {
       peerConnection: null,
       dataChannel: null,
+      audioWs: null,
+      remoteAudioEl: null,
       audioCtx: null,
       micStream: null,
       timerInterval: null,
@@ -625,10 +638,11 @@ export default function WhatsappPage() {
         track.enabled = !nextMuted;
       });
     }
+    callMediaRef.current.isMuted = nextMuted;
     setCallState((prev) => ({ ...prev, isMuted: nextMuted }));
   }, [callState.isMuted]);
 
-  const initWebRTCAudioChannel = useCallback(async (callId, callSessionName) => {
+  const initWebRTCAudioChannel = useCallback(async (callId, callSessionName, audioWsUrl = '') => {
     try {
       // 1. Mic capture
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -636,19 +650,7 @@ export default function WhatsappPage() {
       });
       callMediaRef.current.micStream = stream;
 
-      // 2. Peer Connection with PCM DataChannel
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-        ]
-      });
-      callMediaRef.current.peerConnection = pc;
-
-      const dc = pc.createDataChannel('pcm', { ordered: true });
-      dc.binaryType = 'arraybuffer';
-      callMediaRef.current.dataChannel = dc;
-
-      // 3. Audio Context at 16000 Hz
+      // 2. Audio Context at 16000 Hz
       const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
       const ctx = new AudioCtxClass({ sampleRate: 16000 });
       callMediaRef.current.audioCtx = ctx;
@@ -672,12 +674,46 @@ export default function WhatsappPage() {
 
       await ctx.resume();
 
+      // 3. Resilient WebSocket Audio Bridge (bypasses AWS EC2 / Docker UDP NAT blocks)
+      let audioWs = null;
+      if (audioWsUrl) {
+        try {
+          audioWs = new WebSocket(audioWsUrl);
+          audioWs.binaryType = 'arraybuffer';
+          callMediaRef.current.audioWs = audioWs;
+          audioWs.onopen = () => {
+            if (ctx.state === 'suspended') {
+              ctx.resume().catch(() => {});
+            }
+          };
+        } catch (wsErr) {
+          console.warn('Resilient audio WebSocket init warning:', wsErr);
+        }
+      }
+
+      // 4. Peer Connection with PCM DataChannel (secondary / local fallback)
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+        ]
+      });
+      callMediaRef.current.peerConnection = pc;
+
+      const dc = pc.createDataChannel('pcm', { ordered: true });
+      dc.binaryType = 'arraybuffer';
+      callMediaRef.current.dataChannel = dc;
+
       // Connect mic to captureNode
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
-        if (!callMediaRef.current.isMuted && dc.readyState === 'open') {
-          dc.send(float32ToInt16LE(e.data));
+        if (callMediaRef.current.isMuted) return;
+        const pcmBytes = float32ToInt16LE(e.data);
+        const ws = callMediaRef.current.audioWs;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(pcmBytes);
+        } else if (dc && dc.readyState === 'open') {
+          dc.send(pcmBytes);
         }
       };
       micSource.connect(captureNode);
@@ -688,23 +724,49 @@ export default function WhatsappPage() {
       captureNode.connect(silenceGain);
       silenceGain.connect(ctx.destination);
 
-      // Playback incoming audio
+      // Playback incoming audio through both AudioContext destination and MediaStream Audio element
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
       playbackNode.connect(ctx.destination);
-      dc.onopen = () => {
-        console.log('Voice PCM DataChannel opened');
+      try {
+        const streamDest = ctx.createMediaStreamDestination();
+        playbackNode.connect(streamDest);
+        const remoteAudioEl = new Audio();
+        remoteAudioEl.autoplay = true;
+        remoteAudioEl.playsInline = true;
+        remoteAudioEl.srcObject = streamDest.stream;
+        remoteAudioEl.play().catch(() => {});
+        callMediaRef.current.remoteAudioEl = remoteAudioEl;
+      } catch (_) {}
+
+      const playIncomingBuffer = async (rawData) => {
         if (ctx.state === 'suspended') {
-          ctx.resume().catch((err) => console.warn('AudioContext resume error:', err));
+          ctx.resume().catch(() => {});
         }
-      };
-      dc.onmessage = async (e) => {
-        let rawData = e.data;
-        if (rawData instanceof Blob) {
-          rawData = await rawData.arrayBuffer();
+        let buf = rawData;
+        if (buf instanceof Blob) {
+          buf = await buf.arrayBuffer();
         }
-        const floats = int16LEToFloat32(rawData);
+        const floats = int16LEToFloat32(buf);
         if (floats && floats.length) {
           playbackNode.port.postMessage(floats);
+        }
+      };
+
+      if (audioWs) {
+        audioWs.onmessage = (e) => {
+          playIncomingBuffer(e.data);
+        };
+      }
+
+      dc.onopen = () => {
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
+      };
+      dc.onmessage = (e) => {
+        const ws = callMediaRef.current.audioWs;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          playIncomingBuffer(e.data);
         }
       };
 
@@ -713,22 +775,18 @@ export default function WhatsappPage() {
         remoteDc.binaryType = 'arraybuffer';
         remoteDc.onopen = () => {
           if (ctx.state === 'suspended') {
-            ctx.resume().catch((err) => console.warn('AudioContext resume error:', err));
+            ctx.resume().catch(() => {});
           }
         };
-        remoteDc.onmessage = async (e) => {
-          let rawData = e.data;
-          if (rawData instanceof Blob) {
-            rawData = await rawData.arrayBuffer();
-          }
-          const floats = int16LEToFloat32(rawData);
-          if (floats && floats.length) {
-            playbackNode.port.postMessage(floats);
+        remoteDc.onmessage = (e) => {
+          const ws = callMediaRef.current.audioWs;
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            playIncomingBuffer(e.data);
           }
         };
       };
 
-      // 4. Offer / Answer SDP exchange
+      // 5. Offer / Answer SDP exchange
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -753,12 +811,23 @@ export default function WhatsappPage() {
           session_name: callSessionName,
         });
 
+        // If audioWs wasn't opened yet and webrtc endpoint returned audio_ws_url, connect it
+        const fallbackWsUrl = webrtcRes.data?.audio_ws_url;
+        if (fallbackWsUrl && (!callMediaRef.current.audioWs || callMediaRef.current.audioWs.readyState > WebSocket.OPEN)) {
+          try {
+            const ws2 = new WebSocket(fallbackWsUrl);
+            ws2.binaryType = 'arraybuffer';
+            ws2.onmessage = (e) => playIncomingBuffer(e.data);
+            callMediaRef.current.audioWs = ws2;
+          } catch (_) {}
+        }
+
         const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
         if (sdpAnswer) {
           await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
         }
       } catch (webrtcErr) {
-        console.warn('WebRTC SDP negotiation warning (call signaling remains active):', webrtcErr);
+        console.warn('WebRTC SDP negotiation warning (WebSocket audio stream active):', webrtcErr);
       }
 
       setCallState((prev) => ({
@@ -814,6 +883,7 @@ export default function WhatsappPage() {
 
       const newCallId = startRes.data?.call_id || startRes.data?.callId;
       const resolvedSession = startRes.data?.session_name || selectedSession?.session_name || 'default';
+      const audioWsUrl = startRes.data?.audio_ws_url || '';
       if (!newCallId) {
         throw new Error(startRes.data?.error || 'No call ID returned by WhatsApp calling service');
       }
@@ -824,7 +894,7 @@ export default function WhatsappPage() {
         sessionName: resolvedSession,
       }));
 
-      await initWebRTCAudioChannel(newCallId, resolvedSession);
+      await initWebRTCAudioChannel(newCallId, resolvedSession, audioWsUrl);
     } catch (err) {
       console.error('Start voice call failed:', err.response?.data || err);
       const isNotPaired = err.response?.data?.error === 'calling_not_paired' || (err.response?.data?.detail || '').includes('calling device') || (err.response?.data?.error || '').includes('not paired');
@@ -878,16 +948,20 @@ export default function WhatsappPage() {
       isIncoming: true,
     });
 
+    let audioWsUrl = targetCall.audio_ws_url || '';
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
+      const acceptRes = await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
         session_name: sessionToUse,
       });
+      if (acceptRes.data?.audio_ws_url) {
+        audioWsUrl = acceptRes.data.audio_ws_url;
+      }
     } catch (acceptErr) {
       console.warn('Accept call error (may already be accepted):', acceptErr);
     }
 
     try {
-      await initWebRTCAudioChannel(cleanCallId, sessionToUse);
+      await initWebRTCAudioChannel(cleanCallId, sessionToUse, audioWsUrl);
     } catch (audioErr) {
       console.error('WebRTC Audio connect error:', audioErr);
       showToast('Connected, but audio channel initialization failed.', 'error');
@@ -2306,6 +2380,9 @@ export default function WhatsappPage() {
               ) : (
                 messages
                   .filter(msg => {
+                    if (msg.message_type !== 'call' && !msg.has_media && !(msg.full_body || msg.body_preview || '').trim()) {
+                      return false;
+                    }
                     if (!msgSearchQuery) return true;
                     const text = (msg.full_body || msg.body_preview || '').toLowerCase();
                     return text.includes(msgSearchQuery.toLowerCase());

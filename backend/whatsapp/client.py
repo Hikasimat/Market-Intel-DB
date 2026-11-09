@@ -363,7 +363,110 @@ class WAHAClient:
         """Safe no-op helper for backward compatibility."""
         return {}
 
+    # -- Webhook & Dashboard Sync (WAHA-NoWeb-Light) -------------------------
+
+    def get_dashboard_stats(self, force: bool = False) -> dict:
+        """Fetch /api/dashboard/stats from WAHA-NoWeb-Light with a 15-second TTL cache."""
+        import time
+        now = time.time()
+        cached = _DASHBOARD_STATS_CACHE.get("data")
+        if not force and cached and (now - _DASHBOARD_STATS_CACHE.get("ts", 0) <= 15.0):
+            return cached
+        try:
+            _status, body = self._request("GET", "/api/dashboard/stats", timeout=3.0)
+            if isinstance(body, dict):
+                _DASHBOARD_STATS_CACHE["data"] = body
+                _DASHBOARD_STATS_CACHE["ts"] = now
+                return body
+        except Exception as exc:
+            logger.debug("get_dashboard_stats failed: %s", exc)
+        return cached if isinstance(cached, dict) else {}
+
+    def ensure_webhook_configured(self, target_webhook_url: str = "") -> Optional[str]:
+        """
+        Ensure WAHA-NoWeb-Light's webhook destination URL points to the Django backend
+        (e.g. https://marketintel.hikasimat.com/api/whatsapp/webhook/) and never to the
+        static Amplify frontend (marketinteldbapp.hikasimat.com).
+        """
+        import time
+        now = time.time()
+        if now - _WEBHOOK_SYNC_STATE.get("last_checked", 0) < 30.0:
+            return _WEBHOOK_SYNC_STATE.get("configured_url")
+
+        _WEBHOOK_SYNC_STATE["last_checked"] = now
+        stats = self.get_dashboard_stats()
+        webhook_info = stats.get("webhook") if isinstance(stats, dict) else None
+        current_url = (webhook_info.get("url") or "").strip() if isinstance(webhook_info, dict) else ""
+
+        desired_url = (target_webhook_url or "").strip()
+        # Self-heal if WAHA is currently configured with the static frontend domain
+        if "marketinteldbapp.hikasimat.com" in current_url:
+            desired_url = current_url.replace("marketinteldbapp.hikasimat.com", "marketintel.hikasimat.com")
+        elif not desired_url and current_url:
+            _WEBHOOK_SYNC_STATE["configured_url"] = current_url
+            return current_url
+
+        if "marketinteldbapp.hikasimat.com" in desired_url:
+            desired_url = desired_url.replace("marketinteldbapp.hikasimat.com", "marketintel.hikasimat.com")
+
+        # Do not overwrite a valid production webhook with localhost unless WAHA itself is on localhost
+        is_waha_local = "localhost" in self._base_url or "127.0.0.1" in self._base_url or "host.docker.internal" in self._base_url
+        if ("localhost" in desired_url or "127.0.0.1" in desired_url) and current_url and not ("marketinteldbapp.hikasimat.com" in current_url):
+            if not is_waha_local or ("localhost" in current_url or "127.0.0.1" in current_url or "trycloudflare.com" in current_url):
+                _WEBHOOK_SYNC_STATE["configured_url"] = current_url
+                return current_url
+
+        if desired_url and desired_url != current_url:
+            secret = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "").strip()
+            payload = {"url": desired_url}
+            if secret:
+                payload["secret"] = secret
+            try:
+                self._request("POST", "/api/webhooks/config", payload=payload, timeout=3.0)
+                logger.info("Updated WAHA webhook destination URL: %s -> %s", current_url, desired_url)
+                _WEBHOOK_SYNC_STATE["configured_url"] = desired_url
+                _DASHBOARD_STATS_CACHE.pop("data", None)
+                return desired_url
+            except Exception as exc:
+                logger.debug("Failed to update WAHA webhook config: %s", exc)
+
+        _WEBHOOK_SYNC_STATE["configured_url"] = current_url or desired_url
+        return _WEBHOOK_SYNC_STATE.get("configured_url")
+
+    def get_recent_messages_from_stats(self, force: bool = False) -> list:
+        """Return recent messages buffered in WAHA-NoWeb-Light's memory."""
+        stats = self.get_dashboard_stats(force=force)
+        msgs = stats.get("messages") if isinstance(stats, dict) else None
+        return msgs if isinstance(msgs, list) else []
+
     # -- Messaging -----------------------------------------------------------
+
+    def _resolve_working_send_session(self, session_name: str) -> str:
+        """
+        Attempt to restart `session_name` if it is in FAILED/STOPPED state, or locate
+        an active WORKING session in WAHA so outbound messages succeed.
+        """
+        import time
+        try:
+            self.start_session(session_name)
+            time.sleep(1.2)
+            st = self.get_session_status(session_name)
+            if isinstance(st, dict) and str(st.get("status") or "").upper() == "WORKING":
+                return session_name
+        except Exception:
+            pass
+
+        try:
+            sessions = self.get_all_sessions()
+            if isinstance(sessions, list):
+                for s in sessions:
+                    if isinstance(s, dict) and str(s.get("status") or "").upper() == "WORKING":
+                        w_name = s.get("name")
+                        if w_name:
+                            return w_name
+        except Exception:
+            pass
+        return session_name
 
     def send_text(
         self,
@@ -373,35 +476,33 @@ class WAHAClient:
         reply_to: str = None,
     ) -> dict:
         """
-        Send a plain-text WhatsApp message.
-
-        Args:
-            session_name: WAHA session name.
-            chat_id:      WhatsApp chat ID (e.g., "919876543210@c.us").
-            text:         Message body (max 4096 chars).
-            reply_to:     Optional WAHA message ID to reply to.
-
-        Returns:
-            WAHA response with message ID.
+        Send a plain-text WhatsApp message with automatic session recovery if needed.
         """
-        payload = {
-            "session": session_name,
-            "chatId": chat_id,
-            "text": text,
-        }
-        if reply_to:
-            payload["reply_to"] = reply_to
-            # WAHA quirk: when reply_to is present, session must also be in query string
-            endpoint = f"/api/sendText?session={session_name}"
-        else:
-            endpoint = "/api/sendText"
+        def _build_req(sess: str):
+            p = {
+                "session": sess,
+                "chatId": chat_id,
+                "text": text,
+            }
+            if reply_to:
+                p["reply_to"] = reply_to
+                ep = f"/api/sendText?session={sess}"
+            else:
+                ep = "/api/sendText"
+            return ep, p
 
-        _status, body = self._request(
-            "POST",
-            endpoint,
-            payload=payload,
-        )
-        return body
+        endpoint, payload = _build_req(session_name)
+        try:
+            _status, body = self._request("POST", endpoint, payload=payload, timeout=8.0)
+            return body
+        except WAHAServiceError as exc:
+            err_lower = str(exc).lower()
+            if "not in working state" in err_lower or "does not exist" in err_lower or "not connected" in err_lower:
+                alt_sess = self._resolve_working_send_session(session_name)
+                ep2, p2 = _build_req(alt_sess)
+                _status, body = self._request("POST", ep2, payload=p2, timeout=8.0)
+                return body
+            raise
 
     def send_image(
         self,
@@ -412,18 +513,23 @@ class WAHAClient:
         filename: str = "",
     ) -> dict:
         """Send an image message."""
-        _status, body = self._request(
-            "POST",
-            "/api/sendImage",
-            payload={
-                "session": session_name,
-                "chatId": chat_id,
-                "file": {"url": url},
-                "caption": caption,
-                "filename": filename,
-            },
-        )
-        return body
+        payload = {
+            "session": session_name,
+            "chatId": chat_id,
+            "file": {"url": url},
+            "caption": caption,
+            "filename": filename,
+        }
+        try:
+            _status, body = self._request("POST", "/api/sendImage", payload=payload, timeout=12.0)
+            return body
+        except WAHAServiceError as exc:
+            err_lower = str(exc).lower()
+            if "not in working state" in err_lower or "does not exist" in err_lower or "not connected" in err_lower:
+                payload["session"] = self._resolve_working_send_session(session_name)
+                _status, body = self._request("POST", "/api/sendImage", payload=payload, timeout=12.0)
+                return body
+            raise
 
     def send_document(
         self,
@@ -434,18 +540,23 @@ class WAHAClient:
         caption: str = "",
     ) -> dict:
         """Send a document/file message."""
-        _status, body = self._request(
-            "POST",
-            "/api/sendFile",
-            payload={
-                "session": session_name,
-                "chatId": chat_id,
-                "file": {"url": url},
-                "caption": caption,
-                "filename": filename,
-            },
-        )
-        return body
+        payload = {
+            "session": session_name,
+            "chatId": chat_id,
+            "file": {"url": url},
+            "caption": caption,
+            "filename": filename,
+        }
+        try:
+            _status, body = self._request("POST", "/api/sendFile", payload=payload, timeout=12.0)
+            return body
+        except WAHAServiceError as exc:
+            err_lower = str(exc).lower()
+            if "not in working state" in err_lower or "does not exist" in err_lower or "not connected" in err_lower:
+                payload["session"] = self._resolve_working_send_session(session_name)
+                _status, body = self._request("POST", "/api/sendFile", payload=payload, timeout=12.0)
+                return body
+            raise
 
     def send_voice(
         self,
@@ -454,16 +565,21 @@ class WAHAClient:
         file: dict,
     ) -> dict:
         """Send a voice audio note."""
-        _status, body = self._request(
-            "POST",
-            "/api/sendVoice",
-            payload={
-                "session": session_name,
-                "chatId": chat_id,
-                "file": file,
-            },
-        )
-        return body
+        payload = {
+            "session": session_name,
+            "chatId": chat_id,
+            "file": file,
+        }
+        try:
+            _status, body = self._request("POST", "/api/sendVoice", payload=payload, timeout=12.0)
+            return body
+        except WAHAServiceError as exc:
+            err_lower = str(exc).lower()
+            if "not in working state" in err_lower or "does not exist" in err_lower or "not connected" in err_lower:
+                payload["session"] = self._resolve_working_send_session(session_name)
+                _status, body = self._request("POST", "/api/sendVoice", payload=payload, timeout=12.0)
+                return body
+            raise
 
     def send_reaction(
         self,
@@ -933,6 +1049,8 @@ class WAHAClient:
 # ---------------------------------------------------------------------------
 _client_instance: Optional[WAHAClient] = None
 _CALLING_STATUS_CACHE: dict = {}
+_DASHBOARD_STATS_CACHE: dict = {}
+_WEBHOOK_SYNC_STATE: dict = {}
 
 
 def get_waha_client() -> WAHAClient:
