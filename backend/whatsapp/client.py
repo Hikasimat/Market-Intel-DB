@@ -493,10 +493,11 @@ class WAHAClient:
         import time
         try:
             self.start_session(session_name)
-            time.sleep(1.2)
-            st = self.get_session_status(session_name)
-            if isinstance(st, dict) and str(st.get("status") or "").upper() == "WORKING":
-                return session_name
+            for _ in range(6):
+                time.sleep(0.5)
+                st = self.get_session_status(session_name)
+                if isinstance(st, dict) and str(st.get("status") or "").upper() == "WORKING":
+                    return session_name
         except Exception:
             pass
 
@@ -506,7 +507,7 @@ class WAHAClient:
                 for s in sessions:
                     if isinstance(s, dict) and str(s.get("status") or "").upper() == "WORKING":
                         w_name = s.get("name")
-                        if w_name:
+                        if w_name == session_name:
                             return w_name
         except Exception:
             pass
@@ -1027,8 +1028,25 @@ class WAHAClient:
             primary_error = e
             logger.info("start_call attempt failed for primary session '%s': %s", primary, e)
 
-        # Only try working fallbacks if primary session was not connected
-        if primary_error and "not connected" in str(primary_error).lower():
+        # If primary session was not connected or in failed/stopped state, attempt to start it and retry once
+        if primary_error and ("not connected" in str(primary_error).lower() or "not in working state" in str(primary_error).lower()):
+            try:
+                self.start_session(primary)
+                import time
+                time.sleep(1.0)
+                _status, body = self._request(
+                    "POST",
+                    f"/api/calling/sessions/{primary}/calls",
+                    payload=payload,
+                    extra_headers=extra_headers,
+                    timeout=10.0,
+                )
+                if isinstance(body, dict):
+                    body["session_name"] = primary
+                    return body
+            except Exception as retry_err:
+                logger.info("start_call retry after starting session '%s' failed: %s", primary, retry_err)
+
             for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
                 if sess == primary:
                     continue

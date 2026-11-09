@@ -336,17 +336,31 @@ class WhatsAppSessionListView(APIView):
             for s in sessions_to_sync:
                 waha_session_data = next((ws for ws in waha_sessions if ws.get("name") == s.session_name), None)
                 if not waha_session_data:
-                    new_status = "DISCONNECTED"
+                    # If already authenticated (READY), preserve it! Never auto-disconnect during polling
+                    new_status = WhatsAppSession.Status.READY if (s.status == WhatsAppSession.Status.READY and s.phone_number) else "DISCONNECTED"
                 else:
-                    w_status = waha_session_data.get("status")
+                    w_status = str(waha_session_data.get("status") or "").upper()
                     if w_status == "WORKING":
                         new_status = "READY"
                     elif w_status == "SCAN_QR_CODE":
-                        new_status = "QR_REQUIRED"
-                    elif w_status == "STARTING":
-                        new_status = "STARTING"
+                        new_status = "READY" if (s.status == WhatsAppSession.Status.READY and s.phone_number) else "QR_REQUIRED"
+                    elif w_status in ("STARTING", "CONNECTING", "RESUMING"):
+                        new_status = "READY" if (s.status == WhatsAppSession.Status.READY and s.phone_number) else "STARTING"
+                    elif w_status in ("FAILED", "STOPPED"):
+                        # Keep READY if previously authenticated, and auto-recover WAHA session
+                        if s.status == WhatsAppSession.Status.READY and s.phone_number:
+                            new_status = "READY"
+                            try:
+                                client.start_session(s.session_name)
+                            except Exception:
+                                pass
+                        else:
+                            new_status = "STOPPED"
+                    elif w_status in ("LOGGED_OUT", "UNPAIRED"):
+                        new_status = "DISCONNECTED"
+                        s.phone_number = None
                     else:
-                        new_status = "STOPPED"
+                        new_status = "READY" if (s.status == WhatsAppSession.Status.READY and s.phone_number) else "STOPPED"
 
                     if w_status == "WORKING":
                         me_info = waha_session_data.get("me") or {}
@@ -436,14 +450,38 @@ class WhatsAppQRView(APIView):
         # 1. Explicit forced restart requested by user (e.g. clicked Reload QR Code)
         if force_restart:
             clear_cached_qr(session_name)
-            try:
-                client.delete_session(session_name)
-            except Exception:
-                pass
+            # Only delete session files if not already authenticated to prevent accidental logout
+            if session_obj.status != WhatsAppSession.Status.READY or not session_obj.phone_number:
+                try:
+                    client.delete_session(session_name)
+                except Exception:
+                    pass
             try:
                 client.start_session(session_name)
             except Exception as start_err:
                 logger.warning("Force restart WAHA session %s: %s", session_name, start_err)
+
+        # 1.5. If already authenticated (READY with phone_number), never log out or show QR!
+        if session_obj.status == WhatsAppSession.Status.READY and session_obj.phone_number and not force_restart:
+            clear_cached_qr(session_name)
+            # Ensure WAHA session is running; if stopped or failed, recover it seamlessly
+            try:
+                waha_info = client.get_session_status(session_name)
+                w_status = str(waha_info.get("status") or "").upper()
+                if w_status in ("STOPPED", "FAILED", "NOT_FOUND"):
+                    client.start_session(session_name)
+                me_info = waha_info.get("me") or {}
+            except Exception:
+                me_info = {}
+
+            return Response({
+                "status": "WORKING",
+                "connected": True,
+                "session_name": session_name,
+                "phone_number": session_obj.phone_number,
+                "me": me_info,
+                "message": "WhatsApp is connected and ready.",
+            })
 
         # 2. Check cached QR first!
         # If we already have a valid active QR code, return it immediately (0.001s)
@@ -537,11 +575,6 @@ class WhatsAppQRView(APIView):
         just_started = False
         if session_needs_start or waha_status in ("NOT_FOUND", "STOPPED", "FAILED", "UNKNOWN", None):
             try:
-                if waha_status == "FAILED":
-                    try:
-                        client.delete_session(session_name)
-                    except Exception:
-                        pass
                 client.start_session(session_name)
                 waha_status = "STARTING"
                 just_started = True

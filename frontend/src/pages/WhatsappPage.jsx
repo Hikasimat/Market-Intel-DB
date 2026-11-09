@@ -753,19 +753,10 @@ export default function WhatsappPage() {
 
       await ctx.resume();
 
-      // Playback incoming audio strictly once through AudioContext destination
+      // Playback incoming audio through AudioContext destination
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
       playbackNode.connect(ctx.destination);
-      playbackNode.port.onmessage = (e) => {
-        if (e.data?.type === 'status' && e.data.available > 0) {
-          const now = performance.now();
-          const remainingMs = (e.data.available / 16000) * 1000;
-          callMediaRef.current.remotePlaybackEndAt = Math.max(
-            callMediaRef.current.remotePlaybackEndAt || 0,
-            now + remainingMs + 450
-          );
-        }
-      };
+      playbackNode.port.onmessage = () => {};
 
       const sendRawPcm = (pcmBytes) => {
         const ws = callMediaRef.current.audioWs;
@@ -787,98 +778,24 @@ export default function WhatsappPage() {
         }
         const floats = int16LEToFloat32(buf);
         if (!floats || !floats.length) return;
-
-        const now = performance.now();
-        // Suppress network return echo: while local user is speaking or within 850ms after local speech,
-        // incoming audio is the remote phone's mic echoing the user's own voice back.
-        if (
-          now < (callMediaRef.current.localSpeechActiveUntil || 0) ||
-          now - (callMediaRef.current.lastLocalSpokeAt || 0) < 850
-        ) {
-          playbackNode.port.postMessage({ type: 'clear' });
-          return;
-        }
-
-        let peak = 0;
-        let sumSq = 0;
-        for (let i = 0; i < floats.length; i += 1) {
-          const val = floats[i];
-          const abs = Math.abs(val);
-          if (abs > peak) peak = abs;
-          sumSq += val * val;
-        }
-        const rms = Math.sqrt(sumSq / floats.length);
-        if (peak > 0.015 && rms > 0.004) {
-          const chunkMs = (floats.length / 16000) * 1000;
-          const queueEnd = Math.max(now, callMediaRef.current.remoteQueueEndAt || 0) + chunkMs;
-          callMediaRef.current.remoteQueueEndAt = queueEnd;
-          // Hold mic gate closed until queued audio finishes playing + 500ms OS/room acoustic tail
-          callMediaRef.current.remotePlaybackEndAt = queueEnd + 500;
-        }
         playbackNode.port.postMessage(floats);
       };
 
-      // Connect mic to captureNode with half-duplex + post-speech acoustic holdoff gate
+      // Connect mic to captureNode for real-time full-duplex two-way audio
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
         const samples = e.data;
         if (!samples || !samples.length) return;
-        const silenceBytes = new Int16Array(samples.length).buffer;
 
         if (callMediaRef.current.isMuted) {
+          const silenceBytes = new Int16Array(samples.length).buffer;
           sendRawPcm(silenceBytes);
           return;
         }
 
-        const now = performance.now();
-
-        // 1. Block mic capture while remote audio is playing through speakers (+500ms tail)
-        if (now < (callMediaRef.current.remotePlaybackEndAt || 0)) {
-          callMediaRef.current.wasLocalSpeaking = false;
-          sendRawPcm(silenceBytes);
-          return;
-        }
-
-        // Measure local mic energy
-        let peak = 0;
-        let sumSq = 0;
-        for (let i = 0; i < samples.length; i += 1) {
-          const val = samples[i];
-          const abs = Math.abs(val);
-          if (abs > peak) peak = abs;
-          sumSq += val * val;
-        }
-        const rms = Math.sqrt(sumSq / samples.length);
-        const isVoiceEnergy = peak > 0.035 && rms > 0.01;
-
-        // 2. If a local speech burst just ended, trigger an 800ms post-speech acoustic echo holdoff
-        // so the user's word ("hello") playing out of a nearby phone speaker in the same room
-        // cannot be re-captured by the laptop mic and loop infinitely.
-        if (callMediaRef.current.wasLocalSpeaking && now > (callMediaRef.current.localSpeechActiveUntil || 0)) {
-          callMediaRef.current.wasLocalSpeaking = false;
-          callMediaRef.current.postSpeechCooldownUntil = now + 800;
-          playbackNode.port.postMessage({ type: 'clear' });
-        }
-
-        if (now < (callMediaRef.current.postSpeechCooldownUntil || 0)) {
-          sendRawPcm(silenceBytes);
-          return;
-        }
-
-        if (isVoiceEnergy) {
-          callMediaRef.current.wasLocalSpeaking = true;
-          callMediaRef.current.lastLocalSpokeAt = now;
-          callMediaRef.current.localSpeechActiveUntil = now + 240;
-          playbackNode.port.postMessage({ type: 'clear' });
-          sendRawPcm(float32ToInt16LE(samples));
-        } else if (callMediaRef.current.wasLocalSpeaking && now <= (callMediaRef.current.localSpeechActiveUntil || 0)) {
-          // Natural trailing consonant tail of the current word
-          sendRawPcm(float32ToInt16LE(samples));
-        } else {
-          // Send clean zeroed silence frames to flush CallManager.encodeBuf and keep WebSocket alive
-          sendRawPcm(silenceBytes);
-        }
+        // Transmit microphone audio directly so the other person hears clearly
+        sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);
 
@@ -1214,7 +1131,13 @@ export default function WhatsappPage() {
       const res = await api.get('/whatsapp/session/list/');
       setSessions(res.data);
       if (res.data && res.data.length > 0) {
-        setSelectedSession(res.data[0]);
+        const found = res.data[0];
+        setSelectedSession(prev => {
+          if (prev?.status === 'READY' && found.status !== 'READY' && prev.phone_number) {
+            return prev;
+          }
+          return found;
+        });
       }
     } catch (err) {
       console.error('Failed to fetch WhatsApp sessions:', err);
@@ -1229,6 +1152,9 @@ export default function WhatsappPage() {
   const isFetchingQRRef = useRef(false);
 
   const fetchQR = useCallback(async (forceRestart = false) => {
+    if (selectedSession?.status === 'READY' && selectedSession?.phone_number && !forceRestart) {
+      return;
+    }
     if (isFetchingQRRef.current && !forceRestart) return;
     isFetchingQRRef.current = true;
     if (forceRestart) {
@@ -1262,11 +1188,11 @@ export default function WhatsappPage() {
       isFetchingQRRef.current = false;
       setLoadingQR(false);
     }
-  }, []);
+  }, [selectedSession?.status, selectedSession?.phone_number]);
 
   // QR Polling: Sequential polling prevents request piling and worker thread starvation
   useEffect(() => {
-    const isReady = selectedSession?.status === 'READY';
+    const isReady = (selectedSession?.status === 'READY' && !!selectedSession?.phone_number) || sessionStatus?.connected;
     if (isReady) return;
 
     let active = true;
@@ -1286,7 +1212,7 @@ export default function WhatsappPage() {
       active = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [selectedSession?.status, fetchQR]);
+  }, [selectedSession?.status, selectedSession?.phone_number, sessionStatus?.connected, fetchQR]);
 
   // Request 8-digit Pairing Code via Phone Number
   const handleRequestPairingCode = async (e) => {

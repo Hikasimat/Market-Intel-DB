@@ -833,18 +833,31 @@ def _handle_session_connected(event_data: dict, session_name: str, event_record:
 
 def _handle_session_disconnected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
     is_logged_out = bool(event_data.get("isLoggedOut", False))
+    session = WhatsAppSession.objects.filter(session_name=session_name).first()
+    if not session:
+        return
+
+    # If the session is already authenticated (READY with phone_number),
+    # do NOT disconnect on transient socket drops!
+    if session.status == WhatsAppSession.Status.READY and session.phone_number and not is_logged_out:
+        logger.warning("Session %s transient socket disconnect - preserving READY status and auto-reconnecting", session_name)
+        from .client import get_waha_client
+        try:
+            get_waha_client().start_session(session_name)
+        except Exception as e:
+            logger.debug("Auto-reconnect session %s on disconnect event: %s", session_name, e)
+        return
+
     if is_logged_out:
         clear_cached_qr(session_name)
-        new_status = WhatsAppSession.Status.FAILED
+        new_status = WhatsAppSession.Status.DISCONNECTED
+        session.phone_number = None
     else:
-        # Transient connection close or socket reconnect while generating/rotating QR.
-        # Preserve cached QR code so user has uninterrupted time to scan.
         new_status = WhatsAppSession.Status.DISCONNECTED
 
-    WhatsAppSession.objects.filter(session_name=session_name).update(
-        status=new_status,
-        stopped_at=timezone.now()
-    )
+    session.status = new_status
+    session.stopped_at = timezone.now()
+    session.save(update_fields=["status", "phone_number", "stopped_at"] if is_logged_out else ["status", "stopped_at"])
     logger.warning("Session %s disconnected (logged_out=%s)", session_name, is_logged_out)
 
 
@@ -1961,6 +1974,7 @@ def _handle_session_status(
     phone = str(event_data.get("me", {}).get("phone") or "") if isinstance(event_data.get("me"), dict) else ""
 
     # Map WAHA status strings to our enum.
+    raw_status_upper = waha_status.upper()
     STATUS_MAP = {
         "STARTING": WhatsAppSession.Status.STARTING,
         "SCAN_QR_CODE": WhatsAppSession.Status.QR_REQUIRED,
@@ -1970,33 +1984,55 @@ def _handle_session_status(
         "DISCONNECTED": WhatsAppSession.Status.DISCONNECTED,
     }
 
-    mapped_status = STATUS_MAP.get(waha_status.upper(), WhatsAppSession.Status.DISCONNECTED)
+    mapped_status = STATUS_MAP.get(raw_status_upper, WhatsAppSession.Status.DISCONNECTED)
 
     with transaction.atomic():
         session, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
 
         old_status = session.status
-        session.status = mapped_status
+
+        # If already READY and has phone_number, DO NOT disconnect automatically on transient blips!
+        if session.status == WhatsAppSession.Status.READY and session.phone_number:
+            if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
+                session.status = WhatsAppSession.Status.READY
+            elif raw_status_upper in ("LOGGED_OUT", "UNPAIRED"):
+                session.status = WhatsAppSession.Status.DISCONNECTED
+                session.phone_number = None
+            elif raw_status_upper in ("FAILED", "STOPPED"):
+                # Preserve READY status and trigger seamless auto-recovery in WAHA
+                logger.info("Preserving READY status for session %s despite WAHA status: %s (auto-recovering)", session_name, waha_status)
+                from .client import get_waha_client
+                try:
+                    get_waha_client().start_session(session_name)
+                except Exception as rec_err:
+                    logger.debug("Auto-recover session %s: %s", session_name, rec_err)
+            else:
+                logger.info("Preserving READY status for session %s despite WAHA status: %s", session_name, waha_status)
+        else:
+            if mapped_status:
+                session.status = mapped_status
+            elif raw_status_upper in ("WORKING", "READY"):
+                session.status = WhatsAppSession.Status.READY
 
         if phone:
             session.phone_number = phone
 
         qr = event_data.get("qr") or event_data.get("value")
         qr_base64 = event_data.get("qrBase64") or ""
-        if qr or qr_base64:
+        if (qr or qr_base64) and session.status != WhatsAppSession.Status.READY:
             set_cached_qr(session_name, {
                 "qr": qr or qr_base64,
                 "qrBase64": qr_base64,
                 "value": qr or qr_base64,
             })
 
-        if mapped_status == WhatsAppSession.Status.READY:
+        if session.status == WhatsAppSession.Status.READY:
             clear_cached_qr(session_name)
             if old_status != WhatsAppSession.Status.READY:
                 session.reconnect_count += 1
                 session.started_at = timezone.now()
 
-        if mapped_status == WhatsAppSession.Status.DISCONNECTED and old_status == WhatsAppSession.Status.READY:
+        if session.status == WhatsAppSession.Status.DISCONNECTED and old_status == WhatsAppSession.Status.READY:
             session.disconnect_count += 1
             session.stopped_at = timezone.now()
 
