@@ -37,7 +37,6 @@ const Layout = () => {
   const [selectedTimezone, setSelectedTimezone] = useState(user?.timezone || 'UTC');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarSearch, setSidebarSearch] = useState('');
-  const [isFileSectionOpen, setIsFileSectionOpen] = useState(true);
   const [isAppsSectionOpen, setIsAppsSectionOpen] = useState(true);
 
   const toggleSidebar = () => setIsSidebarCollapsed((prev) => !prev);
@@ -163,12 +162,6 @@ const Layout = () => {
     ? primaryNavItems.filter(item => item.label.toLowerCase().includes(sidebarSearch.toLowerCase()))
     : primaryNavItems;
 
-  const fileItems = [
-    { label: 'Store', path: '/prospects' },
-    { label: 'Company', path: '/government-entities' },
-    { label: 'Employee', path: '/key-people' },
-  ];
-
   const appItems = [
     { label: 'LQ Pipeline', path: '/lq-pipeline', icon: Activity },
     { label: 'Email', path: '/inbox', icon: Mail },
@@ -281,45 +274,6 @@ const Layout = () => {
                   </div>
                 );
               })}
-
-              {/* Collapsible File Section matching Image 1 */}
-              {!sidebarSearch && (
-                <div className="pt-2 border-t border-slate-100">
-                  <button
-                    type="button"
-                    onClick={() => setIsFileSectionOpen((prev) => !prev)}
-                    className="flex items-center justify-between w-full px-2 py-1.5 text-xs text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-50 cursor-pointer font-medium transition"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      {isFileSectionOpen ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-                      )}
-                      <span className="font-semibold text-slate-600">File</span>
-                    </div>
-                    <div className="flex items-center gap-1 text-slate-400" onClick={(e) => e.stopPropagation()}>
-                      <Plus className="w-3.5 h-3.5 hover:text-slate-700 cursor-pointer" />
-                      <MoreVertical className="w-3.5 h-3.5 hover:text-slate-700 cursor-pointer" />
-                    </div>
-                  </button>
-
-                  {isFileSectionOpen && (
-                    <div className="pl-4 pr-1 py-1 space-y-0.5">
-                      {fileItems.map((fItem) => (
-                        <Link
-                          key={fItem.label}
-                          to={fItem.path}
-                          className="flex items-center gap-2.5 px-2.5 py-1.5 text-xs text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 rounded-lg transition font-medium"
-                        >
-                          <Folder className="w-3.5 h-3.5 text-slate-400" />
-                          <span>{fItem.label}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* Collapsible Apps Section matching Image 1 */}
               {!sidebarSearch && (
@@ -479,20 +433,7 @@ const Layout = () => {
               {/* Divider matching Image 1 */}
               <div className="w-8 border-t border-slate-200/80 my-1" />
 
-              {/* Bottom Folder icons for File and Apps in rail matching Image 1 */}
-              <div className="group relative flex items-center justify-center">
-                <Link
-                  to="/prospects"
-                  className="p-2.5 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100/80 transition"
-                >
-                  <Folder className="w-4 h-4 shrink-0" />
-                </Link>
-                <div className="absolute left-full ml-3 px-2.5 py-1 bg-[#18181b] text-white text-[11px] font-semibold rounded-md shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 whitespace-nowrap flex items-center">
-                  Files (Store, Company, Employee)
-                  <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 bg-[#18181b] rotate-45" />
-                </div>
-              </div>
-
+              {/* Apps icon in rail */}
               <div className="group relative flex items-center justify-center">
                 <Link
                   to="/lq-pipeline"

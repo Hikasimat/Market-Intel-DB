@@ -524,6 +524,75 @@ class GmailOAuthService:
         return counts
 
     @classmethod
+    def get_user_labels(cls, credentials):
+        """
+        Fetches user-defined labels directly from the user's Gmail account.
+        """
+        token = cls.get_valid_access_token(credentials)
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/labels"
+        req = urllib.request.Request(
+            url,
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json',
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                labels = data.get('labels', [])
+                user_labels = [
+                    {
+                        'id': l.get('id'),
+                        'name': l.get('name'),
+                        'type': l.get('type'),
+                        'messagesTotal': l.get('messagesTotal', 0),
+                        'messagesUnread': l.get('messagesUnread', 0),
+                    }
+                    for l in labels
+                    if l.get('type') == 'user'
+                ]
+                return user_labels
+        except Exception as e:
+            logger.warning("Failed to fetch Gmail user labels: %s", e)
+            return []
+
+    @classmethod
+    def create_label(cls, credentials, name):
+        """
+        Creates a custom label directly on the user's connected Gmail account.
+        """
+        if not name or not name.strip():
+            raise ValueError("Label name cannot be empty")
+        token = cls.get_valid_access_token(credentials)
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/labels"
+        payload = json.dumps({
+            'name': name.strip(),
+            'labelListVisibility': 'labelShow',
+            'messageListVisibility': 'show',
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            },
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                existing = cls.get_user_labels(credentials)
+                for l in existing:
+                    if l.get('name', '').lower() == name.strip().lower():
+                        return l
+            raise
+
+    @classmethod
     def fetch_messages(cls, credentials, folder='INBOX', limit=20, search='', category='', user=None, matcher=None):
         """
         Fetches messages from Gmail via Gmail REST API.
@@ -532,19 +601,27 @@ class GmailOAuthService:
         Returns list of message metadata matching application's inbox format.
         """
         token = cls.get_valid_access_token(credentials)
+        include_spam_trash = False
         folder_clean = (folder or 'INBOX').replace('"', '').strip().upper()
         if 'SENT' in folder_clean:
             folder_query = 'in:sent'
-        elif 'SPAM' in folder_clean:
+        elif 'SPAM' in folder_clean or 'JUNK' in folder_clean:
             folder_query = 'in:spam'
+            include_spam_trash = True
         elif 'STARRED' in folder_clean:
             folder_query = 'is:starred'
         elif 'DRAFT' in folder_clean:
             folder_query = 'in:draft'
         elif 'TRASH' in folder_clean or 'BIN' in folder_clean:
             folder_query = 'in:trash'
+            include_spam_trash = True
         elif 'ALL' in folder_clean:
             folder_query = ''
+        elif folder_clean.startswith('LABEL:'):
+            folder_query = f'label:"{folder[6:].strip()}"'
+        elif folder_clean and folder_clean not in ('INBOX', 'ALL'):
+            # Custom label name
+            folder_query = f'label:"{folder.strip()}"'
         else:
             folder_query = 'in:inbox'
 
@@ -557,10 +634,13 @@ class GmailOAuthService:
                 query_parts.append(f"category:{cat_clean}")
         if search and search.strip():
             query_parts.append(search.strip())
+            if 'in:trash' in search.lower() or 'in:spam' in search.lower():
+                include_spam_trash = True
         final_query = ' '.join(query_parts)
 
         query_param = f"&q={urllib.parse.quote(final_query)}" if final_query else ""
-        url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={min(int(limit), 50)}{query_param}"
+        spam_trash_param = "&includeSpamTrash=true" if include_spam_trash else ""
+        url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={min(int(limit), 50)}{query_param}{spam_trash_param}"
         req = urllib.request.Request(
             url,
             headers={

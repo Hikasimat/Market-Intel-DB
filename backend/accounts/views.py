@@ -1319,6 +1319,35 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             logging.getLogger(__name__).warning("Failed to fetch category counts: %s", e)
             return Response({'social': 0, 'promotions': 0, 'updates': 0, 'primary': 0, 'inbox': 0})
 
+    @action(detail=False, methods=['get'], url_path='labels')
+    def labels(self, request):
+        """Returns user-defined labels directly from the user's Gmail account."""
+        google_creds = get_mail_credentials(request.user)
+        if not google_creds:
+            return Response({'labels': []}, status=status.HTTP_200_OK)
+        try:
+            labels_list = GmailOAuthService.get_user_labels(google_creds)
+            return Response({'labels': labels_list}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to fetch Gmail labels: %s", e)
+            return Response({'labels': [], 'error': str(e)}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='create-label')
+    def create_label(self, request):
+        """Creates a custom label directly on the user's connected Gmail account."""
+        google_creds = get_mail_credentials(request.user)
+        if not google_creds:
+            return Response({'error': 'Gmail is not connected.'}, status=status.HTTP_400_BAD_REQUEST)
+        name = request.data.get('name', '').strip()
+        if not name:
+            return Response({'error': 'Label name cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            label = GmailOAuthService.create_label(google_creds, name)
+            return Response({'status': 'success', 'label': label}, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to create Gmail label: %s", e)
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
     # Legacy endpoint kept for backward compatibility with old fetch_emails URL
     @action(detail=False, methods=['get'], url_path='fetch_emails')
     def fetch_emails_legacy(self, request):

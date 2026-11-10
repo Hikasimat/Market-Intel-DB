@@ -58,6 +58,11 @@ const InboxPage = () => {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [categoryTab, setCategoryTab] = useState('primary');
   const [categoryCounts, setCategoryCounts] = useState({ social: 0, promotions: 0, updates: 0, primary: 0, inbox: 0 });
+  const [userLabels, setUserLabels] = useState([]);
+  const [showCreateLabelModal, setShowCreateLabelModal] = useState(false);
+  const [newLabelName, setNewLabelName] = useState('');
+  const [creatingLabel, setCreatingLabel] = useState(false);
+  const [activeCustomLabel, setActiveCustomLabel] = useState(null);
   const [isMoreFoldersOpen, setIsMoreFoldersOpen] = useState(false);
   const [bodyLoading, setBodyLoading] = useState(false);
   const [emailBody, setEmailBodyState] = useState({ html_body: '', text_body: '', attachments: [] });
@@ -125,10 +130,22 @@ const InboxPage = () => {
     }
   }, []);
 
+  const fetchUserLabels = useCallback(async () => {
+    try {
+      const res = await api.get('/auth/mail-account/labels/');
+      if (res.data?.labels) {
+        setUserLabels(res.data.labels);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch user labels', err);
+    }
+  }, []);
+
   useEffect(() => {
     fetchMailAccount();
     fetchGmailStatus();
     fetchCategoryCounts();
+    fetchUserLabels();
 
     const searchParams = new URLSearchParams(window.location.search);
     if (searchParams.get('gmail_connected')) {
@@ -137,11 +154,12 @@ const InboxPage = () => {
       fetchGmailStatus();
       fetchMailAccount();
       fetchCategoryCounts();
+      fetchUserLabels();
     } else if (searchParams.get('gmail_error')) {
       toast.error(`Gmail connection error: ${decodeURIComponent(searchParams.get('gmail_error'))}`);
       window.history.replaceState({}, '', window.location.pathname);
     }
-  }, [fetchGmailStatus, fetchMailAccount, fetchCategoryCounts]);
+  }, [fetchGmailStatus, fetchMailAccount, fetchCategoryCounts, fetchUserLabels]);
 
   const handleConnectGmail = async () => {
     setConnectingGmail(true);
@@ -731,14 +749,52 @@ const InboxPage = () => {
 
   const handleFolderSwitch = (folderId) => {
     setIsProspectResponsesView(false);
-    if (folderId === activeFolder && !isProspectResponsesView) return;
+    setActiveCustomLabel(null);
+    if (folderId === activeFolder && !isProspectResponsesView && !activeCustomLabel) return;
     dispatch(setActiveFolder(folderId));
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+    loadFolder(folderId, true, searchQuery);
+  };
+
+  const handleSelectCustomLabel = (labelName) => {
+    setIsProspectResponsesView(false);
+    setSelectedEmail(null);
+    setActiveCustomLabel(labelName);
+    setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
+    dispatch(setActiveFolder(`LABEL:${labelName}`));
+    loadFolder(`LABEL:${labelName}`, true);
+  };
+
+  const handleCreateLabel = async (e) => {
+    e?.preventDefault?.();
+    const trimmed = newLabelName.trim();
+    if (!trimmed) {
+      toast.warning('Please enter a label name.');
+      return;
+    }
+    setCreatingLabel(true);
+    try {
+      const res = await api.post('/auth/mail-account/create-label/', { name: trimmed });
+      toast.success(`Label "${trimmed}" created successfully in Gmail!`);
+      const createdLabel = res.data?.label || { id: trimmed, name: trimmed };
+      setUserLabels(prev => {
+        if (prev.some(l => l.name?.toLowerCase() === createdLabel.name?.toLowerCase())) return prev;
+        return [...prev, createdLabel];
+      });
+      setShowCreateLabelModal(false);
+      setNewLabelName('');
+      handleSelectCustomLabel(createdLabel.name);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to create label in Gmail.');
+    } finally {
+      setCreatingLabel(false);
+    }
   };
 
   const handleSwitchToProspectResponses = () => {
     setIsProspectResponsesView(true);
+    setActiveCustomLabel(null);
     setSelectedEmail(null);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
     loadProspectResponses(false);
@@ -1282,41 +1338,54 @@ const InboxPage = () => {
             )}
           </nav>
 
-          {/* Labels Section matching Image 1 */}
+          {/* Labels Section connected directly to Gmail */}
           <div className="mt-4 pt-3 border-t border-slate-100">
             <div className="flex items-center justify-between px-3 pb-2">
               <span className="text-xs font-bold text-slate-700">Labels</span>
               <button
                 type="button"
-                onClick={() => toast.info('Custom Gmail labels are synchronized with your Google Mail account.')}
+                onClick={() => setShowCreateLabelModal(true)}
                 className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition cursor-pointer"
-                title="Add label"
+                title="Create label in Gmail"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
             </div>
             <div className="space-y-0.5">
+              {/* [Imap]/Trash */}
               <button
                 type="button"
                 onClick={() => handleFolderSwitch('TRASH')}
-                className="w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                className={`w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full transition cursor-pointer ${
+                  !isProspectResponsesView && activeFolder === 'TRASH' && !activeCustomLabel
+                    ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                    : 'text-slate-600 hover:bg-slate-100 font-medium'
+                }`}
               >
-                <FileText className="w-3.5 h-3.5 text-slate-400" />
+                <Trash2 className="w-3.5 h-3.5 text-slate-400" />
                 <span className="truncate">[Imap]/Trash</span>
               </button>
+
+              {/* Junk */}
               <button
                 type="button"
                 onClick={() => handleFolderSwitch('SPAM')}
-                className="w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                className={`w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full transition cursor-pointer ${
+                  !isProspectResponsesView && activeFolder === 'SPAM' && !activeCustomLabel
+                    ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                    : 'text-slate-600 hover:bg-slate-100 font-medium'
+                }`}
               >
-                <FileText className="w-3.5 h-3.5 text-slate-400" />
+                <AlertTriangle className="w-3.5 h-3.5 text-slate-400" />
                 <span className="truncate">Junk</span>
               </button>
+
+              {/* Prospects Responses */}
               <button
                 type="button"
                 onClick={handleSwitchToProspectResponses}
                 className={`w-full flex items-center justify-between px-4 py-1.5 text-xs rounded-r-full transition cursor-pointer ${
-                  isProspectResponsesView ? 'bg-emerald-50 text-emerald-800 font-bold' : 'text-slate-600 hover:bg-slate-100'
+                  isProspectResponsesView ? 'bg-emerald-50 text-emerald-800 font-bold' : 'text-slate-600 hover:bg-slate-100 font-medium'
                 }`}
               >
                 <div className="flex items-center gap-2.5 truncate">
@@ -1327,6 +1396,30 @@ const InboxPage = () => {
                   {prospectEmails.length || 0}
                 </span>
               </button>
+
+              {/* Real Custom Labels from Gmail */}
+              {userLabels.map((lbl) => (
+                <button
+                  key={lbl.id || lbl.name}
+                  type="button"
+                  onClick={() => handleSelectCustomLabel(lbl.name)}
+                  className={`w-full flex items-center justify-between px-4 py-1.5 text-xs rounded-r-full transition cursor-pointer ${
+                    activeCustomLabel === lbl.name
+                      ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                      : 'text-slate-600 hover:bg-slate-100 font-medium'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 truncate">
+                    <Tag className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="truncate">{lbl.name}</span>
+                  </div>
+                  {lbl.messagesUnread > 0 && (
+                    <span className="text-[10px] bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded-full font-semibold">
+                      {lbl.messagesUnread}
+                    </span>
+                  )}
+                </button>
+              ))}
             </div>
           </div>
         </div>
@@ -1613,14 +1706,6 @@ const InboxPage = () => {
                     title="Refresh"
                   >
                     <RefreshCw className={`w-4 h-4 ${isListLoading ? 'animate-spin' : ''}`} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => toast.info('Gmail filters and options.')}
-                    className="p-1.5 hover:bg-slate-100 rounded-full text-slate-600 hover:text-slate-900 transition cursor-pointer"
-                    title="More options"
-                  >
-                    <MoreVertical className="w-4 h-4" />
                   </button>
 
                   {selectedIds.size > 0 && (
@@ -2392,6 +2477,57 @@ const InboxPage = () => {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Custom Gmail Label Modal */}
+      {showCreateLabelModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-[100]">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200">
+            <div className="flex items-center justify-between p-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Tag className="w-4 h-4 text-blue-600" />
+                <h3 className="font-bold text-slate-800 text-sm">New Label</h3>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => { setShowCreateLabelModal(false); setNewLabelName(''); }} 
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateLabel}>
+              <div className="p-5 space-y-3">
+                <label className="block text-xs font-semibold text-slate-600">Please enter a new label name:</label>
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="e.g. Followups, Priority, Leads"
+                  value={newLabelName}
+                  onChange={(e) => setNewLabelName(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition font-medium"
+                />
+              </div>
+              <div className="p-3 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setShowCreateLabelModal(false); setNewLabelName(''); }}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingLabel || !newLabelName.trim()}
+                  className="px-4 py-2 text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  {creatingLabel ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  <span>Create Label</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
