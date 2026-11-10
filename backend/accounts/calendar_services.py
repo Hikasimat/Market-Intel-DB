@@ -428,10 +428,19 @@ def list_events(creds, time_min=None, time_max=None, max_results=250):
         'orderBy': 'startTime',
         'maxResults': max_results,
     }
+    if not time_min:
+        time_min = timezone.now() - timedelta(days=60)
+
     if time_min:
-        params['timeMin'] = time_min.isoformat() if hasattr(time_min, 'isoformat') else str(time_min)
+        s_min = time_min.isoformat() if hasattr(time_min, 'isoformat') else str(time_min)
+        if ' ' in s_min and 'T' in s_min:
+            s_min = s_min.replace(' ', '+')
+        params['timeMin'] = s_min
     if time_max:
-        params['timeMax'] = time_max.isoformat() if hasattr(time_max, 'isoformat') else str(time_max)
+        s_max = time_max.isoformat() if hasattr(time_max, 'isoformat') else str(time_max)
+        if ' ' in s_max and 'T' in s_max:
+            s_max = s_max.replace(' ', '+')
+        params['timeMax'] = s_max
 
     data = _api_request(creds, 'GET', '/calendars/primary/events', params=params)
     items = data.get('items', []) if isinstance(data, dict) else []

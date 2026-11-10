@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -18,6 +18,7 @@ import {
   ArrowRight,
   Trash2,
   Plus,
+  AlertCircle,
 } from "lucide-react";
 import { useSelector } from "react-redux";
 import { useSearchParams } from "react-router-dom";
@@ -26,8 +27,8 @@ import api from "../services/api";
 import { getZonedDate, formatTimeForUser, formatDateTimeForUser } from "../utils/timezone";
 
 const HOUR_HEIGHT = 74;
-const START_HOUR = 8;
-const END_HOUR = 20;
+const START_HOUR = 7;
+const END_HOUR = 23;
 
 // Pastel color palette matching design specification
 const COLOR_OPTIONS = [
@@ -43,15 +44,24 @@ function getColorConfig(colorId) {
   return found || COLOR_OPTIONS[0];
 }
 
+// Convert event index/id to deterministic pastel color
+function pickEventColor(evt, index = 0) {
+  if (evt.colorId && COLOR_OPTIONS.some((c) => c.id === evt.colorId)) {
+    return evt.colorId;
+  }
+  return COLOR_OPTIONS[index % COLOR_OPTIONS.length].id;
+}
+
 export default function LqCalendarPage() {
   const { user } = useSelector((state) => state.auth);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const getZonedNow = () => getZonedDate(null, user?.timezone);
+  const getZonedNow = useCallback(() => getZonedDate(null, user?.timezone), [user?.timezone]);
   const [currentDate, setCurrentDate] = useState(() => getZonedDate(null, null));
   const [miniCalDate, setMiniCalDate] = useState(() => getZonedDate(null, null));
   const [loading, setLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedTime, setLastSyncedTime] = useState(null);
   const [calendarStatus, setCalendarStatus] = useState({ is_connected: false, is_configured: false, email: "" });
   const [events, setEvents] = useState([]);
   const [viewMode, setViewMode] = useState("week"); // 'day' | 'week' | 'month'
@@ -85,9 +95,9 @@ export default function LqCalendarPage() {
       setCurrentDate(now);
       setMiniCalDate(now);
     }
-  }, [user?.timezone]);
+  }, [user?.timezone, getZonedNow]);
 
-  // Handle post-redirect query params
+  // Handle post-redirect query params (e.g. ?calendar_connected=1)
   useEffect(() => {
     if (searchParams.get("calendar_connected") === "1") {
       toast.success("Google Calendar connected successfully!");
@@ -107,9 +117,9 @@ export default function LqCalendarPage() {
     update();
     const interval = setInterval(update, 60000);
     return () => clearInterval(interval);
-  }, [user?.timezone]);
+  }, [user?.timezone, getZonedNow]);
 
-  // Week days starting Sunday to match screenshot (SUN 9, MON 10, TUE 11...)
+  // Week days starting Sunday to match screenshot (SUN, MON, TUE...)
   const weekDays = useMemo(() => {
     const d = new Date(currentDate);
     const day = d.getDay(); // 0 is Sunday
@@ -122,184 +132,89 @@ export default function LqCalendarPage() {
     });
   }, [currentDate]);
 
-  // Initial load & when week changes
-  useEffect(() => {
-    fetchStatusAndEvents();
-  }, [currentDate]);
-
-  // Auto-scroll near 8 AM / current hour
-  useEffect(() => {
-    if (!loading && scrollRef.current && (viewMode === "week" || viewMode === "day")) {
-      const now = getZonedNow();
-      const scrollTo = Math.max(0, now.getHours() - START_HOUR - 0.5) * HOUR_HEIGHT;
-      scrollRef.current.scrollTop = scrollTo;
-    }
-  }, [loading, viewMode]);
-
-  // Seed default sample events matching the screenshot if no events exist yet
-  const generateSampleEvents = (days) => {
-    const sun = days[0];
-    const mon = days[1];
-    const tue = days[2];
-    const wed = days[3];
-    const fri = days[5];
-
-    const makeDate = (base, h, m) => {
-      const d = new Date(base);
-      d.setHours(h, m, 0, 0);
-      return d.toISOString();
-    };
-
-    return [
-      {
-        id: "sample_1",
-        summary: "Jane Feedback",
-        start: makeDate(mon, 8, 0),
-        end: makeDate(mon, 8, 30),
-        colorId: "lavender",
-        meet_url: "https://meet.google.com/jan-feed-bak",
-        description: "Review initial feedback on campaign designs.",
-        attendees: [{ email: "jane@company.com" }],
-      },
-      {
-        id: "sample_2",
-        summary: "Feedback Kapas Project",
-        start: makeDate(mon, 8, 30),
-        end: makeDate(mon, 10, 0),
-        colorId: "mint",
-        meet_url: "https://meet.google.com/kap-proj-meet",
-        description: "Feedback review and sprint alignment for Kapas project.",
-        attendees: [{ email: "team@kapas.io" }],
-      },
-      {
-        id: "sample_3",
-        summary: "Meet with Anne",
-        start: makeDate(sun, 9, 0),
-        end: makeDate(sun, 9, 30),
-        colorId: "lavender",
-        meet_url: "https://meet.google.com/ann-sync-lead",
-        description: "Weekly catchup with Anne.",
-      },
-      {
-        id: "sample_4",
-        summary: "Daily Sync",
-        start: makeDate(sun, 11, 0),
-        end: makeDate(sun, 11, 30),
-        colorId: "mint",
-        description: "Morning daily standup.",
-      },
-      {
-        id: "sample_5",
-        summary: "Discuss Animal Project",
-        start: makeDate(sun, 12, 0),
-        end: makeDate(sun, 12, 30),
-        colorId: "skyblue",
-        meet_url: "https://meet.google.com/ani-disc-proj",
-        description: "Animal project deliverables sync.",
-      },
-      {
-        id: "sample_6",
-        summary: "Upload Shots",
-        start: makeDate(mon, 11, 0),
-        end: makeDate(mon, 12, 0),
-        colorId: "lavender",
-        description: "Upload design shots and creative assets.",
-      },
-      {
-        id: "sample_7",
-        summary: "Design System",
-        start: makeDate(tue, 8, 30),
-        end: makeDate(tue, 9, 30),
-        colorId: "skyblue",
-        meet_url: "https://meet.google.com/des-sys-comp",
-        description: "Component audit and token standardization.",
-      },
-      {
-        id: "sample_8",
-        summary: "Discuss Hola Project",
-        start: makeDate(tue, 10, 0),
-        end: makeDate(tue, 11, 0),
-        colorId: "skyblue",
-        description: "Hola project timeline and client feedback discussion.",
-      },
-      {
-        id: "sample_9",
-        summary: "Daily Sync",
-        start: makeDate(tue, 11, 0),
-        end: makeDate(tue, 11, 30),
-        colorId: "lavender",
-        description: "Daily team alignment.",
-      },
-      {
-        id: "sample_10",
-        summary: "Break",
-        start: makeDate(wed, 11, 30),
-        end: makeDate(wed, 12, 0),
-        colorId: "mint",
-        description: "Coffee & break.",
-      },
-      {
-        id: "sample_11",
-        summary: "Azie's Birthday",
-        start: makeDate(fri, 8, 0),
-        end: makeDate(fri, 8, 30),
-        colorId: "skyblue",
-        description: "Team birthday celebration for Azie.",
-      },
-    ];
-  };
-
-  const fetchStatusAndEvents = async () => {
-    setLoading(true);
+  // Fetch real-time status & Google Calendar data
+  const fetchStatusAndEvents = useCallback(async (showToast = false) => {
     try {
       let isConnected = false;
+      let email = "";
       try {
         const statusRes = await api.get("/auth/google/calendar/status/");
-        setCalendarStatus(statusRes.data || {});
-        isConnected = Boolean(statusRes.data?.is_connected);
+        const statusData = statusRes.data || {};
+        setCalendarStatus(statusData);
+        isConnected = Boolean(statusData.is_connected);
+        email = statusData.email || "";
       } catch (err) {
         console.warn("Could not fetch calendar status", err);
       }
 
       if (isConnected) {
-        const startOfWeek = new Date(weekDays[0]);
-        startOfWeek.setHours(0, 0, 0, 0);
-        const endOfWeek = new Date(weekDays[6]);
-        endOfWeek.setHours(23, 59, 59, 999);
+        // Query broad window around current date: 45 days past to 90 days future
+        const viewStart = new Date(currentDate);
+        viewStart.setDate(viewStart.getDate() - 45);
+        viewStart.setHours(0, 0, 0, 0);
 
-        const timeMin = new Date(startOfWeek.getTime() - 24 * 3600 * 1000).toISOString();
-        const timeMax = new Date(endOfWeek.getTime() + 14 * 24 * 3600 * 1000).toISOString();
+        const viewEnd = new Date(currentDate);
+        viewEnd.setDate(viewEnd.getDate() + 90);
+        viewEnd.setHours(23, 59, 59, 999);
+
+        const timeMin = viewStart.toISOString();
+        const timeMax = viewEnd.toISOString();
 
         const calRes = await api.get("/auth/google/calendar/events/", {
           params: { time_min: timeMin, time_max: timeMax },
         });
 
         const rawEvents = calRes.data?.events || [];
-        if (rawEvents.length > 0) {
-          const mapped = rawEvents.map((evt, idx) => ({
-            ...evt,
-            colorId: evt.colorId || COLOR_OPTIONS[idx % COLOR_OPTIONS.length].id,
-          }));
-          setEvents(mapped);
-        } else {
-          setEvents(generateSampleEvents(weekDays));
+        const mapped = rawEvents.map((evt, idx) => ({
+          ...evt,
+          colorId: pickEventColor(evt, idx),
+        }));
+
+        setEvents(mapped);
+        setLastSyncedTime(new Date());
+        if (showToast) {
+          toast.success(`Google Calendar refreshed (${mapped.length} events loaded)`);
         }
       } else {
-        setEvents((prev) => (prev.length > 0 ? prev : generateSampleEvents(weekDays)));
+        setEvents([]);
       }
     } catch (err) {
-      console.error("Failed to load calendar events", err);
-      setEvents((prev) => (prev.length > 0 ? prev : generateSampleEvents(weekDays)));
+      console.error("Failed to load real-time calendar events", err);
+      if (showToast) {
+        toast.error("Failed to sync with Google Calendar.");
+      }
     } finally {
       setLoading(false);
       setIsSyncing(false);
     }
-  };
+  }, [currentDate]);
+
+  // Initial load & when date changes
+  useEffect(() => {
+    fetchStatusAndEvents();
+  }, [fetchStatusAndEvents]);
+
+  // Auto-refresh real-time Google Calendar data every 30 seconds
+  useEffect(() => {
+    if (!calendarStatus.is_connected) return;
+    const interval = setInterval(() => {
+      fetchStatusAndEvents(false);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [calendarStatus.is_connected, fetchStatusAndEvents]);
+
+  // Auto-scroll near 8 AM or current hour
+  useEffect(() => {
+    if (!loading && scrollRef.current && (viewMode === "week" || viewMode === "day")) {
+      const now = getZonedNow();
+      const scrollTo = Math.max(0, (now.getHours() - START_HOUR - 0.5) * HOUR_HEIGHT);
+      scrollRef.current.scrollTop = scrollTo;
+    }
+  }, [loading, viewMode, getZonedNow]);
 
   const handleSync = async () => {
     setIsSyncing(true);
-    await fetchStatusAndEvents();
-    toast.success("Calendar refreshed!");
+    await fetchStatusAndEvents(true);
   };
 
   const handleConnectCalendar = async () => {
@@ -323,7 +238,7 @@ export default function LqCalendarPage() {
       await api.post("/auth/google/calendar/disconnect/");
       toast.info("Google Calendar disconnected.");
       setCalendarStatus({ is_connected: false, is_configured: true, email: "" });
-      setEvents(generateSampleEvents(weekDays));
+      setEvents([]);
     } catch (err) {
       toast.error("Failed to disconnect Google Calendar.");
     }
@@ -340,7 +255,7 @@ export default function LqCalendarPage() {
     }
   };
 
-  // Navigation helpers
+  // Period navigation
   const prevPeriod = () => {
     const d = new Date(currentDate);
     if (viewMode === "day") {
@@ -393,13 +308,14 @@ export default function LqCalendarPage() {
 
   const formatHourLabel = (h) => {
     if (h === 0) return "12 AM";
-    if (h === 12) return "12 AM"; // Screenshot displays 12 AM / 12 PM cleanly
+    if (h === 12) return "12 PM";
     return h > 12 ? `${h - 12} PM` : `${h} AM`;
   };
 
-  // Convert decimal/minutes to "8.00am", "8.30am" string style shown in screenshot
+  // Convert time to "8.00am", "8.30am" lowercase dot format matching design
   const formatTimeSlotDisplay = (dateInput) => {
-    const d = new Date(dateInput);
+    if (!dateInput) return "";
+    const d = getZonedDate(dateInput, user?.timezone);
     let h = d.getHours();
     const m = d.getMinutes();
     const ampm = h >= 12 ? "pm" : "am";
@@ -411,6 +327,10 @@ export default function LqCalendarPage() {
 
   const formatEventTimeRange = (start, end) => {
     if (!start) return "";
+    // If all-day event
+    if (typeof start === "string" && /^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      return "All day";
+    }
     const sStr = formatTimeSlotDisplay(start);
     if (!end) return sStr;
     const eStr = formatTimeSlotDisplay(end);
@@ -419,27 +339,49 @@ export default function LqCalendarPage() {
 
   const hours = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i);
 
-  // Filter events belonging to a day
-  const getEventsForDay = (day) => {
-    return events.filter((e) => {
-      if (!e.start) return false;
-      return isSameDay(new Date(e.start), day);
-    });
+  // Robust date matcher handling all-day (YYYY-MM-DD) and zoned timestamps
+  const eventBelongsToDay = (evt, targetDay) => {
+    if (!evt || !evt.start) return false;
+    if (typeof evt.start === "string" && /^\d{4}-\d{2}-\d{2}$/.test(evt.start)) {
+      const [y, m, d] = evt.start.split("-").map(Number);
+      return (
+        targetDay.getFullYear() === y &&
+        targetDay.getMonth() === m - 1 &&
+        targetDay.getDate() === d
+      );
+    }
+    const eDate = getZonedDate(evt.start, user?.timezone);
+    return isSameDay(eDate, targetDay);
   };
 
-  // Calculate pixel top & height for an event in the week grid
+  // Filter events belonging to a day
+  const getEventsForDay = (day) => {
+    return events.filter((e) => eventBelongsToDay(e, day));
+  };
+
+  // Calculate pixel top & height for an event in the grid
   const getEventGeometry = (evt) => {
-    const s = new Date(evt.start);
-    const e = evt.end ? new Date(evt.end) : new Date(s.getTime() + 30 * 60000);
+    // All-day event pinned at the very top of the day column
+    if (typeof evt.start === "string" && /^\d{4}-\d{2}-\d{2}$/.test(evt.start)) {
+      return { top: 2, height: 34, isAllDay: true };
+    }
+
+    const s = getZonedDate(evt.start, user?.timezone);
+    const e = evt.end ? getZonedDate(evt.end, user?.timezone) : new Date(s.getTime() + 30 * 60000);
 
     const sHour = s.getHours() + s.getMinutes() / 60;
-    const eHour = e.getHours() + e.getMinutes() / 60;
+    let eHour = e.getHours() + e.getMinutes() / 60;
+
+    // Handle events that end past midnight
+    if (eHour <= sHour) {
+      eHour = sHour + 0.5;
+    }
 
     const top = Math.max(0, (sHour - START_HOUR) * HOUR_HEIGHT);
     const durationHours = Math.max(0.4, eHour - sHour);
-    const height = durationHours * HOUR_HEIGHT;
+    const height = Math.max(durationHours * HOUR_HEIGHT - 3, 34);
 
-    return { top, height: Math.max(height, 28) };
+    return { top, height, isAllDay: false };
   };
 
   // Handle clicking empty slot to start draft and open "Add Schedule"
@@ -481,13 +423,12 @@ export default function LqCalendarPage() {
     setIsAddScheduleOpen(true);
   };
 
-  // Close Add Schedule popover & clear draft slot
   const handleCloseAddSchedule = () => {
     setIsAddScheduleOpen(false);
     setDraftSlot(null);
   };
 
-  // Save new schedule
+  // Save new schedule to Google Calendar in real-time
   const handleSaveSchedule = async (e) => {
     if (e) e.preventDefault();
     setSavingSchedule(true);
@@ -530,9 +471,11 @@ export default function LqCalendarPage() {
         }
       }
 
-      setEvents((prev) => [newEvt, ...prev]);
+      setEvents((prev) => [newEvt, ...prev.filter((item) => item.id !== newEvt.id)]);
       toast.success("Schedule created successfully!");
       handleCloseAddSchedule();
+      // Re-sync with Google Calendar
+      setTimeout(() => fetchStatusAndEvents(false), 1000);
     } catch (err) {
       toast.error("Failed to create schedule.");
     } finally {
@@ -540,9 +483,9 @@ export default function LqCalendarPage() {
     }
   };
 
-  // Delete event
+  // Delete event in real-time
   const handleDeleteEvent = async (eventId) => {
-    if (!window.confirm("Delete this event?")) return;
+    if (!window.confirm("Delete this event from Google Calendar?")) return;
     try {
       if (calendarStatus.is_connected) {
         try {
@@ -555,7 +498,7 @@ export default function LqCalendarPage() {
       }
       setEvents((prev) => prev.filter((e) => e.id !== eventId));
       setSelectedEvent(null);
-      toast.success("Event removed.");
+      toast.success("Event removed from calendar.");
     } catch {
       toast.error("Could not remove event.");
     }
@@ -567,7 +510,6 @@ export default function LqCalendarPage() {
     const month = miniCalDate.getMonth();
 
     const firstDay = new Date(year, month, 1);
-    // getDay: Sun is 0, Mon is 1. We want Mon=0 ... Sun=6
     let startDay = firstDay.getDay() - 1;
     if (startDay < 0) startDay = 6;
 
@@ -712,37 +654,62 @@ export default function LqCalendarPage() {
           </div>
         </div>
 
-        {/* Clean bottom area (explicitly omitting circled items: "My Calendars", "Favorites", "Categories") */}
+        {/* Clean bottom area (without marked excluded items) */}
         <div className="mt-auto pt-4 border-t border-slate-100 space-y-2">
           {calendarStatus.is_connected ? (
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between">
-              <div className="truncate pr-2">
+            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   <span className="text-[11px] font-bold text-slate-800">Google Sync Active</span>
                 </div>
-                <div className="text-[10px] text-slate-500 truncate mt-0.5">
-                  {calendarStatus.email}
+                <button
+                  type="button"
+                  onClick={handleDisconnectCalendar}
+                  title="Disconnect Google Calendar"
+                  className="p-1 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="text-[10px] text-slate-500 truncate font-medium">
+                {calendarStatus.email}
+              </div>
+
+              <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-[10px] text-slate-400">
+                <span>{events.length} event{events.length !== 1 ? "s" : ""} synced</span>
+                <button
+                  type="button"
+                  onClick={handleSync}
+                  disabled={isSyncing}
+                  className="inline-flex items-center gap-1 font-bold text-slate-600 hover:text-slate-900 transition"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isSyncing ? "animate-spin text-slate-800" : ""}`} />
+                  <span>Sync Now</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-2xl space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="text-xs font-bold text-amber-900">Google Calendar</h4>
+                  <p className="text-[10px] text-amber-700 mt-0.5">
+                    Connect your account to display live Google Calendar events.
+                  </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={handleDisconnectCalendar}
-                title="Disconnect Google Calendar"
-                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition"
+                onClick={handleConnectCalendar}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-black rounded-xl shadow-xs transition"
               >
-                <LogOut className="w-3.5 h-3.5" />
+                <Video className="w-3.5 h-3.5" />
+                <span>Connect Google Account</span>
               </button>
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={handleConnectCalendar}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition"
-            >
-              <Video className="w-3.5 h-3.5 text-slate-500" />
-              <span>Connect Google Meet</span>
-            </button>
           )}
         </div>
       </aside>
@@ -787,14 +754,15 @@ export default function LqCalendarPage() {
             </div>
           </div>
 
-          {/* Right: View Toggle Segment (Day | Week | Month) - OMITTING search, help, settings icons per instructions */}
+          {/* Right: View Toggle Segment (Day | Week | Month) */}
           <div className="flex items-center gap-3">
+            {/* Live refresh button */}
             <button
               type="button"
               onClick={handleSync}
               disabled={isSyncing}
               className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
-              title="Refresh calendar"
+              title="Refresh Google Calendar events in real time"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin text-slate-700" : ""}`} />
             </button>
@@ -838,15 +806,15 @@ export default function LqCalendarPage() {
         </header>
 
         {/* ========================================================= */}
-        {/* VIEW BODY: WEEK VIEW (Default as shown in screenshot) */}
+        {/* VIEW BODY: WEEK VIEW */}
         {/* ========================================================= */}
         {viewMode === "week" && (
           <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-white">
             {/* Week Days Header Row: GMT+7 | SUN 9 | MON 10 | TUE 11 ... */}
             <div className="grid grid-cols-[68px_repeat(7,1fr)] border-b border-slate-200/90 shrink-0 bg-white">
-              {/* Timezone corner label */}
+              {/* Timezone label */}
               <div className="border-r border-slate-100 flex items-center justify-center p-2 text-[11px] font-semibold text-slate-400">
-                {user?.timezone ? "GMT+7" : "GMT+7"}
+                GMT+7
               </div>
 
               {/* 7 Days Columns */}
@@ -882,7 +850,7 @@ export default function LqCalendarPage() {
             {/* Scrollable Hours Grid */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden relative bg-white">
               <div className="relative min-w-full">
-                {/* Red Current Time Line across grid (matching screenshot with pill & dashed line) */}
+                {/* Red Current Time Line across grid */}
                 {isCurrentWeek && nowLineTop !== null && (
                   <div
                     className="absolute left-0 right-0 z-30 pointer-events-none flex items-center"
@@ -938,7 +906,7 @@ export default function LqCalendarPage() {
 
                     return (
                       <div key={dIdx} className="relative h-full border-r border-transparent">
-                        {/* Render existing events */}
+                        {/* Render real Google Calendar events */}
                         {dayEvents.map((evt) => {
                           const { top, height } = getEventGeometry(evt);
                           const color = getColorConfig(evt.colorId);
@@ -957,14 +925,19 @@ export default function LqCalendarPage() {
                                 color: color.text,
                                 borderColor: color.border,
                               }}
-                              className="absolute left-1 right-1 rounded-2xl p-2.5 border shadow-xs transition-all pointer-events-auto cursor-pointer hover:shadow-md hover:scale-[1.01] overflow-hidden flex flex-col justify-start z-10"
+                              className="absolute left-1 right-1 rounded-2xl px-2.5 py-1 border shadow-xs transition-all pointer-events-auto cursor-pointer hover:shadow-md hover:scale-[1.01] overflow-hidden flex flex-col justify-center z-10"
                             >
-                              <div className="font-bold text-xs leading-tight truncate">
-                                {evt.summary}
+                              <div className="flex items-center justify-between gap-1 min-w-0">
+                                <span className="font-bold text-xs leading-tight truncate">
+                                  {evt.summary || "(No Title)"}
+                                </span>
+                                {evt.meet_url && (
+                                  <Video className="w-3 h-3 shrink-0 opacity-80" />
+                                )}
                               </div>
                               <div
                                 style={{ color: color.timeText }}
-                                className="text-[10px] font-medium leading-tight mt-0.5"
+                                className="text-[10px] font-medium leading-tight mt-0.5 truncate"
                               >
                                 {formatEventTimeRange(evt.start, evt.end)}
                               </div>
@@ -972,18 +945,18 @@ export default function LqCalendarPage() {
                           );
                         })}
 
-                        {/* Render Active Draft Slot (like Wednesday 9:30 - 10:00 '(no title)' in screenshot) */}
+                        {/* Render Active Draft Slot */}
                         {isDraftDay && draftSlot && (
                           <div
                             style={{
                               ...getEventGeometry(draftSlot),
                             }}
-                            className="absolute left-1 right-1 rounded-2xl p-2.5 border-2 border-sky-400 bg-sky-50/80 text-sky-900 shadow-sm pointer-events-auto flex flex-col justify-start z-20 transition"
+                            className="absolute left-1 right-1 rounded-2xl px-2.5 py-1 border-2 border-sky-400 bg-sky-50/80 text-sky-900 shadow-sm pointer-events-auto flex flex-col justify-center z-20 transition"
                           >
                             <div className="font-bold text-xs leading-tight truncate">
                               {scheduleForm.title || "(no title)"}
                             </div>
-                            <div className="text-[10px] font-medium text-sky-700/90 leading-tight mt-0.5">
+                            <div className="text-[10px] font-medium text-sky-700/90 leading-tight mt-0.5 truncate">
                               {formatEventTimeRange(draftSlot.start, draftSlot.end)}
                             </div>
                           </div>
@@ -1056,7 +1029,12 @@ export default function LqCalendarPage() {
                           }}
                           className="absolute left-2 right-4 rounded-2xl p-3 border shadow-xs transition-all pointer-events-auto cursor-pointer hover:shadow-md flex flex-col justify-start z-10"
                         >
-                          <div className="font-bold text-sm leading-tight">{evt.summary}</div>
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-sm leading-tight truncate">
+                              {evt.summary || "(No Title)"}
+                            </span>
+                            {evt.meet_url && <Video className="w-3.5 h-3.5 shrink-0 opacity-80" />}
+                          </div>
                           <div style={{ color: color.timeText }} className="text-xs font-medium mt-1">
                             {formatEventTimeRange(evt.start, evt.end)}
                           </div>
@@ -1137,7 +1115,7 @@ export default function LqCalendarPage() {
                             style={{ backgroundColor: color.bg, color: color.text }}
                             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md truncate shadow-2xs cursor-pointer"
                           >
-                            {evt.summary}
+                            {evt.summary || "(No Title)"}
                           </div>
                         );
                       })}
@@ -1155,7 +1133,7 @@ export default function LqCalendarPage() {
         )}
 
         {/* ========================================================= */}
-        {/* "ADD SCHEDULE" FLOATING MODAL (Exact match to screenshot) */}
+        {/* "ADD SCHEDULE" FLOATING MODAL */}
         {/* ========================================================= */}
         {isAddScheduleOpen && (
           <div className="fixed sm:absolute bottom-6 right-6 z-50 w-[350px] bg-white rounded-3xl shadow-2xl border border-slate-200/90 p-5 space-y-3.5 animate-in fade-in slide-in-from-bottom-3 duration-200">
@@ -1289,7 +1267,7 @@ export default function LqCalendarPage() {
         )}
 
         {/* ========================================================= */}
-        {/* EVENT DETAILS MODAL (When clicking an existing event card) */}
+        {/* EVENT DETAILS MODAL */}
         {/* ========================================================= */}
         {selectedEvent && (
           <div
@@ -1308,7 +1286,9 @@ export default function LqCalendarPage() {
                 className="p-5 flex items-start justify-between border-b border-slate-100"
               >
                 <div>
-                  <h3 className="text-base font-bold tracking-tight">{selectedEvent.summary}</h3>
+                  <h3 className="text-base font-bold tracking-tight">
+                    {selectedEvent.summary || "(No Title)"}
+                  </h3>
                   <p className="text-xs font-semibold opacity-80 mt-0.5">
                     {formatEventTimeRange(selectedEvent.start, selectedEvent.end)}
                   </p>
@@ -1375,7 +1355,7 @@ export default function LqCalendarPage() {
                 {selectedEvent.attendees?.length > 0 && (
                   <div>
                     <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                      Guests
+                      Guests ({selectedEvent.attendees.length})
                     </label>
                     <div className="space-y-1">
                       {selectedEvent.attendees.map((att, i) => (
@@ -1385,6 +1365,21 @@ export default function LqCalendarPage() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Open in Google Calendar external link */}
+                {selectedEvent.html_link && (
+                  <div>
+                    <a
+                      href={selectedEvent.html_link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-sky-600 hover:text-sky-800 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>View in Google Calendar</span>
+                    </a>
                   </div>
                 )}
               </div>

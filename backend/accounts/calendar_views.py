@@ -134,7 +134,14 @@ class CalendarEventsView(_CalendarBase):
                 "email": creds.email,
                 "events": [],
                 "error": str(exc),
-            }, status=status.HTTP_502_BAD_GATEWAY)
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            return Response({
+                "is_connected": True,
+                "email": creds.email,
+                "events": [],
+                "error": str(exc),
+            }, status=status.HTTP_200_OK)
 
     def post(self, request):
         """Create a calendar event (with optional Google Meet conference)."""
