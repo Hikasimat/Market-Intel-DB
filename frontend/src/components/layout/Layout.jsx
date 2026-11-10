@@ -178,51 +178,51 @@ const Layout = () => {
       */}
       <aside 
         className={`m-3 h-[calc(100vh-24px)] bg-white border border-slate-200/80 rounded-3xl shadow-[0_4px_24px_rgba(0,0,0,0.03)] flex flex-col shrink-0 transition-all duration-300 ease-in-out sticky top-3 z-40 select-none ${
-          isSidebarCollapsed ? 'w-[76px] items-center py-4 px-2' : 'w-72 lg:w-[295px] p-4'
+          isSidebarCollapsed ? 'w-[72px] items-center py-4 px-2' : 'w-64 p-3.5'
         }`}
       >
         {/* ─── EXPANDED SIDEBAR VIEW ─── */}
         {!isSidebarCollapsed ? (
           <div className="flex flex-col h-full w-full">
             {/* Header: 3D Cube Logo + Brand Title + Collapse Button */}
-            <div className="flex items-center justify-between px-2 pt-1 pb-3.5 shrink-0">
-              <Link to="/dashboard" className="flex items-center gap-3 group cursor-pointer">
-                <CubeLogo className="w-7 h-7 transition-transform group-hover:scale-105 shrink-0" />
-                <span className="font-extrabold text-slate-900 text-xl tracking-tight">MarketIntel DB</span>
+            <div className="flex items-center justify-between px-2 pt-1 pb-3 shrink-0">
+              <Link to="/dashboard" className="flex items-center gap-2.5 group cursor-pointer">
+                <CubeLogo className="w-6 h-6 transition-transform group-hover:scale-105" />
+                <span className="font-bold text-slate-900 text-lg tracking-tight">MarketIntel DB</span>
               </Link>
               <button
                 type="button"
                 onClick={toggleSidebar}
-                className="p-2 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                 title="Collapse sidebar"
               >
-                <PanelLeftClose className="w-4.5 h-4.5" />
+                <PanelLeftClose className="w-4 h-4" />
               </button>
             </div>
 
             {/* Search Bar matching Image 1 with Mic icon */}
-            <div className="px-1 mb-2.5 shrink-0">
-              <div className="relative flex items-center bg-[#f4f5f6] hover:bg-[#eceef0] focus-within:bg-white focus-within:ring-2 focus-within:ring-slate-200 border border-transparent focus-within:border-slate-300 rounded-xl px-3.5 py-2.5 transition-all">
-                <Search className="w-4.5 h-4.5 text-slate-400 mr-2.5 shrink-0 pointer-events-none" />
+            <div className="px-1 mb-2 shrink-0">
+              <div className="relative flex items-center bg-[#f4f5f6] hover:bg-[#eceef0] focus-within:bg-white focus-within:ring-2 focus-within:ring-slate-200 border border-transparent focus-within:border-slate-300 rounded-xl px-3 py-2 transition-all">
+                <Search className="w-4 h-4 text-slate-400 mr-2 shrink-0 pointer-events-none" />
                 <input
                   type="text"
                   placeholder="Search"
                   value={sidebarSearch}
                   onChange={(e) => setSidebarSearch(e.target.value)}
-                  className="bg-transparent text-sm text-slate-800 placeholder-slate-400 outline-none w-full font-medium"
+                  className="bg-transparent text-xs text-slate-800 placeholder-slate-400 outline-none w-full font-medium"
                 />
                 {sidebarSearch ? (
                   <button type="button" onClick={() => setSidebarSearch('')} className="p-0.5 text-slate-400 hover:text-slate-600">
-                    <X className="w-4 h-4" />
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 ) : (
-                  <Mic className="w-4.5 h-4.5 text-slate-400 ml-1 shrink-0 hover:text-slate-700 cursor-pointer transition-colors" />
+                  <Mic className="w-4 h-4 text-slate-400 ml-1 shrink-0 hover:text-slate-700 cursor-pointer transition-colors" />
                 )}
               </div>
             </div>
 
             {/* Navigation List */}
-            <nav className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+            <nav className="flex-1 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
               {filteredNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = location.pathname.startsWith(item.path);
@@ -231,18 +231,18 @@ const Layout = () => {
                   <div key={item.path} className="space-y-0.5">
                     <Link
                       to={item.path}
-                      className={`flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13.5px] transition-all ${
+                      className={`flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all ${
                         isActive
-                          ? 'bg-white text-slate-900 font-bold border border-slate-200/90 shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-semibold'
+                          ? 'bg-white text-slate-900 font-semibold border border-slate-200/90 shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium'
                       }`}
                     >
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        <Icon className={`w-[18px] h-[18px] shrink-0 ${isActive ? 'text-slate-900' : 'text-slate-500'}`} />
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-slate-900' : 'text-slate-500'}`} />
                         <span className="truncate">{item.label}</span>
                       </div>
                       {item.badge && (
-                        <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-rose-500 text-white shrink-0 shadow-xs">
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500 text-white shrink-0 shadow-xs">
                           {item.badge > 999 ? '999+' : item.badge}
                         </span>
                       )}
@@ -250,7 +250,7 @@ const Layout = () => {
 
                     {/* Sub-items if expanded */}
                     {item.subItems && isActive && (
-                      <div className="pl-8 pr-2 py-1 space-y-1">
+                      <div className="pl-7 pr-2 py-1 space-y-1">
                         {item.subItems.map((sub) => {
                           const isSubActive = sub.exact
                             ? location.pathname === sub.path
@@ -259,10 +259,10 @@ const Layout = () => {
                             <Link
                               key={sub.path}
                               to={sub.path}
-                              className={`block px-3 py-1.5 text-xs rounded-lg transition-all ${
+                              className={`block px-2.5 py-1.5 text-[11px] rounded-lg transition-all ${
                                 isSubActive
-                                  ? 'bg-slate-100 text-slate-900 font-bold'
-                                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50 font-medium'
+                                  ? 'bg-slate-100 text-slate-900 font-semibold'
+                                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50 font-normal'
                               }`}
                             >
                               {sub.label}
@@ -277,11 +277,11 @@ const Layout = () => {
 
               {/* Collapsible Apps Section matching Image 1 */}
               {!sidebarSearch && (
-                <div className="pt-2">
+                <div className="pt-1">
                   <button
                     type="button"
                     onClick={() => setIsAppsSectionOpen((prev) => !prev)}
-                    className="flex items-center justify-between w-full px-2.5 py-2 text-xs text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-50 cursor-pointer font-bold uppercase tracking-wider transition"
+                    className="flex items-center justify-between w-full px-2 py-1.5 text-xs text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-50 cursor-pointer font-medium transition"
                   >
                     <div className="flex items-center gap-1.5">
                       {isAppsSectionOpen ? (
@@ -289,16 +289,16 @@ const Layout = () => {
                       ) : (
                         <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
                       )}
-                      <span className="text-slate-600 font-bold">Apps</span>
+                      <span className="font-semibold text-slate-600">Apps</span>
                     </div>
-                    <div className="flex items-center gap-1.5 text-slate-400" onClick={(e) => e.stopPropagation()}>
-                      <Plus className="w-4 h-4 hover:text-slate-700 cursor-pointer" />
-                      <MoreVertical className="w-4 h-4 hover:text-slate-700 cursor-pointer" />
+                    <div className="flex items-center gap-1 text-slate-400" onClick={(e) => e.stopPropagation()}>
+                      <Plus className="w-3.5 h-3.5 hover:text-slate-700 cursor-pointer" />
+                      <MoreVertical className="w-3.5 h-3.5 hover:text-slate-700 cursor-pointer" />
                     </div>
                   </button>
 
                   {isAppsSectionOpen && (
-                    <div className="pl-5 pr-1 py-1 space-y-1">
+                    <div className="pl-4 pr-1 py-1 space-y-0.5">
                       {appItems.map((aItem) => {
                         const AppIcon = aItem.icon;
                         const isAppActive = location.pathname.startsWith(aItem.path);
@@ -306,13 +306,13 @@ const Layout = () => {
                           <Link
                             key={aItem.label}
                             to={aItem.path}
-                            className={`flex items-center gap-3 px-3 py-2 text-[13px] rounded-xl transition font-medium ${
+                            className={`flex items-center gap-2.5 px-2.5 py-1.5 text-xs rounded-lg transition font-medium ${
                               isAppActive
-                                ? 'bg-slate-100 text-slate-900 font-bold'
+                                ? 'bg-slate-100 text-slate-900 font-semibold'
                                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
                             }`}
                           >
-                            <AppIcon className="w-4 h-4 text-slate-400 shrink-0" />
+                            <AppIcon className="w-3.5 h-3.5 text-slate-400" />
                             <span>{aItem.label}</span>
                           </Link>
                         );
@@ -326,16 +326,16 @@ const Layout = () => {
             {/* User Profile Card at Bottom */}
             {user && (
               <div className="pt-3 border-t border-slate-100 shrink-0 mt-auto">
-                <div className="flex items-center justify-between p-2.5 bg-[#f8f9fa] rounded-2xl border border-slate-200/70">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9.5 h-9.5 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-xs">
+                <div className="flex items-center justify-between p-2 bg-[#f8f9fa] rounded-2xl border border-slate-200/60">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0">
                       {user.first_name?.[0] || user.username?.[0] || 'U'}
                     </div>
                     <div className="min-w-0 flex flex-col">
-                      <div className="text-sm font-bold text-slate-900 truncate">
+                      <div className="text-xs font-bold text-slate-900 truncate">
                         {user.first_name ? `${user.first_name} ${user.last_name || ''}` : user.username}
                       </div>
-                      <div className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider truncate">
+                      <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider truncate">
                         {user.role}
                       </div>
                     </div>
@@ -348,18 +348,18 @@ const Layout = () => {
                     <button
                       type="button"
                       onClick={() => setIsSettingsOpen(true)}
-                      className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-xl transition cursor-pointer"
+                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-lg transition cursor-pointer"
                       title="User Settings"
                     >
-                      <Settings className="w-4 h-4" />
+                      <Settings className="w-3.5 h-3.5" />
                     </button>
                     <button
                       type="button"
                       onClick={handleLogout}
-                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition cursor-pointer"
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
                       title="Logout"
                     >
-                      <LogOut className="w-4 h-4" />
+                      <LogOut className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -482,8 +482,11 @@ const Layout = () => {
       </aside>
 
       {/* Main Application Area */}
-      <main className="flex-1 min-w-0 h-screen overflow-y-auto bg-[#f4f5f7] transition-all duration-300">
-        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) || location.pathname.startsWith('/inbox') ? 'h-full w-full' : 'w-full max-w-[1600px] mx-auto px-6 sm:px-8 lg:px-10 py-7 h-full'}>
+      <main 
+        className="flex-1 min-w-0 h-screen overflow-y-auto bg-[#f4f5f7] transition-all duration-300"
+        style={{ zoom: 0.9 }}
+      >
+        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) || location.pathname.startsWith('/inbox') ? 'h-full w-full' : 'w-full px-4 sm:px-6 md:px-8 py-4 h-full'}>
           <Outlet context={{ isSidebarCollapsed, setIsSidebarCollapsed, toggleSidebar }} />
         </div>
       </main>

@@ -169,45 +169,45 @@ const PreTasksPage = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-2xl shadow-xs border border-slate-200/80">
         {!isManager ? (
-          <div className="flex bg-slate-100 p-1 rounded-lg">
+          <div className="flex bg-slate-100 p-0.5 rounded-xl">
             <button
               onClick={() => setActiveTab('PENDING')}
-              className={`px-4 py-2 rounded-md text-sm font-bold transition ${activeTab === 'PENDING' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'PENDING' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
             >
               Pending Tasks
             </button>
             <button
               onClick={() => setActiveTab('COMPLETED')}
-              className={`px-4 py-2 rounded-md text-sm font-bold transition ${activeTab === 'COMPLETED' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'COMPLETED' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
             >
               Completed Tasks
             </button>
           </div>
         ) : (
-          <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">Pending PRE Tasks</h2>
+          <h2 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Pending PRE Tasks</h2>
         )}
         
         {activeTab === 'COMPLETED' && (
-          <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">From:</label>
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">From:</label>
               <input
                 type="date"
-                className="bg-slate-50 border border-slate-200 text-slate-900 text-sm rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 p-2 font-medium"
+                className="bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl p-1.5 font-medium"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
                 max={new Date().toISOString().split('T')[0]}
               />
             </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">To:</label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">To:</label>
               <input
                 type="date"
-                className="bg-slate-50 border border-slate-200 text-slate-900 text-sm rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 p-2 font-medium"
+                className="bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl p-1.5 font-medium"
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
                 max={new Date().toISOString().split('T')[0]}
@@ -218,7 +218,7 @@ const PreTasksPage = () => {
 
         {isManager && availableUsers.length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Assigned PRE:</label>
+            <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Assigned PRE:</label>
             <div className="w-48"><SearchableSelect
               value={managerUserFilter}
               onChange={(val) => setManagerUserFilter(val)}
@@ -228,15 +228,15 @@ const PreTasksPage = () => {
         )}
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
-              <tr className="bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
-                <th className="p-4">Reported Prospect</th>
-                <th className="p-4">Issue Details</th>
-                {isManager && <th className="p-4">Assignment Info</th>}
-                <th className="p-4 text-right">Actions</th>
+              <tr className="bg-slate-50/80 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-100">
+                <th className="px-4 py-2.5">Reported Prospect</th>
+                <th className="px-4 py-2.5">Issue Details</th>
+                {isManager && <th className="px-4 py-2.5">Assignment Info</th>}
+                <th className="px-4 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">

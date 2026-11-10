@@ -59,36 +59,36 @@ const GovernmentEntitiesPage = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="sm:flex sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-            <Building2 className="h-6 w-6 text-indigo-600" />
+          <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Building2 className="w-5 h-5 text-indigo-600" />
             Government Entities
           </h1>
-          <p className="mt-2 text-sm text-slate-600">
+          <p className="mt-0.5 text-xs text-slate-500 font-medium">
             Manage your public sector entities and hierarchy.
           </p>
         </div>
-        <div className="mt-4 sm:mt-0 flex gap-3">
+        <div className="mt-3 sm:mt-0 flex gap-2">
           <button
             onClick={handleAddClick}
-            className="inline-flex items-center px-4 py-2 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+            className="inline-flex items-center px-3.5 py-1.5 border border-transparent rounded-xl shadow-xs text-xs font-bold text-white bg-slate-900 hover:bg-black transition-colors"
           >
-            <Plus className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+            <Plus className="-ml-0.5 mr-1.5 w-3.5 h-3.5" aria-hidden="true" />
             Add Entity
           </button>
         </div>
       </div>
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+      <div className="bg-white p-2.5 rounded-2xl shadow-xs border border-slate-200/80">
         <div className="relative max-w-md">
-          <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
-            <Search className="h-5 w-5 text-slate-400" />
+          <div className="pointer-events-none absolute inset-y-0 left-0 pl-2.5 flex items-center">
+            <Search className="h-3.5 w-3.5 text-slate-400" />
           </div>
           <input
             type="text"
-            className="block w-full rounded-xl border-slate-200 pl-10 focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm py-2.5 outline-none border"
+            className="block w-full rounded-xl border border-slate-200 pl-8 pr-3 py-1.5 text-xs bg-slate-50/70 focus:bg-white focus:border-indigo-500 outline-none transition"
             placeholder="Search by name or country..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
@@ -96,44 +96,44 @@ const GovernmentEntitiesPage = () => {
         </div>
       </div>
 
-      <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl overflow-hidden">
+      <div className="bg-white shadow-xs border border-slate-200/80 rounded-2xl overflow-hidden">
         {loading ? (
-          <div className="p-10 text-center text-slate-500">Loading...</div>
+          <div className="p-8 text-center text-slate-500 text-xs">Loading...</div>
         ) : entities.length === 0 ? (
-          <div className="p-10 text-center text-slate-500">No entities found.</div>
+          <div className="p-8 text-center text-slate-500 text-xs">No entities found.</div>
         ) : (
-          <table className="min-w-full divide-y divide-slate-200">
-            <thead className="bg-slate-50">
+          <table className="min-w-full divide-y divide-slate-100">
+            <thead className="bg-slate-50/80">
               <tr>
-                <th className="py-3.5 pl-4 pr-3 text-left text-xs font-semibold text-slate-900 sm:pl-6">Name</th>
-                <th className="px-3 py-3.5 text-left text-xs font-semibold text-slate-900">Country</th>
-                <th className="px-3 py-3.5 text-left text-xs font-semibold text-slate-900">Level</th>
-                <th className="px-3 py-3.5 text-left text-xs font-semibold text-slate-900">Parent Govt</th>
-                <th className="relative py-3.5 pl-3 pr-4 sm:pr-6"><span className="sr-only">Actions</span></th>
+                <th className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Name</th>
+                <th className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Country</th>
+                <th className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Level</th>
+                <th className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Parent Govt</th>
+                <th className="relative px-4 py-2.5 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-200 bg-white">
+            <tbody className="divide-y divide-slate-100 bg-white">
               {entities.map((entity) => (
-                <tr key={entity.id} className="hover:bg-slate-50">
-                  <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-slate-900 sm:pl-6">
+                <tr key={entity.id} className="hover:bg-slate-50/70">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-xs font-semibold text-slate-900">
                     {entity.name}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-4 text-sm text-slate-500">{entity.country}</td>
-                  <td className="whitespace-nowrap px-3 py-4 text-sm text-slate-500">
-                    <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${entity.is_state_government ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800'}`}>
+                  <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-600">{entity.country}</td>
+                  <td className="whitespace-nowrap px-4 py-2.5 text-xs">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold leading-4 border ${entity.is_state_government ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
                       {entity.is_state_government ? `State${entity.state_name ? ` (${entity.state_name})` : ''}` : 'Central'}
                     </span>
                   </td>
-                  <td className="whitespace-nowrap px-3 py-4 text-sm text-slate-500">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-600">
                     {entity.central_government_detail?.name || '-'}
                   </td>
-                  <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-right text-xs">
                     <button
                       onClick={() => handleEditClick(entity)}
-                      className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 p-2 rounded-lg"
+                      className="text-slate-400 hover:text-indigo-600 p-1 rounded-lg hover:bg-slate-100 transition"
                       title="Edit"
                     >
-                      <Edit2 className="h-4 w-4" />
+                      <Edit2 className="h-3.5 w-3.5" />
                     </button>
                   </td>
                 </tr>

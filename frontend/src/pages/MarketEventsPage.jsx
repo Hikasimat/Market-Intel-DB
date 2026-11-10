@@ -84,15 +84,15 @@ const MarketEventsPage = () => {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-4">
       {/* Header section */}
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-            <Calendar className="w-6 h-6 text-indigo-600" />
+          <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-indigo-600" />
             Market Events
           </h1>
-          <p className="mt-1.5 text-sm text-slate-500 max-w-xl">
+          <p className="mt-0.5 text-xs text-slate-500 max-w-xl">
             Track industry events and the prospects participating in each event.
           </p>
         </div>
@@ -100,23 +100,23 @@ const MarketEventsPage = () => {
         {canMutate && (
           <button
             onClick={handleAdd}
-            className="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg font-semibold text-sm shadow-sm hover:bg-indigo-700 active:bg-indigo-800 transition-colors shadow-indigo-600/20"
+            className="inline-flex items-center gap-1.5 bg-slate-900 text-white px-3.5 py-1.5 rounded-xl font-bold text-xs shadow-xs hover:bg-black transition-colors"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-3.5 h-3.5" />
             Add Market Event
           </button>
         )}
       </div>
 
       {/* Filters/Search */}
-      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+      <div className="bg-white p-2.5 rounded-2xl shadow-xs border border-slate-200/80">
         <div className="relative max-w-md">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search className="h-4 w-4 text-slate-400" />
+          <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+            <Search className="h-3.5 w-3.5 text-slate-400" />
           </div>
           <input
             type="text"
-            className="block w-full pl-10 pr-3 py-2 border border-slate-200 rounded-xl text-sm bg-slate-50 focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 transition-colors placeholder:text-slate-400"
+            className="block w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-slate-50/70 focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-colors placeholder:text-slate-400"
             placeholder="Search by event title or country..."
             value={search}
             onChange={handleSearch}
@@ -125,16 +125,16 @@ const MarketEventsPage = () => {
       </div>
 
       {/* Main Content */}
-      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+      <div className="bg-white border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider text-xs font-semibold">
+          <table className="w-full text-left text-xs whitespace-nowrap">
+            <thead className="bg-slate-50/80 border-b border-slate-100 text-slate-500 uppercase tracking-wider text-[11px] font-bold">
               <tr>
-                <th className="px-6 py-4">Event Title</th>
-                <th className="px-6 py-4">Host Country</th>
-                <th className="px-6 py-4">Event Date</th>
-                <th className="px-6 py-4">Participating Companies</th>
-                <th className="px-6 py-4 text-right">Actions</th>
+                <th className="px-4 py-2.5">Event Title</th>
+                <th className="px-4 py-2.5">Host Country</th>
+                <th className="px-4 py-2.5">Event Date</th>
+                <th className="px-4 py-2.5">Participating Companies</th>
+                <th className="px-4 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 bg-white">
@@ -169,26 +169,26 @@ const MarketEventsPage = () => {
                     className="hover:bg-slate-50 transition-colors cursor-pointer group"
                     onClick={() => navigate(`/market-events/${event.id}`)}
                   >
-                    <td className="px-6 py-4">
-                      <div className="font-medium text-slate-900 truncate max-w-md">
+                    <td className="px-4 py-2.5">
+                      <div className="font-semibold text-xs text-slate-900 truncate max-w-md">
                         {event.event_title}
                       </div>
                     </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2 text-slate-600">
-                        <MapPin className="w-4 h-4 text-slate-400" />
+                    <td className="px-4 py-2.5 text-xs">
+                      <div className="flex items-center gap-1.5 text-slate-600">
+                        <MapPin className="w-3.5 h-3.5 text-slate-400" />
                         {event.host_country}
                       </div>
                     </td>
-                    <td className="px-6 py-4 text-slate-600">
+                    <td className="px-4 py-2.5 text-xs text-slate-600">
                       {formatDate(event.event_date)}
                     </td>
-                    <td className="px-6 py-4">
-                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">
+                    <td className="px-4 py-2.5 text-xs">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
                         {event.participating_companies_count} Companies
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-4 py-2.5 text-right text-xs">
                       <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         {/* View — available to all */}
                         <button
