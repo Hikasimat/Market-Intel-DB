@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   X, Send, Users, CheckCircle2, AlertCircle, Clock, Pause, Play, Ban, 
   Paperclip, Search, Plus, Trash2, RefreshCw, Eye, Sparkles, Building2, 
   User, CheckSquare, Square, ChevronRight, FileText, Info, ShieldCheck,
-  AlertTriangle
+  AlertTriangle, Reply, BarChart2, ExternalLink, Activity, Check
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
@@ -17,7 +18,8 @@ const STEPS = [
   { id: 'monitor', label: 'Campaign Monitor' }
 ];
 
-export default function BulkCampaignModal({ isOpen, onClose }) {
+export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEmail, onOpenTrackingModal }) {
+  const navigate = useNavigate();
   const [currentTab, setCurrentTab] = useState('compose');
 
   // Form State
@@ -1006,36 +1008,167 @@ export default function BulkCampaignModal({ isOpen, onClose }) {
                     <div className="flex-1 overflow-hidden flex flex-col border border-slate-200 rounded-xl">
                       <div className="px-3 py-2 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between text-xs font-medium text-slate-600 shrink-0">
                         <span>Recipients ({activeCampaignDetail.recipients?.length || 0})</span>
-                        <span className="text-[11px] text-slate-500">90s interval</span>
+                        <span className="text-[11px] text-slate-500">90s interval • Click any recipient to open in Inbox</span>
                       </div>
                       <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
                         {activeCampaignDetail.recipients?.map((r, i) => (
-                          <div key={r.id} className="p-2.5 flex items-center justify-between text-xs hover:bg-slate-50 transition">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span className="w-5 text-[11px] font-mono text-slate-400 shrink-0">#{i + 1}</span>
-                              <div className="min-w-0">
-                                <p className="font-medium text-slate-900 truncate">
-                                  {r.recipient_name || r.prospect_company_name || r.email_address}
-                                </p>
-                                <p className="text-[11px] text-slate-500 truncate">{r.email_address}</p>
+                          <div 
+                            key={r.id} 
+                            onClick={() => {
+                              if (onClose) onClose();
+                              if (onSelectRecipientEmail) {
+                                onSelectRecipientEmail(r);
+                              } else {
+                                const threadId = r.reply?.thread_id || r.tracking?.thread_id || '';
+                                const email = r.email_address || '';
+                                navigate(`/inbox?search=${encodeURIComponent(email)}&thread_id=${encodeURIComponent(threadId)}`);
+                              }
+                            }}
+                            className="p-3 bg-white hover:bg-slate-50/90 border-b border-slate-100 transition-all cursor-pointer group"
+                            title="Click to view conversation in Inbox"
+                          >
+                            {/* Top line: # Index, Name/Company, Email, Delivery Status */}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span className="w-5 text-[11px] font-mono text-slate-400 shrink-0">#{i + 1}</span>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-semibold text-slate-900 text-xs truncate group-hover:text-blue-600 transition">
+                                      {r.recipient_name || r.prospect_company_name || r.email_address}
+                                    </p>
+                                    {r.prospect_company_name && r.recipient_name && (
+                                      <span className="text-[10px] text-slate-400 truncate">({r.prospect_company_name})</span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-slate-500 truncate">{r.email_address}</p>
+                                </div>
+                              </div>
+
+                              {/* Delivery Status Badge */}
+                              <div className="flex items-center gap-2 shrink-0">
+                                {r.error_message && (
+                                  <span className="text-[10px] text-rose-600 max-w-[150px] truncate" title={r.error_message}>
+                                    {r.error_message}
+                                  </span>
+                                )}
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1 ${
+                                  r.status === 'SENT' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' :
+                                  r.status === 'SENDING' ? 'bg-blue-50 text-blue-700 border-blue-300 animate-pulse' :
+                                  r.status === 'RETRY_PENDING' ? 'bg-amber-50 text-amber-700 border-amber-300' :
+                                  r.status === 'FAILED' ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                  'bg-slate-100 text-slate-600 border-slate-200'
+                                }`}>
+                                  {r.status === 'SENT' && <Check className="w-2.5 h-2.5" />}
+                                  {r.status === 'SENT' ? (
+                                    r.sent_at 
+                                      ? `Sent • ${new Date(r.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` 
+                                      : 'Sent'
+                                  ) : r.status === 'SENDING' ? 'Sending...' : r.status === 'PENDING' ? 'In queue' : r.status}
+                                </span>
                               </div>
                             </div>
 
-                            <div className="flex items-center gap-2 shrink-0 ml-2">
-                              {r.error_message && (
-                                <span className="text-[10px] text-rose-600 max-w-[150px] truncate" title={r.error_message}>
-                                  {r.error_message}
-                                </span>
+                            {/* Tracking & Open Status + Reply Section */}
+                            <div className="mt-2 pl-7 flex flex-col gap-1.5">
+                              {/* Tracking details row */}
+                              <div className="flex flex-wrap items-center gap-2">
+                                {r.tracking ? (
+                                  <>
+                                    {r.tracking.is_opened ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                        <Eye className="w-3 h-3 text-emerald-600" />
+                                        <span>Opened ({r.tracking.open_count}x)</span>
+                                        <span className="text-emerald-400">•</span>
+                                        <span>{r.tracking.estimated_read_time_formatted || '0s'}</span>
+                                        <span className="text-emerald-400">•</span>
+                                        <span className="font-semibold">{r.tracking.reading_engagement}</span>
+                                      </span>
+                                    ) : r.status === 'SENT' ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-slate-50 text-slate-600 border border-slate-200">
+                                        <Clock className="w-3 h-3 text-slate-400" />
+                                        <span>Awaiting Open (Unopened)</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] text-slate-400">
+                                        <span>Tracking ready upon send</span>
+                                      </span>
+                                    )}
+
+                                    {/* Direct Track Details Button */}
+                                    {r.status === 'SENT' && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (r.tracking) {
+                                            if (onOpenTrackingModal) {
+                                              if (onClose) onClose();
+                                              onOpenTrackingModal(r.tracking);
+                                            } else {
+                                              if (onClose) onClose();
+                                              navigate(`/inbox?search=${encodeURIComponent(r.email_address)}&track_token=${encodeURIComponent(r.tracking.tracking_token || '')}`);
+                                            }
+                                          }
+                                        }}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-md bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition cursor-pointer"
+                                        title="Open detailed email engagement timeline"
+                                      >
+                                        <BarChart2 className="w-3 h-3" />
+                                        <span>Track Details</span>
+                                      </button>
+                                    )}
+                                  </>
+                                ) : r.status === 'SENT' ? (
+                                  <span className="text-[10px] text-slate-400">Tracking not enabled</span>
+                                ) : null}
+
+                                {/* Recipient Reply Status Badge / Indicator */}
+                                {r.reply?.has_reply ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200 shadow-2xs">
+                                    <Reply className="w-3 h-3 text-purple-600" />
+                                    <span>Replied</span>
+                                    {r.reply.replied_at && (
+                                      <span className="text-purple-500 font-normal">
+                                        • {new Date(r.reply.replied_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}{' '}
+                                        {new Date(r.reply.replied_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                      </span>
+                                    )}
+                                  </span>
+                                ) : r.status === 'SENT' ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] text-slate-400">
+                                    <Reply className="w-3 h-3 opacity-40" />
+                                    <span>No reply yet</span>
+                                  </span>
+                                ) : null}
+
+                                {/* Quick link to view in inbox */}
+                                <div className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 font-medium hover:underline">
+                                    <span>View conversation</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Recipient Reply Snippet Box if reply received */}
+                              {r.reply?.has_reply && (
+                                <div className="p-2 rounded-lg bg-purple-50/60 border border-purple-200/80 text-xs flex items-start justify-between gap-2 mt-0.5">
+                                  <div className="min-w-0">
+                                    <p className="font-semibold text-purple-950 text-[11px] truncate">
+                                      {r.reply.subject || 'Re: Campaign Subject'}
+                                    </p>
+                                    {r.reply.snippet && (
+                                      <p className="text-[11px] text-purple-800 line-clamp-1 italic mt-0.5">
+                                        "{r.reply.snippet}"
+                                      </p>
+                                    )}
+                                  </div>
+                                  <span className="shrink-0 text-[10px] text-purple-700 font-medium bg-purple-100 hover:bg-purple-200 px-2 py-1 rounded transition flex items-center gap-1">
+                                    <span>Open Reply</span>
+                                    <ExternalLink className="w-2.5 h-2.5" />
+                                  </span>
+                                </div>
                               )}
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-                                r.status === 'SENT' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' :
-                                r.status === 'SENDING' ? 'bg-blue-50 text-blue-700 border-blue-300 animate-pulse' :
-                                r.status === 'RETRY_PENDING' ? 'bg-amber-50 text-amber-700 border-amber-300' :
-                                r.status === 'FAILED' ? 'bg-rose-50 text-rose-700 border-rose-300' :
-                                'bg-slate-100 text-slate-600 border-slate-200'
-                              }`}>
-                                {r.status === 'SENT' ? 'Sent' : r.status === 'SENDING' ? 'Sending' : r.status === 'PENDING' ? 'In queue' : r.status}
-                              </span>
                             </div>
                           </div>
                         ))}

@@ -267,6 +267,12 @@ def logout_session(performed_by=None, session_name: str = "default") -> dict:
         session.phone_number = None
         session.stopped_at = timezone.now()
         session.save(update_fields=["status", "phone_number", "stopped_at"])
+
+        # Isolate session data: delete old conversations and messages on logout so future connections start clean
+        from .models import WhatsAppMessage, WhatsAppConversation
+        WhatsAppMessage.objects.filter(conversation__session=session).delete()
+        WhatsAppConversation.objects.filter(session=session).delete()
+
         return result
     except WAHAServiceError as exc:
         raise WhatsAppError(str(exc), "WA_LOGOUT_FAILED") from exc

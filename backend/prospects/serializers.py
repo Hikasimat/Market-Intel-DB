@@ -623,6 +623,89 @@ class EmailCampaignAttachmentSerializer(serializers.ModelSerializer):
 class EmailCampaignRecipientSerializer(serializers.ModelSerializer):
     prospect_company_name = serializers.CharField(source='prospect.company_name', read_only=True, allow_null=True)
     prospect_contact_name = serializers.CharField(source='prospect_contact.contact_name', read_only=True, allow_null=True)
+    tracking = serializers.SerializerMethodField()
+    reply = serializers.SerializerMethodField()
+
+    def get_tracking(self, obj):
+        oe = obj.outreach_email
+        if not oe:
+            return None
+        open_count = oe.open_count or 0
+        total_seconds = oe.total_seconds_spent or 0
+        is_opened = oe.is_opened or open_count > 0
+
+        if not oe.open_tracking_enabled:
+            engagement = 'Disabled'
+        elif is_opened:
+            if open_count >= 3 or total_seconds >= 60:
+                engagement = 'Deeply Engaged'
+            elif total_seconds >= 15 or open_count >= 2:
+                engagement = 'Read in Detail'
+            else:
+                engagement = 'Quick Skim'
+        else:
+            engagement = 'Unopened'
+
+        read_time_formatted = (
+            f"{total_seconds}s" if total_seconds < 60 else f"{total_seconds // 60}m {total_seconds % 60}s"
+        ) if (is_opened or total_seconds > 0) else "0s"
+
+        return {
+            'id': oe.id,
+            'tracking_token': str(oe.tracking_token),
+            'open_tracking_enabled': oe.open_tracking_enabled,
+            'is_opened': is_opened,
+            'open_count': open_count,
+            'first_opened_at': oe.first_opened_at.isoformat() if oe.first_opened_at else (oe.opened_at.isoformat() if oe.opened_at else None),
+            'last_opened_at': oe.last_opened_at.isoformat() if oe.last_opened_at else (oe.opened_at.isoformat() if oe.opened_at else None),
+            'total_seconds_spent': total_seconds,
+            'reading_engagement': engagement,
+            'estimated_read_time_formatted': read_time_formatted,
+            'open_history': oe.open_history or [],
+            'thread_id': oe.thread_id or oe.message_id,
+            'message_id': oe.message_id,
+            'subject': oe.subject,
+            'status': oe.status,
+            'recipient_email': obj.email_address,
+        }
+
+    def get_reply(self, obj):
+        from .models import CommunicationActivity
+        reply_act = None
+        if obj.outreach_email:
+            reply_act = CommunicationActivity.objects.filter(
+                outreach_email=obj.outreach_email,
+                activity_type='EMAIL_RECEIVED'
+            ).order_by('-created_at').first()
+        if not reply_act and obj.prospect:
+            qs = CommunicationActivity.objects.filter(
+                prospect=obj.prospect,
+                activity_type='EMAIL_RECEIVED'
+            )
+            if obj.prospect_contact:
+                qs = qs.filter(prospect_contact=obj.prospect_contact)
+            if obj.sent_at:
+                qs = qs.filter(created_at__gte=obj.sent_at)
+            reply_act = qs.order_by('-created_at').first()
+
+        has_reply = bool(reply_act) or (obj.outreach_email and obj.outreach_email.status == 'RECEIVED RESPONSE')
+        if has_reply:
+            return {
+                'has_reply': True,
+                'replied_at': reply_act.created_at.isoformat() if reply_act else (obj.outreach_email.updated_at.isoformat() if obj.outreach_email else None),
+                'subject': reply_act.subject if reply_act else (f"Re: {obj.campaign.subject}"),
+                'snippet': reply_act.notes if reply_act else '',
+                'thread_id': (obj.outreach_email.thread_id if obj.outreach_email else None) or (obj.outreach_email.message_id if obj.outreach_email else None),
+                'email_address': obj.email_address,
+            }
+        return {
+            'has_reply': False,
+            'replied_at': None,
+            'subject': None,
+            'snippet': None,
+            'thread_id': (obj.outreach_email.thread_id if obj.outreach_email else None) or (obj.outreach_email.message_id if obj.outreach_email else None),
+            'email_address': obj.email_address,
+        }
 
     class Meta:
         model = EmailCampaignRecipient
@@ -630,7 +713,7 @@ class EmailCampaignRecipientSerializer(serializers.ModelSerializer):
             'id', 'email_address', 'recipient_name', 'prospect', 'prospect_company_name',
             'prospect_contact', 'prospect_contact_name', 'queue_order', 'status',
             'attempt_count', 'scheduled_for', 'last_attempt_at', 'sent_at',
-            'error_message', 'outreach_email', 'created_at'
+            'error_message', 'outreach_email', 'tracking', 'reply', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 

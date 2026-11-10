@@ -832,6 +832,18 @@ def _handle_session_connected(event_data: dict, session_name: str, event_record:
     name = me.get("name") or ""
 
     session, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+
+    # Detect account switch on the same session
+    clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
+    clean_old_phone = re.sub(r"\D+", "", str(session.phone_number or ""))
+    if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
+        logger.warning(
+            "WhatsApp account change detected on session %s: %s -> %s. Purging old session data.",
+            session_name, clean_old_phone, clean_new_phone
+        )
+        WhatsAppMessage.objects.filter(conversation__session=session).delete()
+        WhatsAppConversation.objects.filter(session=session).delete()
+
     session.status = WhatsAppSession.Status.READY
     if phone:
         session.phone_number = phone
@@ -862,6 +874,9 @@ def _handle_session_disconnected(event_data: dict, session_name: str, event_reco
         clear_cached_qr(session_name)
         new_status = WhatsAppSession.Status.DISCONNECTED
         session.phone_number = None
+        # Purge data for logged out account to prevent bleeding into next scan
+        WhatsAppMessage.objects.filter(conversation__session=session).delete()
+        WhatsAppConversation.objects.filter(session=session).delete()
     else:
         new_status = WhatsAppSession.Status.DISCONNECTED
 
@@ -1181,6 +1196,7 @@ def _handle_call_event(
         )
         conversation = WhatsAppConversation.objects.create(
             session=session_obj,
+            account_phone=session_obj.phone_number if session_obj else None,
             chat_id=canonical_chat_id,
             phone_number=phone_formatted if not is_grp else None,
             prospect_contact=matched_contact if not is_grp else None,
@@ -1808,6 +1824,7 @@ def _handle_incoming_message(
                     prospect_contact=matched_contact,
                     prospect=matched_contact.prospect if matched_contact else None,
                     session=session_obj,
+                    account_phone=session_obj.phone_number if session_obj else None,
                     is_matched=matched_status,
                     whatsapp_name=final_name,
                 )
@@ -2098,6 +2115,15 @@ def _handle_session_status(
                 session.status = mapped_status
 
         if phone:
+            clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
+            clean_old_phone = re.sub(r"\D+", "", str(session.phone_number or ""))
+            if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
+                logger.warning(
+                    "WhatsApp account switch detected in session.status %s: %s -> %s. Purging old session data.",
+                    session_name, clean_old_phone, clean_new_phone
+                )
+                WhatsAppMessage.objects.filter(conversation__session=session).delete()
+                WhatsAppConversation.objects.filter(session=session).delete()
             session.phone_number = phone
 
         qr = event_data.get("qr") or event_data.get("value")

@@ -158,6 +158,10 @@ const InboxPage = () => {
     } else if (searchParams.get('gmail_error')) {
       toast.error(`Gmail connection error: ${decodeURIComponent(searchParams.get('gmail_error'))}`);
       window.history.replaceState({}, '', window.location.pathname);
+    } else if (searchParams.get('search') || searchParams.get('email')) {
+      const q = searchParams.get('search') || searchParams.get('email');
+      setSearchQuery(q);
+      window.history.replaceState({}, '', window.location.pathname);
     }
   }, [fetchGmailStatus, fetchMailAccount, fetchCategoryCounts, fetchUserLabels]);
 
@@ -950,14 +954,14 @@ const InboxPage = () => {
     }
   };
 
-  const handleOpenTrackingModal = async () => {
-    const currentTracking = emailBody.tracking || selectedEmail?.tracking;
+  const handleOpenTrackingModal = async (trackingOverride = null) => {
+    const currentTracking = trackingOverride || emailBody.tracking || selectedEmail?.tracking;
     setShowTrackingModal(true);
     setTrackingModalData(currentTracking || null);
 
     const trackingId = currentTracking?.id;
     const trackingToken = currentTracking?.tracking_token;
-    const messageId = selectedEmail?.message_id;
+    const messageId = currentTracking?.message_id || selectedEmail?.message_id;
 
     if (trackingId) {
       setIsRefreshingTracking(true);
@@ -1159,6 +1163,28 @@ const InboxPage = () => {
 
   const effectiveSocialCount = categoryCounts.social || currentList.filter(e => e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`)).length;
   const effectivePromoCount = categoryCounts.promotions || currentList.filter(e => e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`)).length;
+
+  const handleSelectRecipientConversation = useCallback((recipient) => {
+    setShowBulkCampaign(false);
+    const emailAddr = (recipient.email_address || recipient.email || '').trim().toLowerCase();
+    const threadId = recipient.reply?.thread_id || recipient.tracking?.thread_id || '';
+
+    const listToCheck = isProspectResponsesView ? prospectEmails : emails;
+    if (listToCheck && listToCheck.length > 0) {
+      const match = listToCheck.find(e => 
+        (threadId && (e.thread_id === threadId || e.id === threadId || e.uid === threadId)) ||
+        (emailAddr && ((e.from && e.from.toLowerCase().includes(emailAddr)) || (e.to && e.to.toLowerCase().includes(emailAddr))))
+      );
+      if (match) {
+        setSelectedEmail(match);
+        return;
+      }
+    }
+
+    if (emailAddr) {
+      setSearchQuery(emailAddr);
+    }
+  }, [emails, prospectEmails, isProspectResponsesView]);
 
   const categorizedEmails = displayEmails.filter(e => {
     if (activeFolder !== 'INBOX' || isProspectResponsesView || searchQuery) return true;
@@ -2742,6 +2768,11 @@ const InboxPage = () => {
       <BulkCampaignModal
         isOpen={showBulkCampaign}
         onClose={() => setShowBulkCampaign(false)}
+        onSelectRecipientEmail={handleSelectRecipientConversation}
+        onOpenTrackingModal={(tracking) => {
+          setShowBulkCampaign(false);
+          handleOpenTrackingModal(tracking);
+        }}
       />
     </div>
   );

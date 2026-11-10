@@ -145,6 +145,7 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
             "prospect_name",
             "prospect_id",
             "prospect_phone",
+            "account_phone",
             "prospect_contact",
             "unread_count",
             "last_message_at",

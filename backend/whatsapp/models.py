@@ -296,6 +296,15 @@ class WhatsAppConversation(models.Model):
         related_name="conversations",
     )
 
+    # Phone number of the connected WhatsApp account (device) for strict account isolation
+    account_phone = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Phone number of the connected WhatsApp account (device) that owns this conversation.",
+    )
+
     # Whether this conversation has been matched to a Market Intel record.
     # Unmatched conversations are quarantined and require admin review.
     is_matched = models.BooleanField(
@@ -337,6 +346,11 @@ class WhatsAppConversation(models.Model):
             models.Index(fields=["is_matched"]),
             models.Index(fields=["session", "is_deleted"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if not self.account_phone and self.session and self.session.phone_number:
+            self.account_phone = self.session.phone_number
+        super().save(*args, **kwargs)
 
     def __str__(self):
         contact = self.prospect_contact.contact_name if self.prospect_contact else "Unmatched"
@@ -397,6 +411,15 @@ class WhatsAppMessage(models.Model):
 
     # WAHA message ID (from WAHA response or webhook event).
     waha_message_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+
+    # Phone number of the connected WhatsApp account (device) for strict account isolation
+    account_phone = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Phone number of the connected WhatsApp account (device).",
+    )
 
     direction = models.CharField(max_length=10, choices=Direction.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
@@ -463,6 +486,13 @@ class WhatsAppMessage(models.Model):
             models.Index(fields=["conversation", "direction", "created_at"]),
             models.Index(fields=["conversation", "is_deleted", "created_at"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if not self.account_phone and self.conversation:
+            self.account_phone = self.conversation.account_phone or (
+                self.conversation.session.phone_number if self.conversation.session else None
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.direction} [{self.status}] via {self.conversation.chat_id}"

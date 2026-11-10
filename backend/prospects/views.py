@@ -1947,7 +1947,7 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = EmailCampaign.objects.all().prefetch_related('recipients', 'attachments').order_by('-created_at')
+        qs = EmailCampaign.objects.all().prefetch_related('recipients__outreach_email', 'attachments').order_by('-created_at')
         if user.is_superuser:
             return qs
         if hasattr(user, 'profile') and user.profile.role == 'MANAGER':

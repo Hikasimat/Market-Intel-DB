@@ -477,6 +477,21 @@ class WhatsAppQRView(APIView):
                 if w_status in ("STOPPED", "FAILED", "NOT_FOUND"):
                     client.start_session(session_name)
                 me_info = waha_info.get("me") or {}
+                live_phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
+                clean_live = re.sub(r"\D+", "", str(live_phone or ""))
+                clean_saved = re.sub(r"\D+", "", str(session_obj.phone_number or ""))
+                if clean_live and clean_saved and clean_live != clean_saved:
+                    logger.warning(
+                        "WhatsApp account switch detected in READY session %s: %s -> %s. Purging old session data.",
+                        session_name, clean_saved, clean_live
+                    )
+                    WhatsAppMessage.objects.filter(conversation__session=session_obj).delete()
+                    WhatsAppConversation.objects.filter(session=session_obj).delete()
+                    session_obj.phone_number = live_phone
+                    session_obj.save(update_fields=["phone_number"])
+                elif live_phone and not session_obj.phone_number:
+                    session_obj.phone_number = live_phone
+                    session_obj.save(update_fields=["phone_number"])
             except Exception:
                 me_info = {}
 
@@ -562,6 +577,18 @@ class WhatsAppQRView(APIView):
         if waha_status == "WORKING":
             clear_cached_qr(session_name)
             phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
+            clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
+            clean_old_phone = re.sub(r"\D+", "", str(session_obj.phone_number or ""))
+
+            # Account isolation: if a different WhatsApp account connects, purge previous account data
+            if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
+                logger.warning(
+                    "WhatsApp account switch detected for session %s: %s -> %s. Purging old session data.",
+                    session_name, clean_old_phone, clean_new_phone
+                )
+                WhatsAppMessage.objects.filter(conversation__session=session_obj).delete()
+                WhatsAppConversation.objects.filter(session=session_obj).delete()
+
             if session_obj.status != "READY" or (phone and session_obj.phone_number != phone):
                 session_obj.status = WhatsAppSession.Status.READY
                 if phone:
@@ -919,6 +946,7 @@ class WhatsAppSendMessageView(APIView):
                         target_conv = WhatsAppConversation.objects.create(
                             session=user_session,
                             chat_id=clean_chat_id,
+                            account_phone=user_session.phone_number if user_session else None,
                             phone_number=phone_formatted if not is_grp else None,
                             prospect_contact=matched_contact if not is_grp else None,
                             prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
@@ -1060,18 +1088,28 @@ class WhatsAppConversationsView(APIView):
                                 session=user_session,
                                 chat_id=c_id,
                                 whatsapp_name=w_name,
+                                account_phone=user_session.phone_number,
                                 unread_count=wc.get("unreadCount", 0),
                                 is_matched=True,
                             )
                         elif w_name and conv_obj.whatsapp_name != w_name:
                             conv_obj.whatsapp_name = w_name
                             conv_obj.is_matched = True
-                            conv_obj.save(update_fields=["whatsapp_name", "is_matched"])
+                            if not conv_obj.account_phone and user_session.phone_number:
+                                conv_obj.account_phone = user_session.phone_number
+                            conv_obj.save(update_fields=["whatsapp_name", "is_matched", "account_phone"])
                 except Exception as e:
                     logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
-        # Strictly scoped to current user's session and ownership
-        qs = qs.filter(Q(session=user_session) | Q(session__owner=user))
+        # Strictly scoped to current user's session and account phone number
+        clean_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
+        qs = qs.filter(session=user_session)
+        if clean_user_phone:
+            qs = qs.exclude(
+                ~Q(account_phone=clean_user_phone) &
+                ~Q(account_phone=user_session.phone_number) &
+                Q(account_phone__isnull=False)
+            )
 
         # Deduplicate conversations by canonical phone digits / contact / group ID and auto-merge duplicate threads
         conversations = list(qs)
@@ -1774,6 +1812,7 @@ class WhatsAppSendMediaView(APIView):
             session=user_session,
             chat_id=chat_id,
             defaults={
+                "account_phone": user_session.phone_number if user_session else None,
                 "prospect_contact": existing_conv.prospect_contact if existing_conv else None,
                 "prospect": existing_conv.prospect if existing_conv else None,
                 "is_matched": (existing_conv.is_matched if existing_conv else False) or is_grp_media,
