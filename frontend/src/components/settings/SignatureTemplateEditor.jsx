@@ -1,15 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import SignatureBuilderModal, { buildSignatureHtml } from './SignatureBuilderModal';
-import DesignEditor from './DesignEditor';
+import CustomSignatureEditor from './CustomSignatureEditor';
 import { designApi } from '../../services/designApi';
 import { Loader2, LayoutTemplate, PenTool } from 'lucide-react';
 
 export { buildSignatureHtml };
 
-
 /**
- * Flexible signature editor supporting both:
- * 1. The visual drag-and-drop custom template builder workspace (DesignEditor)
+ * Signature editor supporting:
+ * 1. The structured text-based custom signature template builder with HTML import (CustomSignatureEditor)
  * 2. The standard form wizard (SignatureBuilderModal)
  */
 const SignatureTemplateEditor = ({ id, isCustom, onClose, onSaved }) => {
@@ -26,11 +25,11 @@ const SignatureTemplateEditor = ({ id, isCustom, onClose, onSaved }) => {
         .then((data) => {
           const pd = data?.project_data;
           const hasBlocks = pd && Array.isArray(pd.blocks) && pd.blocks.length > 0;
-          const customFlag = pd && (pd.is_custom || pd.kind === 'signature_custom');
+          const customFlag = pd && (pd.is_custom || pd.kind === 'signature_custom' || pd.is_html_import);
           setMode(hasBlocks || customFlag ? 'custom' : 'standard');
         })
         .catch(() => {
-          setMode('standard');
+          setMode('custom');
         })
         .finally(() => {
           setLoading(false);
@@ -53,7 +52,7 @@ const SignatureTemplateEditor = ({ id, isCustom, onClose, onSaved }) => {
         <div className="flex items-center justify-between bg-blue-50/70 border border-blue-200 px-4 py-2 rounded-xl text-xs">
           <div className="flex items-center gap-2 font-bold text-blue-900">
             <LayoutTemplate className="w-4 h-4 text-blue-600" />
-            <span>Custom Template Workspace (Visual Signature Builder)</span>
+            <span>Custom Signature Template (Structured Text Fields & HTML Import)</span>
           </div>
           <button
             type="button"
@@ -65,15 +64,9 @@ const SignatureTemplateEditor = ({ id, isCustom, onClose, onSaved }) => {
           </button>
         </div>
 
-        {/* Exact Email Template Workspace */}
-        <DesignEditor
-          kind="signature"
+        {/* Structured Text Fields + HTML Import Signature Workspace */}
+        <CustomSignatureEditor
           id={id}
-          noun="Signature"
-          starterHtml={null}
-          emptyCanvas={true}
-          withDescription={true}
-          withSubject={false}
           onClose={onClose}
           onSaved={onSaved}
         />
@@ -96,7 +89,7 @@ const SignatureTemplateEditor = ({ id, isCustom, onClose, onSaved }) => {
             className="text-blue-600 hover:text-blue-800 font-bold underline flex items-center gap-1 cursor-pointer"
           >
             <LayoutTemplate className="w-3.5 h-3.5" />
-            <span>Switch to Custom Template Builder</span>
+            <span>Switch to Custom Signature Template</span>
           </button>
         </div>
       )}

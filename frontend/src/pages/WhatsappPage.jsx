@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
+import { setWhatsappUnreadCount } from '../features/whatsapp/whatsappSlice';
 import {
   Search,
   MoreVertical,
@@ -370,6 +371,7 @@ registerProcessor("playback-processor", PlaybackProcessor);
 // Main WhatsappPage Component
 // ---------------------------------------------------------------------------
 export default function WhatsappPage() {
+  const dispatch = useDispatch();
   const { user } = useSelector((state) => state.auth);
 
   // Session & Connection state
@@ -1271,13 +1273,16 @@ export default function WhatsappPage() {
   const fetchConversations = useCallback(async (isPolling = false) => {
     try {
       const response = await api.get('/whatsapp/conversations/');
-      setChats(response.data);
+      const convList = Array.isArray(response.data) ? response.data : [];
+      setChats(convList);
+      const total = convList.reduce((acc, c) => acc + (c.unread_count || 0), 0);
+      dispatch(setWhatsappUnreadCount(total));
     } catch (error) {
       console.error('Failed to fetch conversations:', error);
     } finally {
       if (!isPolling) setLoadingChats(false);
     }
-  }, []);
+  }, [dispatch]);
 
   const fetchMessages = useCallback(async (conversationId, isPolling = false) => {
     if (!conversationId || String(conversationId).startsWith('temp-')) {
@@ -1405,9 +1410,14 @@ export default function WhatsappPage() {
     if (!chat || String(chat.id).startsWith('temp-')) return;
     try {
       await api.post(`/whatsapp/conversations/${chat.id}/read/`);
-      setChats(prev => prev.map(c =>
-        c.id === chat.id ? { ...c, unread_count: 0 } : c
-      ));
+      setChats(prev => {
+        const next = prev.map(c =>
+          c.id === chat.id ? { ...c, unread_count: 0 } : c
+        );
+        const total = next.reduce((acc, c) => acc + (c.unread_count || 0), 0);
+        dispatch(setWhatsappUnreadCount(total));
+        return next;
+      });
     } catch {
       // Non-critical
     }

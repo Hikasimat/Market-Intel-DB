@@ -7,6 +7,7 @@ import userReducer from '../features/users/userSlice';
 import outreachReducer from '../features/outreach/outreachSlice';
 import inboxReducer from '../features/inbox/inboxSlice';
 import managerReducer from '../features/manager/managerSlice';
+import whatsappReducer from '../features/whatsapp/whatsappSlice';
 import { clearUserCache } from '../services/cache/cacheService';
 import { clearUserInboxCache } from '../services/cache/inboxCacheService';
 
@@ -19,6 +20,7 @@ const appReducer = combineReducers({
   outreach: outreachReducer,
   inbox: inboxReducer,
   manager: managerReducer,
+  whatsapp: whatsappReducer,
 });
 
 const rootReducer = (state, action) => {

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Bell, Clock, X, Mail } from 'lucide-react';
+import { Bell, Clock, X, Mail, MessageCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import api from '../../services/api';
 import { setUnreadCount, mergeEmails } from '../../features/inbox/inboxSlice';
+import { setWhatsappUnreadCount } from '../../features/whatsapp/whatsappSlice';
 import {
   getMailboxState,
   setMailboxState,
@@ -18,6 +19,8 @@ import { formatTimeForUser, formatDateTimeForUser } from '../../utils/timezone';
 const REMINDER_INTERVAL_MS = 30_000;
 /** New-mail polling interval: 60 seconds */
 const NEW_MAIL_INTERVAL_MS = 60_000;
+/** WhatsApp polling interval: 30 seconds */
+const WHATSAPP_POLL_INTERVAL_MS = 30_000;
 /** Primary folder to poll for new mail */
 const POLL_FOLDER = 'INBOX';
 
@@ -35,6 +38,11 @@ export default function NotificationCenter() {
   // ─── New-mail state ──────────────────────────────────────────────────────
   // We store toasts separately so mail and reminder toasts don't interfere.
   const [mailToasts, setMailToasts] = useState([]);
+
+  // ─── WhatsApp notification state ─────────────────────────────────────────
+  const [whatsappToasts, setWhatsappToasts] = useState([]);
+  const notifiedWhatsappRef = useRef(new Map());
+  const isFirstWhatsappPollRef = useRef(true);
 
   // Ref to avoid stale-closure issues in intervals
   const userRef = useRef(user);
@@ -249,6 +257,88 @@ export default function NotificationCenter() {
     setMailToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
+  // ─── WhatsApp polling & notifications ──────────────────────────────────
+
+  const triggerWhatsappToast = (toastId, title, message) => {
+    setWhatsappToasts((prev) => {
+      if (prev.find((t) => t.id === toastId)) return prev;
+      return [
+        ...prev,
+        {
+          id: toastId,
+          title,
+          message,
+          time: formatTimeForUser(new Date().toISOString(), user?.timezone),
+        },
+      ];
+    });
+    setTimeout(() => removeWhatsappToast(toastId), 10000);
+  };
+
+  const removeWhatsappToast = (id) => {
+    setWhatsappToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const checkNewWhatsApp = useCallback(async () => {
+    const currentUser = userRef.current;
+    if (!currentUser?.id) return;
+
+    try {
+      const res = await api.get('/whatsapp/conversations/');
+      const convList = Array.isArray(res.data) ? res.data : [];
+
+      // Calculate total unread count across all conversations
+      const totalUnread = convList.reduce((acc, c) => acc + (c.unread_count || 0), 0);
+      dispatch(setWhatsappUnreadCount(totalUnread));
+
+      // On initial poll, seed the map of last seen unread timestamps to avoid toast spam on mount
+      if (isFirstWhatsappPollRef.current) {
+        convList.forEach((c) => {
+          if (c.id) {
+            notifiedWhatsappRef.current.set(c.id, {
+              lastMsgAt: c.last_message_at || '',
+              unreadCount: c.unread_count || 0,
+            });
+          }
+        });
+        isFirstWhatsappPollRef.current = false;
+        return;
+      }
+
+      // Check for newly arrived unread messages
+      for (const conv of convList) {
+        const prevRecord = notifiedWhatsappRef.current.get(conv.id) || { lastMsgAt: '', unreadCount: 0 };
+        const hasNewUnread = (conv.unread_count || 0) > 0 && (
+          (conv.unread_count || 0) > prevRecord.unreadCount ||
+          (conv.last_message_at && conv.last_message_at !== prevRecord.lastMsgAt)
+        );
+
+        if (hasNewUnread && !conv.last_message_from_me) {
+          const sender = conv.whatsapp_name || conv.prospect_contact?.name || conv.phone_number || 'New contact';
+          const snippet = conv.last_message_preview || 'New message received';
+          const toastId = `wa-${conv.id}-${conv.last_message_at || Date.now()}`;
+          triggerWhatsappToast(toastId, `WhatsApp from ${sender}`, snippet);
+        }
+
+        notifiedWhatsappRef.current.set(conv.id, {
+          lastMsgAt: conv.last_message_at || '',
+          unreadCount: conv.unread_count || 0,
+        });
+      }
+    } catch (err) {
+      // Non-critical; ignore network issues silently
+    }
+  }, [dispatch]);
+
+  useEffect(() => {
+    // Start WhatsApp polling for authenticated users (PRE, MANAGER, LQ)
+    if (!user) return;
+
+    checkNewWhatsApp();
+    const intervalId = setInterval(checkNewWhatsApp, WHATSAPP_POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [user, checkNewWhatsApp]);
+
   useEffect(() => {
     // Only start mail polling for authenticated PRE / LQ users
     if (!user || (user.role !== 'PRE' && user.role !== 'LQ')) return;
@@ -366,6 +456,30 @@ export default function NotificationCenter() {
             </div>
             <button
               onClick={(e) => { e.stopPropagation(); removeMailToast(toast.id); }}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        ))}
+
+        {/* WhatsApp toast notifications (emerald/green) */}
+        {whatsappToasts.map((toast) => (
+          <div
+            key={toast.id}
+            className="pointer-events-auto bg-white border-l-4 border-emerald-500 rounded-xl shadow-2xl p-4 w-72 transform transition-all flex items-start gap-3 cursor-pointer"
+            onClick={() => { navigate('/whatsapp'); removeWhatsappToast(toast.id); }}
+          >
+            <div className="bg-emerald-100 text-emerald-700 rounded-full p-2 shrink-0">
+              <MessageCircle className="w-4 h-4" />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-extrabold text-slate-900">{toast.title || 'New WhatsApp Message'}</h4>
+              <p className="text-xs text-slate-600 font-medium mt-0.5">{toast.message}</p>
+              <div className="text-[10px] text-slate-400 mt-1">{toast.time}</div>
+            </div>
+            <button
+              onClick={(e) => { e.stopPropagation(); removeWhatsappToast(toast.id); }}
               className="text-slate-400 hover:text-slate-600"
             >
               <X className="w-4 h-4" />

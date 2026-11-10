@@ -25,7 +25,9 @@ import {
   Radio,
   CheckCircle2,
   ShieldCheck,
-  Sparkles
+  Sparkles,
+  Upload,
+  Paperclip
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
@@ -557,22 +559,33 @@ export default function LqWorkspaceModal({
   const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
     setAttachmentError('');
+    if (!files.length) return;
+
+    if (attachments.length + files.length > 5) {
+      setAttachmentError(`You can upload a maximum of 5 files. You currently have ${attachments.length} file(s) attached.`);
+      e.target.value = '';
+      return;
+    }
+
     let validFiles = [];
     let currentTotalSize = attachments.reduce((acc, file) => acc + file.size, 0);
 
     for (const file of files) {
       if (file.size > 10 * 1024 * 1024) {
         setAttachmentError(`File ${file.name} exceeds the 10MB limit.`);
+        e.target.value = '';
         return;
       }
       const ext = file.name.split('.').pop().toLowerCase();
       const blockedExts = ['exe', 'bat', 'cmd', 'js', 'ps1', 'vbs', 'scr'];
       if (blockedExts.includes(ext)) {
         setAttachmentError(`File type .${ext} is not allowed for email attachments.`);
+        e.target.value = '';
         return;
       }
       if (currentTotalSize + file.size > 25 * 1024 * 1024) {
         setAttachmentError(`Adding ${file.name} exceeds the total 25MB attachment limit.`);
+        e.target.value = '';
         return;
       }
       currentTotalSize += file.size;
@@ -1323,30 +1336,62 @@ export default function LqWorkspaceModal({
                           )}
                         </div>
                         <div>
-                          <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Attachments</label>
-                          <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
-                            <input
-                              type="file"
-                              multiple
-                              onChange={handleFileChange}
-                              disabled={isEmailSent}
-                              className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                            />
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label className="block font-extrabold text-slate-800 uppercase tracking-wider text-[10px]">
+                              Attachments <span className="font-normal text-slate-500 normal-case">(Max 5 files)</span>
+                            </label>
+                            <span className="text-[10px] font-semibold text-slate-500">
+                              {attachments.length} / 5 files
+                            </span>
+                          </div>
+                          <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2.5">
+                            <div className="flex items-center gap-3">
+                              <input
+                                type="file"
+                                id="lq-attachments-upload"
+                                multiple
+                                onChange={handleFileChange}
+                                disabled={isEmailSent || attachments.length >= 5}
+                                className="hidden"
+                              />
+                              <label
+                                htmlFor="lq-attachments-upload"
+                                className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition ${
+                                  attachments.length >= 5 || isEmailSent
+                                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                    : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200 cursor-pointer shadow-2xs hover:border-indigo-300'
+                                }`}
+                              >
+                                <Upload className="w-3.5 h-3.5" />
+                                <span>Upload File</span>
+                              </label>
+                              <span className="text-[11px] text-slate-400 font-medium">
+                                {attachments.length >= 5 ? 'Maximum 5 files reached' : 'Select up to 5 files to attach'}
+                              </span>
+                            </div>
                             {attachmentError && (
                               <div className="text-red-600 text-[10px] font-bold">{attachmentError}</div>
                             )}
                             {attachments.length > 0 && (
-                              <div className="flex flex-wrap gap-2 mt-2">
+                              <div className="flex flex-wrap gap-2 pt-1">
                                 {attachments.map((file, i) => (
-                                  <div key={i} className="flex items-center gap-1.5 px-2 py-1 bg-slate-100 rounded-xl border border-slate-200 text-[10px] font-semibold text-slate-700">
-                                    <span className="truncate max-w-[120px]">{file.name}</span>
-                                    <span className="text-slate-400">({(file.size / 1024 / 1024).toFixed(1)}MB)</span>
-                                    <button type="button" onClick={() => removeAttachment(i)} className="text-red-500 hover:text-red-700 font-bold ml-1">×</button>
+                                  <div key={i} className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-semibold text-slate-700 shadow-2xs">
+                                    <Paperclip className="w-3 h-3 text-slate-400 shrink-0" />
+                                    <span className="truncate max-w-[140px]" title={file.name}>{file.name}</span>
+                                    <span className="text-slate-400 text-[10px]">({(file.size / 1024 / 1024).toFixed(1)}MB)</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeAttachment(i)}
+                                      className="p-0.5 text-slate-400 hover:text-red-600 rounded-full hover:bg-red-50 transition ml-1"
+                                      title="Remove file"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
                                   </div>
                                 ))}
                               </div>
                             )}
-                            <p className="text-[9px] text-slate-400 font-medium">Max 10MB per file, 25MB total. Executables not allowed.</p>
+                            <p className="text-[9px] text-slate-400 font-medium">Max 5 files, 10MB per file, 25MB total. Executables not allowed.</p>
                           </div>
                         </div>
                         <div className="py-2">
@@ -1361,7 +1406,7 @@ export default function LqWorkspaceModal({
                             <span>Selected Recipients:</span><span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 font-extrabold">{toEmails.length + ccEmails.length} Address(es)</span>
                           </div>
                           <button type="button" onClick={handleSendIntroEmail} disabled={isSendingEmail || (toEmails.length === 0 && ccEmails.length === 0) || isEmailSent} className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-black rounded-xl text-xs transition cursor-pointer shadow-sm flex items-center gap-2">
-                            <Mail className="w-4 h-4" /> <span>{isSendingEmail ? 'Sending Email...' : 'Send Introduction Email & Mark Sent'}</span>
+                            <Mail className="w-4 h-4" /> <span>{isSendingEmail ? 'Sending Email...' : 'Send Intro Mail'}</span>
                           </button>
                         </div>
                       </div>

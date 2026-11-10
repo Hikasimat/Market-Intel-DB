@@ -30,6 +30,7 @@ const CubeLogo = ({ className = "w-6 h-6" }) => (
 const Layout = () => {
   const { user, accessToken, refreshToken } = useSelector((state) => state.auth);
   const unreadCount = useSelector((state) => state.inbox.unreadCount);
+  const whatsappUnreadCount = useSelector((state) => state.whatsapp?.unreadCount || 0);
   const dispatch = useDispatch();
   const location = useLocation();
   const navigate = useNavigate();
@@ -116,7 +117,7 @@ const Layout = () => {
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
       { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
-      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
+      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
       { path: '/government-entities', label: 'Government Entities', icon: Building2 },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
@@ -137,7 +138,7 @@ const Layout = () => {
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
       { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
-      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
+      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
       { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
@@ -168,8 +169,8 @@ const Layout = () => {
 
   const appItems = [
     { label: 'Prospects', path: '/prospects', icon: Users },
-    { label: 'Email', path: '/inbox', icon: Mail },
-    { label: 'WhatsApp', path: '/whatsapp', icon: MessageCircle },
+    { label: 'Email', path: '/inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+    { label: 'WhatsApp', path: '/whatsapp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
   ];
 
   return (
