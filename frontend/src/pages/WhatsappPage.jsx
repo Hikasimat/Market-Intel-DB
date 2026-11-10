@@ -756,11 +756,14 @@ export default function WhatsappPage() {
       // 1. Mic capture with hardware/browser acoustic echo cancellation
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: { ideal: true },
-          noiseSuppression: { ideal: true },
-          autoGainControl: { ideal: true },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          googEchoCancellation: true,
+          googAutoGainControl: true,
+          googNoiseSuppression: true,
+          googHighpassFilter: true,
           channelCount: 1,
-          sampleRate: 16000,
         },
       });
       callMediaRef.current.micStream = stream;
@@ -795,9 +798,22 @@ export default function WhatsappPage() {
 
       await ctx.resume();
 
-      // Playback incoming audio through AudioContext destination
+      // Playback incoming audio through MediaStreamDestination and HTMLAudioElement
+      // In Chromium, playing through an HTMLAudioElement registers the audio stream as the
+      // AEC reference signal with WebRTC AudioProcessingModule (AEC3), eliminating mic echo.
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
-      playbackNode.connect(ctx.destination);
+      const streamDest = ctx.createMediaStreamDestination();
+      playbackNode.connect(streamDest);
+
+      const remoteAudio = new Audio();
+      remoteAudio.srcObject = streamDest.stream;
+      remoteAudio.autoplay = true;
+      remoteAudio.playsInline = true;
+      remoteAudio.volume = 1.0;
+      remoteAudio.play().catch(() => {
+        try { playbackNode.connect(ctx.destination); } catch (_) {}
+      });
+      callMediaRef.current.remoteAudioEl = remoteAudio;
       playbackNode.port.onmessage = () => {};
 
       const sendRawPcm = (pcmBytes) => {
@@ -820,10 +836,15 @@ export default function WhatsappPage() {
         }
         const floats = int16LEToFloat32(buf);
         if (!floats || !floats.length) return;
+        const durationMs = (floats.length / 16000) * 1000;
+        callMediaRef.current.remotePlaybackEndAt = Math.max(
+          callMediaRef.current.remotePlaybackEndAt || 0,
+          performance.now() + durationMs + 200
+        );
         playbackNode.port.postMessage(floats);
       };
 
-      // Connect mic to captureNode for real-time full-duplex two-way audio
+      // Connect mic to captureNode for real-time full-duplex two-way audio with Acoustic Echo Suppression
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
@@ -836,16 +857,39 @@ export default function WhatsappPage() {
           return;
         }
 
+        const now = performance.now();
+        const isRemotePlaying = now < (callMediaRef.current.remotePlaybackEndAt || 0);
+
+        // Calculate RMS of microphone input
+        let sumSquares = 0;
+        for (let i = 0; i < samples.length; i++) {
+          sumSquares += samples[i] * samples[i];
+        }
+        const rms = Math.sqrt(sumSquares / samples.length);
+
+        // Double-talk detection: if local user is actively speaking (RMS > 0.045), permit local speech
+        if (rms > 0.045) {
+          callMediaRef.current.localSpeechActiveUntil = now + 280;
+        }
+        const isLocalSpeaking = now < (callMediaRef.current.localSpeechActiveUntil || 0);
+
+        // Acoustic Echo Suppression (AES): When remote audio is playing from speakers and
+        // the local user is not actively talking, suppress speaker bleed so caller doesn't hear echo.
+        if (isRemotePlaying && !isLocalSpeaking) {
+          const silenceBytes = new Int16Array(samples.length).buffer;
+          sendRawPcm(silenceBytes);
+          return;
+        }
+
         // Transmit microphone audio directly so the other person hears clearly
         sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);
 
-      // Prevent local mic monitoring feedback
+      // Keep node alive without outputting mic audio back into local speakers
       const silenceGain = ctx.createGain();
-      silenceGain.gain.value = 0;
+      silenceGain.gain.setValueAtTime(0, ctx.currentTime);
       captureNode.connect(silenceGain);
-      silenceGain.connect(ctx.destination);
 
       // 3. Connect primary WebSocket Audio Bridge (bypasses UDP NAT blocks and avoids Pion ICE timeout killing the call)
       let normalizedWsUrl = audioWsUrl || '';
@@ -1120,19 +1164,22 @@ export default function WhatsappPage() {
 
     let resolvedSession = sessionToUse;
     let audioWsUrl = targetCall.audio_ws_url || '';
-    try {
-      const acceptRes = await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
-        session_name: sessionToUse,
-      });
-      if (acceptRes.data?.session_name) {
-        resolvedSession = acceptRes.data.session_name;
-        setCallState((prev) => ({ ...prev, sessionName: resolvedSession }));
+
+    if (!targetCall.alreadyAccepted) {
+      try {
+        const acceptRes = await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
+          session_name: sessionToUse,
+        });
+        if (acceptRes.data?.session_name) {
+          resolvedSession = acceptRes.data.session_name;
+          setCallState((prev) => ({ ...prev, sessionName: resolvedSession }));
+        }
+        if (acceptRes.data?.audio_ws_url) {
+          audioWsUrl = acceptRes.data.audio_ws_url;
+        }
+      } catch (acceptErr) {
+        console.warn('Accept call error (may already be accepted):', acceptErr);
       }
-      if (acceptRes.data?.audio_ws_url) {
-        audioWsUrl = acceptRes.data.audio_ws_url;
-      }
-    } catch (acceptErr) {
-      console.warn('Accept call error (may already be accepted):', acceptErr);
     }
 
     try {

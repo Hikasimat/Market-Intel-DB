@@ -258,6 +258,22 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
         except Exception:
             pass
 
+    # Fallback: scan any active ringing calls across all session files
+    try:
+        import glob
+        temp_dir = tempfile.gettempdir()
+        for cfile in glob.glob(os.path.join(temp_dir, "waha_active_call_*.json")):
+            try:
+                mtime = os.path.getmtime(cfile)
+                with open(cfile, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if _is_valid_call(data, mtime):
+                    return data
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return None
 
 
@@ -970,10 +986,17 @@ def _handle_call_event(
       - call.ended     (status: "terminate")
       - call.update    (generic fallback)
     """
+    sub_data = event_data.get("call") or event_data.get("data") or {}
+    if not isinstance(sub_data, dict):
+        sub_data = {}
+
     raw_call_id = str(
         event_data.get("callId")
         or event_data.get("call_id")
         or event_data.get("id")
+        or sub_data.get("callId")
+        or sub_data.get("call_id")
+        or sub_data.get("id")
         or ""
     ).strip()
     call_id = _normalize_call_id(raw_call_id)
@@ -982,13 +1005,23 @@ def _handle_call_event(
         or event_data.get("caller")
         or event_data.get("peer")
         or event_data.get("from")
+        or sub_data.get("callerPhone")
+        or sub_data.get("caller")
+        or sub_data.get("peer")
+        or sub_data.get("from")
         or ""
     ).strip()
-    raw_chat = str(event_data.get("chatId") or event_data.get("chat_id") or "").strip()
-    is_group = bool(event_data.get("isGroup", False) or event_data.get("is_group", False))
-    group_jid = str(event_data.get("groupJid") or event_data.get("group_jid") or "").strip()
-    is_video = bool(event_data.get("isVideo", False) or event_data.get("is_video", False))
-    raw_status = str(event_data.get("status") or "").strip().lower()
+    raw_chat = str(
+        event_data.get("chatId")
+        or event_data.get("chat_id")
+        or sub_data.get("chatId")
+        or sub_data.get("chat_id")
+        or ""
+    ).strip()
+    is_group = bool(event_data.get("isGroup", False) or event_data.get("is_group", False) or sub_data.get("isGroup", False))
+    group_jid = str(event_data.get("groupJid") or event_data.get("group_jid") or sub_data.get("groupJid") or "").strip()
+    is_video = bool(event_data.get("isVideo", False) or event_data.get("is_video", False) or sub_data.get("isVideo", False))
+    raw_status = str(event_data.get("status") or sub_data.get("status") or "").strip().lower()
 
     # Determine target chat ID
     if is_group and group_jid:
@@ -999,8 +1032,18 @@ def _handle_call_event(
         target_chat_id = raw_from
 
     # Strip multidevice colons (e.g. 919003619221:0@s.whatsapp.net -> 919003619221@s.whatsapp.net)
-    target_chat_id = re.sub(r":[0-9]+@", "@", target_chat_id)
-    raw_from = re.sub(r":[0-9]+@", "@", raw_from)
+    target_chat_id = re.sub(r":[0-9]+@", "@", target_chat_id).strip()
+    raw_from = re.sub(r":[0-9]+@", "@", raw_from).strip()
+
+    if not target_chat_id and raw_from:
+        target_chat_id = raw_from
+
+    clean_target_digits = re.sub(r"\D+", "", target_chat_id.split("@")[0].split(":")[0])
+    if clean_target_digits and "@" not in target_chat_id:
+        target_chat_id = f"{clean_target_digits}@c.us"
+    clean_from_digits = re.sub(r"\D+", "", raw_from.split("@")[0].split(":")[0])
+    if clean_from_digits and "@" not in raw_from:
+        raw_from = f"{clean_from_digits}@c.us"
 
     # Normalize WhatsApp JIDs: @s.whatsapp.net -> @c.us
     if "@s.whatsapp.net" in target_chat_id:
@@ -1011,14 +1054,14 @@ def _handle_call_event(
     target_chat_id = target_chat_id.lstrip("+")
     raw_from = raw_from.lstrip("+")
 
-    if PHONE_DIGITS_RE.match(target_chat_id):
-        target_chat_id = f"{target_chat_id}@c.us"
-    if PHONE_DIGITS_RE.match(raw_from):
-        raw_from = f"{raw_from}@c.us"
-
     if not target_chat_id or not VALID_CHAT_ID_RE.match(target_chat_id):
-        logger.warning("Call event with invalid chat ID: %r — ignored.", target_chat_id)
-        return
+        if clean_target_digits:
+            target_chat_id = f"{clean_target_digits}@c.us"
+        elif clean_from_digits:
+            target_chat_id = f"{clean_from_digits}@c.us"
+        else:
+            logger.warning("Call event with invalid chat ID: %r — ignored.", target_chat_id)
+            return
 
     # Call type and human-readable label
     call_type = "Video call" if is_video else "Voice call"

@@ -413,12 +413,14 @@ export default function NotificationCenter() {
     markCallHandled(cleanId);
     setIncomingCallState(null);
     dispatch(setIncomingCall(null));
+    let acceptData = null;
     try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanId)}/accept/`, {
+      const res = await api.post(`/whatsapp/calls/${encodeURIComponent(cleanId)}/accept/`, {
         session_name: call.session_name || 'default',
       });
+      acceptData = res.data;
     } catch (_) {}
-    navigate('/whatsapp', { state: { autoAcceptCall: call } });
+    navigate('/whatsapp', { state: { autoAcceptCall: { ...call, ...(acceptData || {}), alreadyAccepted: true } } });
   };
 
   const checkNewWhatsApp = useCallback(async () => {

@@ -998,7 +998,9 @@ const InboxPage = () => {
     const trackingToken = currentTracking?.tracking_token;
     const messageId = selectedEmail?.message_id;
 
-    if (!trackingId && !trackingToken && !messageId) return;
+    // Only poll if we have an active tracking ID/token, OR if tracking modal is currently open
+    if (!trackingId && !trackingToken && (!showTrackingModal || !messageId)) return;
+    if (currentTracking && currentTracking.tracked === false && !showTrackingModal) return;
 
     const interval = setInterval(async () => {
       try {
@@ -1006,7 +1008,7 @@ const InboxPage = () => {
         if (trackingId) {
           const res = await api.get(`/outreach/emails/${trackingId}/tracking-stats/`);
           freshData = res.data;
-        } else if (trackingToken || messageId) {
+        } else if (trackingToken || (showTrackingModal && messageId)) {
           const query = trackingToken 
             ? `token=${encodeURIComponent(trackingToken)}` 
             : `message_id=${encodeURIComponent(messageId)}`;
@@ -1014,9 +1016,13 @@ const InboxPage = () => {
           freshData = res.data;
         }
         if (freshData) {
-          setTrackingModalData(prev => (prev ? freshData : prev));
-          setSelectedEmail(prev => (prev ? { ...prev, tracking: freshData } : prev));
-          setEmailBody(prev => (prev?.tracking ? { ...prev, tracking: freshData } : prev));
+          if (freshData.tracked === false || (!freshData.id && !freshData.tracking_token)) {
+            setSelectedEmail(prev => (prev ? { ...prev, tracking: freshData } : prev));
+          } else {
+            setTrackingModalData(prev => (prev ? freshData : prev));
+            setSelectedEmail(prev => (prev ? { ...prev, tracking: freshData } : prev));
+            setEmailBody(prev => (prev?.tracking ? { ...prev, tracking: freshData } : prev));
+          }
         }
       } catch (err) {
         // silent background polling

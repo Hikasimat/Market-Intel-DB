@@ -1081,96 +1081,101 @@ class WAHAClient:
             extra_headers["X-Client-Id"] = client_id
 
         primary = session_name or "default"
-        primary_error = None
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{primary}/calls/{call_id}/accept",
-                extra_headers=extra_headers,
-                timeout=8.0,
-            )
-            if isinstance(body, dict):
-                body["session_name"] = primary
-                return body
-        except Exception as e:
-            primary_error = e
+        clean_id = str(call_id or "").strip()
+        raw_id = clean_id[5:] if clean_id.startswith("call_") else clean_id
+        candidate_call_ids = [clean_id]
+        if f"call_{raw_id}" not in candidate_call_ids:
+            candidate_call_ids.append(f"call_{raw_id}")
+        if raw_id not in candidate_call_ids:
+            candidate_call_ids.append(raw_id)
 
-        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
-            if sess == primary:
-                continue
-            try:
-                _status, body = self._request(
-                    "POST",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}/accept",
-                    extra_headers=extra_headers,
-                    timeout=6.0,
-                )
-                if isinstance(body, dict):
-                    body["session_name"] = sess
-                    return body
-            except Exception:
-                continue
+        candidate_sessions = self._get_calling_candidates(primary, include_working_fallbacks=True)
+        if primary not in candidate_sessions:
+            candidate_sessions.insert(0, primary)
+
+        primary_error = None
+        for sess in candidate_sessions:
+            for cid in candidate_call_ids:
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/{sess}/calls/{cid}/accept",
+                        extra_headers=extra_headers,
+                        timeout=8.0,
+                    )
+                    if isinstance(body, dict):
+                        body["session_name"] = sess
+                        body["call_id"] = cid
+                        return body
+                except Exception as e:
+                    if sess == primary and primary_error is None:
+                        primary_error = e
+                    continue
 
         raise WAHAServiceError(f"Failed to accept call: {primary_error}")
 
     def reject_call(self, session_name: str, call_id: str) -> dict:
         """Reject an incoming voice call."""
         primary = session_name or "default"
-        primary_error = None
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{primary}/calls/{call_id}/reject",
-                timeout=6.0,
-            )
-            if isinstance(body, dict):
-                return body
-        except Exception as e:
-            primary_error = e
+        clean_id = str(call_id or "").strip()
+        raw_id = clean_id[5:] if clean_id.startswith("call_") else clean_id
+        candidate_call_ids = [clean_id]
+        if f"call_{raw_id}" not in candidate_call_ids:
+            candidate_call_ids.append(f"call_{raw_id}")
+        if raw_id not in candidate_call_ids:
+            candidate_call_ids.append(raw_id)
 
-        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
-            if sess == primary:
-                continue
-            try:
-                _status, body = self._request(
-                    "POST",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}/reject",
-                    timeout=5.0,
-                )
-                if isinstance(body, dict):
-                    return body
-            except Exception:
-                continue
+        candidate_sessions = self._get_calling_candidates(primary, include_working_fallbacks=True)
+        if primary not in candidate_sessions:
+            candidate_sessions.insert(0, primary)
+
+        primary_error = None
+        for sess in candidate_sessions:
+            for cid in candidate_call_ids:
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/{sess}/calls/{cid}/reject",
+                        timeout=6.0,
+                    )
+                    if isinstance(body, dict):
+                        body["session_name"] = sess
+                        body["call_id"] = cid
+                        return body
+                except Exception as e:
+                    if sess == primary and primary_error is None:
+                        primary_error = e
+                    continue
 
         raise WAHAServiceError(f"Failed to reject call: {primary_error}")
 
     def end_call(self, session_name: str, call_id: str) -> dict:
         """Hang up / terminate an active voice call."""
         primary = session_name or "default"
-        try:
-            _status, body = self._request(
-                "DELETE",
-                f"/api/calling/sessions/{primary}/calls/{call_id}",
-                timeout=6.0,
-            )
-            if isinstance(body, dict):
-                return body
-        except Exception:
-            pass
+        clean_id = str(call_id or "").strip()
+        raw_id = clean_id[5:] if clean_id.startswith("call_") else clean_id
+        candidate_call_ids = [clean_id]
+        if f"call_{raw_id}" not in candidate_call_ids:
+            candidate_call_ids.append(f"call_{raw_id}")
+        if raw_id not in candidate_call_ids:
+            candidate_call_ids.append(raw_id)
 
-        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
-            if sess == primary:
-                continue
-            try:
-                _status, body = self._request(
-                    "DELETE",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}",
-                    timeout=5.0,
-                )
-                if isinstance(body, dict):
-                    return body
-            except Exception:
-                continue
+        candidate_sessions = self._get_calling_candidates(primary, include_working_fallbacks=True)
+        if primary not in candidate_sessions:
+            candidate_sessions.insert(0, primary)
+
+        for sess in candidate_sessions:
+            for cid in candidate_call_ids:
+                try:
+                    _status, body = self._request(
+                        "DELETE",
+                        f"/api/calling/sessions/{sess}/calls/{cid}",
+                        timeout=5.0,
+                    )
+                    if isinstance(body, dict):
+                        return body
+                except Exception:
+                    continue
 
         return {"status": "ended"}
 
@@ -1178,36 +1183,36 @@ class WAHAClient:
         """Exchange WebRTC SDP offer to establish PCM audio data channel."""
         payload = {"sdp_offer": sdp_offer}
         primary = session_name or "default"
-        primary_error = None
-        try:
-            _status, body = self._request(
-                "POST",
-                f"/api/calling/sessions/{primary}/calls/{call_id}/webrtc",
-                payload=payload,
-                timeout=8.0,
-            )
-            if isinstance(body, dict):
-                body["session_name"] = primary
-                return body
-        except Exception as e:
-            primary_error = e
-            logger.info("exchange_webrtc attempt failed for session '%s': %s", primary, e)
+        clean_id = str(call_id or "").strip()
+        raw_id = clean_id[5:] if clean_id.startswith("call_") else clean_id
+        candidate_call_ids = [clean_id]
+        if f"call_{raw_id}" not in candidate_call_ids:
+            candidate_call_ids.append(f"call_{raw_id}")
+        if raw_id not in candidate_call_ids:
+            candidate_call_ids.append(raw_id)
 
-        for sess in self._get_calling_candidates(primary, include_working_fallbacks=True):
-            if sess == primary:
-                continue
-            try:
-                _status, body = self._request(
-                    "POST",
-                    f"/api/calling/sessions/{sess}/calls/{call_id}/webrtc",
-                    payload=payload,
-                    timeout=8.0,
-                )
-                if isinstance(body, dict):
-                    body["session_name"] = sess
-                    return body
-            except Exception:
-                continue
+        candidate_sessions = self._get_calling_candidates(primary, include_working_fallbacks=True)
+        if primary not in candidate_sessions:
+            candidate_sessions.insert(0, primary)
+
+        primary_error = None
+        for sess in candidate_sessions:
+            for cid in candidate_call_ids:
+                try:
+                    _status, body = self._request(
+                        "POST",
+                        f"/api/calling/sessions/{sess}/calls/{cid}/webrtc",
+                        payload=payload,
+                        timeout=8.0,
+                    )
+                    if isinstance(body, dict):
+                        body["session_name"] = sess
+                        body["call_id"] = cid
+                        return body
+                except Exception as e:
+                    if sess == primary and primary_error is None:
+                        primary_error = e
+                    continue
 
         raise WAHAServiceError(f"Failed to exchange WebRTC offer: {primary_error}")
 

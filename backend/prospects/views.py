@@ -1106,9 +1106,20 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         elif mid:
             clean_mid = mid.strip().strip('<>').strip()
             if clean_mid:
-                oe = OutreachEmail.objects.filter(message_id__icontains=clean_mid).first()
+                oe = (
+                    OutreachEmail.objects.filter(message_id__icontains=clean_mid).first() or
+                    OutreachEmail.objects.filter(thread_id__icontains=clean_mid).first() or
+                    OutreachEmail.objects.filter(references__icontains=clean_mid).first()
+                )
         if not oe:
-            return Response({'error': 'Tracking data not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                'id': None,
+                'tracked': False,
+                'open_tracking_enabled': False,
+                'is_opened': False,
+                'open_count': 0,
+                'detail': 'Email not tracked'
+            }, status=status.HTTP_200_OK)
         serializer = self.get_serializer(oe)
         return Response(serializer.data)
 

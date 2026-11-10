@@ -3036,16 +3036,27 @@ class WhatsAppCallAcceptView(APIView):
         try:
             result = client.accept_call(session_name, call_id)
             session_used = result.get("session_name") or session_name
-            clear_active_call(session_used, call_id)
-            audio_ws_url = _build_audio_ws_url(request, session_used, call_id)
+            actual_call_id = result.get("call_id") or call_id
+            clear_active_call(session_used, actual_call_id)
+            audio_ws_url = _build_audio_ws_url(request, session_used, actual_call_id)
             return Response({
                 "status": "accepted",
-                "call_id": call_id,
+                "call_id": actual_call_id,
                 "session_name": session_used,
                 "audio_ws_url": audio_ws_url,
                 "result": result,
             }, status=status.HTTP_200_OK)
         except Exception as exc:
+            err_str = str(exc).lower()
+            if any(k in err_str for k in ("already", "active", "connected", "in_progress")):
+                audio_ws_url = _build_audio_ws_url(request, session_name, call_id)
+                return Response({
+                    "status": "accepted",
+                    "call_id": call_id,
+                    "session_name": session_name,
+                    "audio_ws_url": audio_ws_url,
+                    "already_accepted": True,
+                }, status=status.HTTP_200_OK)
             logger.error("Failed to accept voice call %s: %s", call_id, exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
