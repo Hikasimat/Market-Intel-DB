@@ -344,11 +344,6 @@ export default function LqWorkspaceModal({
       return true;
     }
 
-    const isIssuePending = selectedLq.pre_task_status === 'ISSUE_SENT_TO_PRE' || localIssueSent;
-    if (isIssuePending && latest && latest.status === 'Invalid Number') {
-      return true;
-    }
-
     return false;
   };
 
