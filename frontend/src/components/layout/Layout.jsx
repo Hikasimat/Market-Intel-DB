@@ -483,10 +483,10 @@ const Layout = () => {
 
       {/* Main Application Area */}
       <main 
-        className="flex-1 min-w-0 h-screen overflow-y-auto bg-[#f4f5f7] transition-all duration-300"
-        style={{ zoom: 0.9 }}
+        className="flex-1 min-w-0 h-screen overflow-y-auto bg-[#f4f5f7] transition-all duration-300 flex flex-col"
+        style={{ zoom: 0.9, minHeight: 'calc(100vh / 0.9)' }}
       >
-        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) || location.pathname.startsWith('/inbox') ? 'h-full w-full' : 'w-full px-4 sm:px-6 md:px-8 py-4 h-full'}>
+        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) || location.pathname.startsWith('/inbox') ? 'h-full w-full flex-1 flex flex-col' : 'w-full px-4 sm:px-6 md:px-8 py-4 flex-1 flex flex-col min-h-0'}>
           <Outlet context={{ isSidebarCollapsed, setIsSidebarCollapsed, toggleSidebar }} />
         </div>
       </main>

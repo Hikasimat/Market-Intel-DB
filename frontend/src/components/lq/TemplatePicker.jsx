@@ -163,7 +163,7 @@ const TemplatePicker = ({ prospect, toEmails, ccEmails, emailSubject, emailBody,
       } else if (mode === 'signature') {
         const sId = selection.signatureId || defSig?.id;
         if (!sId) {
-          toast.info('Please select an email signature to preview.');
+          toast.info('Signature not added yet. You can create email signatures in Settings.');
           return;
         }
         let sigHtml = '';
@@ -276,12 +276,12 @@ const TemplatePicker = ({ prospect, toEmails, ccEmails, emailSubject, emailBody,
         <div className="space-y-1">
           <div className="flex gap-1.5">
             <select id="compose-signature-select" disabled={disabled} value={selection.signatureId} onChange={(e) => { const sid = e.target.value; setSelection({ ...selection, signatureId: sid }); }} className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs">
-              <option value="">Mail account default signature</option>
+              <option value="">{signatures.length === 0 ? 'No signature template added' : 'Mail account default signature'}</option>
               {signatures.map((s) => <option key={s.id} value={s.id}>{s.name}{s.is_default ? ' ★' : ''}</option>)}
             </select>
             {defSig && <button type="button" disabled={disabled} onClick={() => setSelection({ ...selection, signatureId: defSig.id })} className="px-2 text-[10px] font-bold bg-white border border-slate-200 rounded-lg">Use default</button>}
           </div>
-          <div className="flex justify-start">
+          <div className="flex items-center justify-between">
             <button
               type="button"
               disabled={disabled}
@@ -292,6 +292,12 @@ const TemplatePicker = ({ prospect, toEmails, ccEmails, emailSubject, emailBody,
               <Eye className="w-3 h-3 text-indigo-600" />
               <span>Preview signature</span>
             </button>
+            {(!selection.signatureId || signatures.length === 0) && (
+              <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200/80 rounded-md px-1.5 py-0.5 flex items-center gap-1 shadow-2xs">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                Signature not added
+              </span>
+            )}
           </div>
         </div>
       </div>

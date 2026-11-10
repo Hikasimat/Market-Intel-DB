@@ -105,10 +105,13 @@ const LqPipelinePage = ({ filter = 'all' }) => {
        .then(res => setGlobalLogs(res.data.results || res.data))
        .catch(err => console.error('Failed to load global communications', err));
 
-    // Auto-refresh every 30 seconds so new prospect assignments appear without manual refresh
+    // Real-time automatic updates every 8 seconds so tracker and activities update live
     const interval = setInterval(() => {
       dispatch(fetchLqPipeline({ page }));
-    }, 30000);
+      api.get('/outreach/communications/')
+         .then(res => setGlobalLogs(res.data.results || res.data))
+         .catch(() => {});
+    }, 8000);
     return () => clearInterval(interval);
   }, [dispatch, page]);
 
@@ -327,13 +330,12 @@ const LqPipelinePage = ({ filter = 'all' }) => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
       {/* Header */}
-      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative overflow-hidden shadow-sm">
+      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative overflow-hidden shadow-sm shrink-0">
         <div className="relative z-10">
-
-          <h1 className="text-2xl md:text-3xl font-black text-white tracking-tight mb-2">Lead Verification & Outreach Workspace</h1>
-          <p className="text-blue-100 text-sm max-w-2xl">Review and verify prospect master data, qualify opportunities, and continue the lead qualification workflow.</p>
+          <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Lead Verification & Outreach Workspace</h1>
+          <p className="text-blue-100 text-xs max-w-2xl">Review and verify prospect master data, qualify opportunities, and continue the lead qualification workflow.</p>
         </div>
       </div>
 
@@ -478,8 +480,8 @@ const LqPipelinePage = ({ filter = 'all' }) => {
       )}
 
       {/* Table Container */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-4 border-b border-slate-200 space-y-3">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex-1 flex flex-col min-h-[350px]">
+        <div className="p-3.5 border-b border-slate-200 space-y-3 shrink-0">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-3 flex-1">
               <div className="relative flex-1 max-w-md">
@@ -487,7 +489,7 @@ const LqPipelinePage = ({ filter = 'all' }) => {
                 <input 
                   type="text" 
                   placeholder="Filter by master prospect name, country, industry..." 
-                  className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm"
+                  className="w-full pl-9 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
@@ -496,8 +498,8 @@ const LqPipelinePage = ({ filter = 'all' }) => {
         </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
+        <div className="overflow-x-auto flex-1 flex flex-col">
+          <table className="w-full text-left text-xs border-collapse flex-1">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                 <th className="p-3.5">Master Prospect & PRE Data</th>

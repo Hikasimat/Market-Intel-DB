@@ -169,9 +169,9 @@ const PreTasksPage = () => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-2xl shadow-xs border border-slate-200/80">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-2xl shadow-xs border border-slate-200/80 shrink-0">
         {!isManager ? (
           <div className="flex bg-slate-100 p-0.5 rounded-xl">
             <button
@@ -228,9 +228,9 @@ const PreTasksPage = () => {
         )}
       </div>
 
-      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden flex-1 flex flex-col min-h-[350px]">
+        <div className="overflow-x-auto flex-1 flex flex-col">
+          <table className="w-full text-left text-xs border-collapse flex-1">
             <thead>
               <tr className="bg-slate-50/80 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-100">
                 <th className="px-4 py-2.5">Reported Prospect</th>

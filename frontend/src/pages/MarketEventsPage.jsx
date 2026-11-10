@@ -84,9 +84,9 @@ const MarketEventsPage = () => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
       {/* Header section */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
         <div>
           <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
             <Calendar className="w-5 h-5 text-indigo-600" />
@@ -125,9 +125,9 @@ const MarketEventsPage = () => {
       </div>
 
       {/* Main Content */}
-      <div className="bg-white border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs whitespace-nowrap">
+      <div className="bg-white border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden flex-1 flex flex-col min-h-[350px]">
+        <div className="overflow-x-auto flex-1 flex flex-col">
+          <table className="w-full text-left text-xs whitespace-nowrap flex-1">
             <thead className="bg-slate-50/80 border-b border-slate-100 text-slate-500 uppercase tracking-wider text-[11px] font-bold">
               <tr>
                 <th className="px-4 py-2.5">Event Title</th>

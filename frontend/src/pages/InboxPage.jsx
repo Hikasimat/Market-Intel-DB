@@ -360,6 +360,9 @@ const InboxPage = () => {
       });
       toast.dismiss(toastId);
       toast.success('Email sent successfully');
+      if (!templateSelection.signatureId) {
+        toast.info('Notice: Email sent without a signature (signature not added).');
+      }
       setShowCompose(false);
       setAttachments([]);
       setOpenTrackingEnabled(false);
@@ -969,6 +972,41 @@ const InboxPage = () => {
       }
     }
   };
+
+  // Real-time automatic updates for Email Tracker across the page and modal
+  useEffect(() => {
+    const currentTracking = trackingModalData || emailBody.tracking || selectedEmail?.tracking;
+    const trackingId = currentTracking?.id;
+    const trackingToken = currentTracking?.tracking_token;
+    const messageId = selectedEmail?.message_id;
+
+    if (!trackingId && !trackingToken && !messageId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        let freshData = null;
+        if (trackingId) {
+          const res = await api.get(`/outreach/emails/${trackingId}/tracking-stats/`);
+          freshData = res.data;
+        } else if (trackingToken || messageId) {
+          const query = trackingToken 
+            ? `token=${encodeURIComponent(trackingToken)}` 
+            : `message_id=${encodeURIComponent(messageId)}`;
+          const res = await api.get(`/outreach/emails/by-token/?${query}`);
+          freshData = res.data;
+        }
+        if (freshData) {
+          setTrackingModalData(prev => (prev ? freshData : prev));
+          setSelectedEmail(prev => (prev ? { ...prev, tracking: freshData } : prev));
+          setEmailBody(prev => (prev?.tracking ? { ...prev, tracking: freshData } : prev));
+        }
+      } catch (err) {
+        // silent background polling
+      }
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [showTrackingModal, selectedEmail?.id, selectedEmail?.message_id, trackingModalData?.id, emailBody.tracking?.id]);
 
   const handleRefreshTracking = async () => {
     const currentTracking = trackingModalData || emailBody.tracking || selectedEmail?.tracking;
@@ -2177,23 +2215,7 @@ const InboxPage = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="bg-slate-50/80 px-5 py-3 border-t border-slate-200 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={sendingEmail}
-                  className="px-3.5 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-medium text-xs rounded-full transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                >
-                  <Paperclip className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Attach</span>
-                  {attachments.length > 0 && (
-                    <span className="px-1.5 py-0.2 rounded-full bg-blue-100 text-blue-700 text-[10px] font-medium">
-                      {attachments.length}
-                    </span>
-                  )}
-                </button>
-              </div>
+            <div className="bg-slate-50/80 px-5 py-3 border-t border-slate-200 flex items-center justify-end shrink-0">
               <div className="flex items-center gap-2.5">
                 <button 
                   type="button"
@@ -2409,14 +2431,13 @@ const InboxPage = () => {
                           </div>
                           <div className="min-w-0">
                             <div className="font-extrabold text-slate-800 flex items-center gap-1.5 truncate">
-                              <span>{ev.client || 'Mail Client'}</span>
+                              <span>{(ev.client || 'Mail Client').replace(/\s*\((Proxy|Test Ping)\)/gi, '').trim()}</span>
                               <span className="px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded text-[9px] font-semibold border border-slate-200 shrink-0">
                                 {ev.device || 'Desktop'}
                               </span>
                             </div>
                             <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
                               <span>{formatTrackingDateTime(ev.timestamp)}</span>
-                              {ev.ip && <span>&bull; IP: {ev.ip}</span>}
                             </div>
                           </div>
                         </div>
@@ -2447,26 +2468,9 @@ const InboxPage = () => {
 
             {/* Modal Footer */}
             <div className="p-4 bg-slate-50/80 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSimulateOpen}
-                  disabled={isSimulatingOpen || !(trackingModalData?.id || emailBody.tracking?.id || selectedEmail?.tracking?.id)}
-                  className="px-3.5 py-1.5 bg-blue-50 hover:bg-blue-100 disabled:opacity-50 text-blue-700 font-medium text-xs rounded-full border border-blue-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                  title="Simulate recipient opening the email (test live tracking)"
-                >
-                  <Zap className={`w-3.5 h-3.5 ${isSimulatingOpen ? 'animate-bounce text-blue-600' : 'text-blue-500'}`} />
-                  <span>{isSimulatingOpen ? 'Recording...' : 'Test open ping'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRefreshTracking}
-                  disabled={isRefreshingTracking}
-                  className="px-3.5 py-1.5 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-700 font-medium text-xs rounded-full border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? 'animate-spin text-slate-500' : 'text-slate-400'}`} />
-                  <span>{isRefreshingTracking ? 'Refreshing...' : 'Refresh'}</span>
-                </button>
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>Live real-time tracking active</span>
               </div>
 
               <button

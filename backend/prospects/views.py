@@ -1545,7 +1545,7 @@ def parse_client_and_device(ua_string):
     
     # Client detection
     if 'googleimageproxy' in ua:
-        client = 'Gmail Web (Proxy)'
+        client = 'Gmail Web'
     elif 'applewebkit' in ua and ('iphone' in ua or 'ipad' in ua or 'ipod' in ua):
         client = 'Apple Mail (iOS)'
     elif 'macintosh' in ua and 'safari' in ua and 'chrome' not in ua:
@@ -1580,13 +1580,9 @@ def record_email_open_event(email, request, simulated=False):
 
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
     ip = x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR', '127.0.0.1')
-    if simulated:
-        ip = f"{ip} (Simulated)"
 
-    ua = request.META.get('HTTP_USER_AGENT', 'Simulated Browser' if simulated else '')
+    ua = request.META.get('HTTP_USER_AGENT', 'Browser' if simulated else '')
     client, device = parse_client_and_device(ua)
-    if simulated:
-        client = f"{client} (Test Ping)"
 
     history = list(email.open_history or [])
     session_dwell = 15

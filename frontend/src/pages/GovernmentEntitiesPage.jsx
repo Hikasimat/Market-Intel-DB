@@ -59,8 +59,8 @@ const GovernmentEntitiesPage = () => {
   };
 
   return (
-    <div className="space-y-4">
-      <div className="sm:flex sm:items-center sm:justify-between">
+    <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
+      <div className="sm:flex sm:items-center sm:justify-between shrink-0">
         <div>
           <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
             <Building2 className="w-5 h-5 text-indigo-600" />
@@ -96,13 +96,13 @@ const GovernmentEntitiesPage = () => {
         </div>
       </div>
 
-      <div className="bg-white shadow-xs border border-slate-200/80 rounded-2xl overflow-hidden">
+      <div className="bg-white shadow-xs border border-slate-200/80 rounded-2xl overflow-hidden flex-1 flex flex-col min-h-[350px]">
         {loading ? (
           <div className="p-8 text-center text-slate-500 text-xs">Loading...</div>
         ) : entities.length === 0 ? (
           <div className="p-8 text-center text-slate-500 text-xs">No entities found.</div>
         ) : (
-          <table className="min-w-full divide-y divide-slate-100">
+          <table className="min-w-full divide-y divide-slate-100 flex-1">
             <thead className="bg-slate-50/80">
               <tr>
                 <th className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Name</th>
