@@ -52,11 +52,12 @@ const InboxPage = () => {
 
   const outletCtx = useOutletContext();
   const isSidebarCollapsed = outletCtx?.isSidebarCollapsed || false;
-  const toggleSidebar = outletCtx?.toggleSidebar;
+  const toggleSidebar = outletCtx?.toggleSidebar || (() => {});
 
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [categoryTab, setCategoryTab] = useState('primary');
+  const [categoryCounts, setCategoryCounts] = useState({ social: 0, promotions: 0, updates: 0, primary: 0, inbox: 0 });
   const [isMoreFoldersOpen, setIsMoreFoldersOpen] = useState(false);
   const [bodyLoading, setBodyLoading] = useState(false);
   const [emailBody, setEmailBodyState] = useState({ html_body: '', text_body: '', attachments: [] });
@@ -113,9 +114,21 @@ const InboxPage = () => {
     }
   }, []);
 
+  const fetchCategoryCounts = useCallback(async () => {
+    try {
+      const res = await api.get('/auth/mail-account/category-counts/');
+      if (res.data) {
+        setCategoryCounts(res.data);
+      }
+    } catch (err) {
+      // silently ignore
+    }
+  }, []);
+
   useEffect(() => {
     fetchMailAccount();
     fetchGmailStatus();
+    fetchCategoryCounts();
 
     const searchParams = new URLSearchParams(window.location.search);
     if (searchParams.get('gmail_connected')) {
@@ -123,11 +136,12 @@ const InboxPage = () => {
       window.history.replaceState({}, '', window.location.pathname);
       fetchGmailStatus();
       fetchMailAccount();
+      fetchCategoryCounts();
     } else if (searchParams.get('gmail_error')) {
       toast.error(`Gmail connection error: ${decodeURIComponent(searchParams.get('gmail_error'))}`);
       window.history.replaceState({}, '', window.location.pathname);
     }
-  }, [fetchGmailStatus, fetchMailAccount]);
+  }, [fetchGmailStatus, fetchMailAccount, fetchCategoryCounts]);
 
   const handleConnectGmail = async () => {
     setConnectingGmail(true);
@@ -528,7 +542,7 @@ const InboxPage = () => {
   const mailSignature = (list) =>
     (list || []).map(m => `${m.uid || m.id}:${m.is_unread ? 1 : 0}${m.is_starred ? 1 : 0}`).join('|');
 
-  const loadFolder = useCallback(async (folder, bypassCache = false, search = '', silent = false) => {
+  const loadFolder = useCallback(async (folder, bypassCache = false, search = '', silent = false, category = '') => {
     // Never stack background polls on top of an in-flight request
     if (silent && inFlightRef.current) return;
 
@@ -540,9 +554,9 @@ const InboxPage = () => {
       dispatch(setSyncError(null));
     }
 
-    // Step 1: Try IndexedDB cache (only when no active search)
+    // Step 1: Try IndexedDB cache (only when no active search and no category)
     let hasCached = false;
-    if (!bypassCache && !search && userId) {
+    if (!bypassCache && !search && !category && userId) {
       const cached = await getMailboxMessages(userId, mailAccountId, folder);
       if (cached && cached.length > 0 && !isStale()) {
         dispatch(setEmails(cached));
@@ -561,18 +575,23 @@ const InboxPage = () => {
     // Step 2: Background revalidation or explicit fetch from backend (Live SWR)
     try {
       const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
+      const catParam = category ? `&category=${encodeURIComponent(category)}` : '';
       const res = await api.get(
-        `/auth/mail-account/fetch-emails/?folder=${encodeURIComponent(folder)}&limit=25${searchParam}`
+        `/auth/mail-account/fetch-emails/?folder=${encodeURIComponent(folder)}&limit=50${searchParam}${catParam}`
       );
       if (isStale()) return; // a newer request / folder switch superseded this one
 
-      const { messages = [], emails: rawEmails = [], uidvalidity = null, partial = false, error = null } = res.data;
+      const { messages = [], emails: rawEmails = [], uidvalidity = null, partial = false, error = null, category_counts = null } = res.data;
       const finalMessages = messages.length > 0 ? messages : rawEmails;
+
+      if (category_counts) {
+        setCategoryCounts(category_counts);
+      }
 
       // Incomplete or errored responses must never replace a good list
       if (error || (partial && silent && emailsRef.current.length > 0)) return;
 
-      if (userId && !search && !partial) {
+      if (userId && !search && !category && !partial) {
         const highestUid = finalMessages.reduce((max, m) => {
           const uid = parseInt(m.uid, 10);
           return uid > max ? uid : max;
@@ -1010,6 +1029,12 @@ const InboxPage = () => {
     }
   };
 
+  const handleCategorySwitch = (cat) => {
+    setCategoryTab(cat);
+    const categoryParam = cat === 'primary' ? '' : cat;
+    loadFolder(activeFolder, true, searchQuery, false, categoryParam);
+  };
+
   const currentList = isProspectResponsesView ? prospectEmails : emails;
   const isListLoading = isProspectResponsesView ? prospectLoading : loading;
   const displayEmails = currentList.filter(e => {
@@ -1024,15 +1049,14 @@ const InboxPage = () => {
     return true;
   });
 
-  const socialCount = currentList.filter(e => e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`)).length;
-  const promoCount = currentList.filter(e => e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`)).length;
+  const effectiveSocialCount = categoryCounts.social || currentList.filter(e => e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`)).length;
+  const effectivePromoCount = categoryCounts.promotions || currentList.filter(e => e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`)).length;
 
   const categorizedEmails = displayEmails.filter(e => {
     if (activeFolder !== 'INBOX' || isProspectResponsesView || searchQuery) return true;
+    if (categoryTab === 'social' || categoryTab === 'promotions') return true;
     const isSocial = e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`);
     const isPromo = e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`);
-    if (categoryTab === 'social') return isSocial;
-    if (categoryTab === 'promotions') return isPromo;
     return !isSocial && !isPromo;
   });
 
@@ -1043,16 +1067,14 @@ const InboxPage = () => {
       {/* Top Header: Sidebar toggle, Mail title, Search input, Gmail status pill, Bulk Campaign */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-200 bg-white shrink-0 gap-3">
         <div className="flex items-center gap-2">
-          {toggleSidebar && (
-            <button
-              type="button"
-              onClick={toggleSidebar}
-              className="p-2 hover:bg-slate-100 rounded-full transition text-slate-600 cursor-pointer"
-              title={isSidebarCollapsed ? "Expand navigation sidebar" : "Collapse sidebar for full-screen view"}
-            >
-              <Menu className="w-5 h-5" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            className="p-2 hover:bg-slate-100 rounded-xl transition text-slate-700 cursor-pointer flex items-center justify-center border border-slate-200/80 bg-white shadow-2xs"
+            title={isSidebarCollapsed ? "Expand navigation sidebar" : "Collapse sidebar for full-screen view"}
+          >
+            {isSidebarCollapsed ? <PanelLeftOpen className="w-4 h-4 text-slate-700" /> : <Menu className="w-4 h-4 text-slate-700" />}
+          </button>
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
               <Mail className="w-4 h-4" />
@@ -1655,7 +1677,7 @@ const InboxPage = () => {
                   {/* Primary */}
                   <button
                     type="button"
-                    onClick={() => setCategoryTab('primary')}
+                    onClick={() => handleCategorySwitch('primary')}
                     className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[180px] ${
                       categoryTab === 'primary'
                         ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
@@ -1669,7 +1691,7 @@ const InboxPage = () => {
                   {/* Social */}
                   <button
                     type="button"
-                    onClick={() => setCategoryTab('social')}
+                    onClick={() => handleCategorySwitch('social')}
                     className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[200px] ${
                       categoryTab === 'social'
                         ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
@@ -1680,9 +1702,11 @@ const InboxPage = () => {
                     <div className="flex flex-col text-left">
                       <div className="flex items-center gap-2">
                         <span>Social</span>
-                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-600 text-white">
-                          {socialCount > 0 ? `${socialCount} new` : '331 new'}
-                        </span>
+                        {effectiveSocialCount > 0 && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-600 text-white">
+                            {effectiveSocialCount} new
+                          </span>
+                        )}
                       </div>
                       <span className="text-[10px] text-slate-400 font-normal">Facebook, Instagram</span>
                     </div>
@@ -1691,7 +1715,7 @@ const InboxPage = () => {
                   {/* Promotions */}
                   <button
                     type="button"
-                    onClick={() => setCategoryTab('promotions')}
+                    onClick={() => handleCategorySwitch('promotions')}
                     className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[220px] ${
                       categoryTab === 'promotions'
                         ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
@@ -1702,9 +1726,11 @@ const InboxPage = () => {
                     <div className="flex flex-col text-left">
                       <div className="flex items-center gap-2">
                         <span>Promotions</span>
-                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-600 text-white">
-                          {promoCount > 0 ? `${promoCount} new` : '625 new'}
-                        </span>
+                        {effectivePromoCount > 0 && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-600 text-white">
+                            {effectivePromoCount} new
+                          </span>
+                        )}
                       </div>
                       <span className="text-[10px] text-slate-400 font-normal">Glassdoor, Linkedin, Indeed</span>
                     </div>

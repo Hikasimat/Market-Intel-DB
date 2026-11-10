@@ -693,9 +693,17 @@ class GmailMailboxViewSet(viewsets.ViewSet):
         search = request.query_params.get('search', '').strip()
         folder = request.query_params.get('folder', 'INBOX')
         limit = int(request.query_params.get('limit', 20))
+        category = request.query_params.get('category', '').strip()
 
         try:
-            res = GmailOAuthService.fetch_messages(google_creds, folder=folder, limit=limit, search=search, user=request.user)
+            res = GmailOAuthService.fetch_messages(
+                google_creds,
+                folder=folder,
+                limit=limit,
+                search=search,
+                category=category,
+                user=request.user
+            )
             return Response(res, status=status.HTTP_200_OK)
         except Exception as e:
             logging.getLogger(__name__).warning("Gmail fetch_messages error: %s", e)
@@ -1281,16 +1289,35 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             if unseen > 0:
                 unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=5)
                 messages = [m for m in unread_res.get('messages', []) if m.get('is_unread')]
+            cat_counts = {}
+            try:
+                cat_counts = GmailOAuthService.get_category_counts(google_creds)
+            except Exception:
+                pass
             return Response({
                 'uidvalidity': 1,
                 'uidvalidity_changed': False,
                 'unseen_count': unseen,
                 'highest_uid': 0,
                 'new_messages': messages,
+                'category_counts': cat_counts,
             }, status=status.HTTP_200_OK)
         except Exception as e:
             logging.getLogger(__name__).warning("Error in check_new_mail: %s", e)
             return Response(empty, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='category-counts')
+    def category_counts(self, request):
+        """Returns accurate unread message counts for categories: social, promotions, updates, primary, inbox."""
+        google_creds = get_mail_credentials(request.user)
+        if not google_creds:
+            return Response({'social': 0, 'promotions': 0, 'updates': 0, 'primary': 0, 'inbox': 0})
+        try:
+            counts = GmailOAuthService.get_category_counts(google_creds)
+            return Response(counts)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to fetch category counts: %s", e)
+            return Response({'social': 0, 'promotions': 0, 'updates': 0, 'primary': 0, 'inbox': 0})
 
     # Legacy endpoint kept for backward compatibility with old fetch_emails URL
     @action(detail=False, methods=['get'], url_path='fetch_emails')

@@ -484,11 +484,51 @@ class GmailOAuthService:
             return 0
 
     @classmethod
-    def fetch_messages(cls, credentials, folder='INBOX', limit=20, search='', user=None, matcher=None):
+    def get_category_counts(cls, credentials):
+        """
+        Retrieves accurate unread counts for Gmail categories:
+        - CATEGORY_SOCIAL
+        - CATEGORY_PROMOTIONS
+        - CATEGORY_UPDATES
+        - CATEGORY_PERSONAL
+        - INBOX
+        """
+        token = cls.get_valid_access_token(credentials)
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json',
+        }
+        counts = {
+            'social': 0,
+            'promotions': 0,
+            'updates': 0,
+            'primary': 0,
+            'inbox': 0,
+        }
+        labels_to_check = [
+            ('CATEGORY_SOCIAL', 'social'),
+            ('CATEGORY_PROMOTIONS', 'promotions'),
+            ('CATEGORY_UPDATES', 'updates'),
+            ('CATEGORY_PERSONAL', 'primary'),
+            ('INBOX', 'inbox'),
+        ]
+        for label_id, key in labels_to_check:
+            try:
+                url = f"https://gmail.googleapis.com/gmail/v1/users/me/labels/{label_id}"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    counts[key] = int(data.get('messagesUnread', 0))
+            except Exception as e:
+                logger.debug("Failed to fetch label %s count: %s", label_id, e)
+        return counts
+
+    @classmethod
+    def fetch_messages(cls, credentials, folder='INBOX', limit=20, search='', category='', user=None, matcher=None):
         """
         Fetches messages from Gmail via Gmail REST API.
         Maps folders to Gmail query filters (in:inbox, is:starred, in:sent, in:draft, in:spam, in:trash).
-        Supports server-side search query syntax.
+        Supports server-side search query syntax and category filters (category:social, category:promotions, etc).
         Returns list of message metadata matching application's inbox format.
         """
         token = cls.get_valid_access_token(credentials)
@@ -511,6 +551,10 @@ class GmailOAuthService:
         query_parts = []
         if folder_query:
             query_parts.append(folder_query)
+        if category and category.strip():
+            cat_clean = category.strip().lower()
+            if cat_clean in ('social', 'promotions', 'updates', 'primary', 'forums'):
+                query_parts.append(f"category:{cat_clean}")
         if search and search.strip():
             query_parts.append(search.strip())
         final_query = ' '.join(query_parts)
@@ -678,7 +722,12 @@ class GmailOAuthService:
                 'tracking': tracking_info,
             })
 
-        return {'messages': emails_list, 'emails': emails_list, 'uidvalidity': 1, 'partial': partial}
+        result = {'messages': emails_list, 'emails': emails_list, 'uidvalidity': 1, 'partial': partial}
+        try:
+            result['category_counts'] = cls.get_category_counts(credentials)
+        except Exception:
+            pass
+        return result
 
     @classmethod
     def fetch_message_body(cls, credentials, msg_id):
