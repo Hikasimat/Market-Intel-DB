@@ -1444,9 +1444,11 @@ def _handle_incoming_message(
         _data.get("chatId"),
         (_data.get("chat") or {}).get("id"),
     ):
-        if candidate and str(candidate).endswith("@g.us"):
-            group_chat_id = str(candidate).strip()
-            break
+        if candidate and "@g.us" in str(candidate):
+            cand_norm = re.sub(r":[0-9]+@", "@", str(candidate).strip())
+            if cand_norm.endswith("@g.us"):
+                group_chat_id = cand_norm
+                break
 
     # If payload contains participant or author, it is definitively a group message
     if not group_chat_id:
@@ -1464,8 +1466,10 @@ def _handle_incoming_message(
                 event_data.get("from"),
             ):
                 if candidate and "@g.us" in str(candidate):
-                    group_chat_id = str(candidate).strip()
-                    break
+                    cand_norm = re.sub(r":[0-9]+@", "@", str(candidate).strip())
+                    if cand_norm.endswith("@g.us"):
+                        group_chat_id = cand_norm
+                        break
 
     if group_chat_id:
         target_chat_id = group_chat_id
@@ -1604,13 +1608,20 @@ def _handle_incoming_message(
 
     # Resolve active session object
     session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
-    if not session_obj and session_name == "default":
-        session_obj = WhatsAppSession.objects.filter(status=WhatsAppSession.Status.READY, is_active=True).first()
-    if not session_obj:
+    ready_session = WhatsAppSession.objects.filter(
+        status=WhatsAppSession.Status.READY,
+        is_active=True
+    ).order_by("-updated_at").first()
+
+    if ready_session:
+        if not session_obj or session_name == "default" or session_obj.status != WhatsAppSession.Status.READY or not session_obj.owner:
+            session_obj = ready_session
+    elif not session_obj:
         session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-    if session_obj.owner is None and session_name.startswith("user_"):
+
+    if session_obj.owner is None and session_obj.session_name.startswith("user_"):
         try:
-            u_id = int(session_name.split("_")[1])
+            u_id = int(session_obj.session_name.split("_")[1])
             from django.contrib.auth import get_user_model
             User = get_user_model()
             u = User.objects.filter(id=u_id).first()
@@ -1620,19 +1631,34 @@ def _handle_incoming_message(
         except Exception:
             pass
 
-    # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
-    conversation = WhatsAppConversation.objects.filter(
-        chat_id__in=candidate_ids,
-        session=session_obj,
-        is_deleted=False,
-    ).first()
+    # For group messages, search for existing group conversation across sessions
+    conversation = None
+    if is_group:
+        conversation = WhatsAppConversation.objects.filter(
+            chat_id=target_chat_id,
+            is_deleted=False,
+        ).order_by("-last_message_at", "-updated_at").first()
 
-    if not conversation and session_obj.owner:
+        if conversation and session_obj and conversation.session != session_obj:
+            conversation.session = session_obj
+            if session_obj.phone_number and not conversation.account_phone:
+                conversation.account_phone = session_obj.phone_number
+            conversation.save(update_fields=["session", "account_phone"])
+
+    if not conversation:
+        # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
         conversation = WhatsAppConversation.objects.filter(
             chat_id__in=candidate_ids,
-            session__owner=session_obj.owner,
+            session=session_obj,
             is_deleted=False,
         ).first()
+
+        if not conversation and session_obj.owner:
+            conversation = WhatsAppConversation.objects.filter(
+                chat_id__in=candidate_ids,
+                session__owner=session_obj.owner,
+                is_deleted=False,
+            ).first()
 
     # If not found by chat_id and not a group, match by phone digits within this session
     if not conversation and not is_group and phone_digits and len(phone_digits) >= 8:
@@ -2280,10 +2306,10 @@ def sync_recent_waha_messages(
     synced = 0
     for _msg_dt, item in candidates:
         item_sess = str(item.get("session") or "").strip()
-        if default_session_name and item_sess and item_sess != default_session_name:
+        if default_session_name and item_sess and item_sess != "default" and item_sess != default_session_name:
             # Skip messages belonging to a different user session
             continue
-        sess = item_sess or default_session_name or "default"
+        sess = default_session_name if (item_sess in ("", "default")) else item_sess
         try:
             created = _handle_incoming_message(item, sess, event_record=None, is_history_sync=True)
             if created:
@@ -2317,7 +2343,7 @@ def sync_two_day_whatsapp_history(
         if not isinstance(m, dict):
             return
         m_sess = str(m.get("session") or "").strip()
-        if m_sess and session_name and m_sess != session_name:
+        if m_sess and m_sess != "default" and session_name and m_sess != session_name:
             # Strictly ignore messages from other user sessions
             return
         msg_copy = dict(m)

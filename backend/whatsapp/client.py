@@ -688,7 +688,14 @@ class WAHAClient:
         limit: int = 100,
     ) -> list:
         """Get messages for a specific chat across WAHA endpoints or memory buffer."""
-        for path in (f"/api/{session_name}/chats/{chat_id}/messages", f"/api/chats/{chat_id}/messages"):
+        endpoints = [
+            f"/api/{session_name}/chats/{chat_id}/messages",
+            f"/api/chats/{chat_id}/messages",
+        ]
+        if session_name != "default":
+            endpoints.append(f"/api/default/chats/{chat_id}/messages")
+
+        for path in endpoints:
             try:
                 _status, body = self._request(
                     "GET",

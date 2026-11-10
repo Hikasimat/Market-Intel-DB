@@ -769,6 +769,7 @@ export default function WhatsappPage() {
       callMediaRef.current.micStream = stream;
       callMediaRef.current.remoteQueueEndAt = 0;
       callMediaRef.current.remotePlaybackEndAt = 0;
+      callMediaRef.current.remoteAudioRms = 0;
       callMediaRef.current.localSpeechActiveUntil = 0;
       callMediaRef.current.lastLocalSpokeAt = 0;
       callMediaRef.current.postSpeechCooldownUntil = 0;
@@ -798,22 +799,9 @@ export default function WhatsappPage() {
 
       await ctx.resume();
 
-      // Playback incoming audio through MediaStreamDestination and HTMLAudioElement
-      // In Chromium, playing through an HTMLAudioElement registers the audio stream as the
-      // AEC reference signal with WebRTC AudioProcessingModule (AEC3), eliminating mic echo.
+      // Playback incoming audio directly through WebAudio destination for low-latency output without HTMLAudioElement delay jitter
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
-      const streamDest = ctx.createMediaStreamDestination();
-      playbackNode.connect(streamDest);
-
-      const remoteAudio = new Audio();
-      remoteAudio.srcObject = streamDest.stream;
-      remoteAudio.autoplay = true;
-      remoteAudio.playsInline = true;
-      remoteAudio.volume = 1.0;
-      remoteAudio.play().catch(() => {
-        try { playbackNode.connect(ctx.destination); } catch (_) {}
-      });
-      callMediaRef.current.remoteAudioEl = remoteAudio;
+      playbackNode.connect(ctx.destination);
       playbackNode.port.onmessage = () => {};
 
       const sendRawPcm = (pcmBytes) => {
@@ -836,6 +824,18 @@ export default function WhatsappPage() {
         }
         const floats = int16LEToFloat32(buf);
         if (!floats || !floats.length) return;
+
+        // Track incoming remote audio RMS energy
+        let sumSquares = 0;
+        for (let i = 0; i < floats.length; i++) {
+          sumSquares += floats[i] * floats[i];
+        }
+        const incomingRms = Math.sqrt(sumSquares / floats.length);
+        callMediaRef.current.remoteAudioRms = Math.max(
+          callMediaRef.current.remoteAudioRms || 0,
+          incomingRms
+        );
+
         const durationMs = (floats.length / 16000) * 1000;
         callMediaRef.current.remotePlaybackEndAt = Math.max(
           callMediaRef.current.remotePlaybackEndAt || 0,
@@ -859,29 +859,38 @@ export default function WhatsappPage() {
 
         const now = performance.now();
         const isRemotePlaying = now < (callMediaRef.current.remotePlaybackEndAt || 0);
+        const remoteRms = callMediaRef.current.remoteAudioRms || 0;
+        // Smoothly decay tracked remote audio RMS energy
+        callMediaRef.current.remoteAudioRms = remoteRms * 0.92;
 
         // Calculate RMS of microphone input
         let sumSquares = 0;
         for (let i = 0; i < samples.length; i++) {
           sumSquares += samples[i] * samples[i];
         }
-        const rms = Math.sqrt(sumSquares / samples.length);
+        const micRms = Math.sqrt(sumSquares / samples.length);
 
-        // Double-talk detection: if local user is actively speaking (RMS > 0.045), permit local speech
-        if (rms > 0.045) {
-          callMediaRef.current.localSpeechActiveUntil = now + 280;
+        // Acoustic Echo Suppression (AES):
+        // When remote audio is playing from speakers (remoteRms > 0.006 and isRemotePlaying):
+        // The laptop microphone picks up speaker sound in the room as acoustic bleed.
+        // Suppress this bleed (send silence) unless local user is actively speaking with higher energy
+        // (double-talk: micRms > remoteRms * 1.6 and micRms > 0.08).
+        // This eliminates the feedback loop where the remote caller's words repeat multiple times.
+        if (isRemotePlaying && remoteRms > 0.006) {
+          const isDoubleTalk = (micRms > remoteRms * 1.6) && (micRms > 0.08);
+          if (!isDoubleTalk) {
+            sendRawPcm(new Int16Array(samples.length).buffer);
+            return;
+          }
         }
-        const isLocalSpeaking = now < (callMediaRef.current.localSpeechActiveUntil || 0);
 
-        // Acoustic Echo Suppression (AES): When remote audio is playing from speakers and
-        // the local user is not actively talking, suppress speaker bleed so caller doesn't hear echo.
-        if (isRemotePlaying && !isLocalSpeaking) {
-          const silenceBytes = new Int16Array(samples.length).buffer;
-          sendRawPcm(silenceBytes);
+        // Noise gate: if mic input is below room ambient background threshold (fan/AC noise < 0.008), send silence
+        if (micRms < 0.008) {
+          sendRawPcm(new Int16Array(samples.length).buffer);
           return;
         }
 
-        // Transmit microphone audio directly so the other person hears clearly
+        // Transmit clear microphone audio directly to caller
         sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);

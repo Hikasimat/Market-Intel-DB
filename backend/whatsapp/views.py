@@ -1101,6 +1101,15 @@ class WhatsAppConversationsView(APIView):
                 except Exception as e:
                     logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
+        # Adopt any orphaned group conversations into the active user session
+        if user_session:
+            WhatsAppConversation.objects.filter(
+                chat_id__endswith="@g.us",
+                is_deleted=False
+            ).filter(
+                Q(session__isnull=True) | Q(session__session_name="default")
+            ).update(session=user_session, account_phone=user_session.phone_number or None)
+
         # Strictly scoped to current user's session and account phone number
         clean_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
         qs = qs.filter(session=user_session)
@@ -1286,16 +1295,26 @@ class WhatsAppConversationMessagesView(APIView):
 
         limit = min(int(request.query_params.get("limit", 2000)), 5000)
 
-        if conv.session:
-            base_qs = WhatsAppMessage.objects.filter(
-                Q(conversation=conv) | Q(conversation__session=conv.session, conversation__chat_id=conv.chat_id),
-                is_deleted=False,
-            )
-        else:
-            base_qs = WhatsAppMessage.objects.filter(
-                conversation=conv,
-                is_deleted=False,
-            )
+        base_qs = WhatsAppMessage.objects.filter(
+            Q(conversation=conv) | Q(conversation__chat_id=conv.chat_id),
+            is_deleted=False,
+        )
+
+        # If opening a group conversation with 0 messages, trigger an opportunistic quick history sync from WAHA
+        if conv.chat_id.endswith("@g.us") and not base_qs.exists() and conv.session and conv.session.session_name:
+            try:
+                from .webhooks import sync_two_day_whatsapp_history
+                sync_two_day_whatsapp_history(
+                    session_name=conv.session.session_name,
+                    chat_id=conv.chat_id,
+                    days=7,
+                )
+                base_qs = WhatsAppMessage.objects.filter(
+                    Q(conversation=conv) | Q(conversation__chat_id=conv.chat_id),
+                    is_deleted=False,
+                )
+            except Exception:
+                pass
 
         messages = base_qs.annotate(
             effective_ts=Coalesce("waha_timestamp", "sent_at", "created_at")
