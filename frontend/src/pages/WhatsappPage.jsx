@@ -770,6 +770,8 @@ export default function WhatsappPage() {
       callMediaRef.current.remoteQueueEndAt = 0;
       callMediaRef.current.remotePlaybackEndAt = 0;
       callMediaRef.current.remoteAudioRms = 0;
+      callMediaRef.current.echoHangoverUntil = 0;
+      callMediaRef.current.playbackAvailableSamples = 0;
       callMediaRef.current.localSpeechActiveUntil = 0;
       callMediaRef.current.lastLocalSpokeAt = 0;
       callMediaRef.current.postSpeechCooldownUntil = 0;
@@ -802,7 +804,11 @@ export default function WhatsappPage() {
       // Playback incoming audio directly through WebAudio destination for low-latency output without HTMLAudioElement delay jitter
       const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
       playbackNode.connect(ctx.destination);
-      playbackNode.port.onmessage = () => {};
+      playbackNode.port.onmessage = (e) => {
+        if (e.data && e.data.type === 'status') {
+          callMediaRef.current.playbackAvailableSamples = e.data.available || 0;
+        }
+      };
 
       const sendRawPcm = (pcmBytes) => {
         const ws = callMediaRef.current.audioWs;
@@ -825,22 +831,27 @@ export default function WhatsappPage() {
         const floats = int16LEToFloat32(buf);
         if (!floats || !floats.length) return;
 
-        // Track incoming remote audio RMS energy
+        // Track incoming audio energy (RMS)
         let sumSquares = 0;
         for (let i = 0; i < floats.length; i++) {
           sumSquares += floats[i] * floats[i];
         }
         const incomingRms = Math.sqrt(sumSquares / floats.length);
-        callMediaRef.current.remoteAudioRms = Math.max(
-          callMediaRef.current.remoteAudioRms || 0,
-          incomingRms
-        );
 
         const durationMs = (floats.length / 16000) * 1000;
+        const now = performance.now();
         callMediaRef.current.remotePlaybackEndAt = Math.max(
           callMediaRef.current.remotePlaybackEndAt || 0,
-          performance.now() + durationMs + 200
+          now + durationMs
         );
+        // If incoming chunk has audible voice, hold echo suppression gate through playback + 380ms room reverb tail
+        if (incomingRms > 0.005) {
+          callMediaRef.current.echoHangoverUntil = Math.max(
+            callMediaRef.current.echoHangoverUntil || 0,
+            now + durationMs + 380
+          );
+        }
+
         playbackNode.port.postMessage(floats);
       };
 
@@ -858,10 +869,9 @@ export default function WhatsappPage() {
         }
 
         const now = performance.now();
-        const isRemotePlaying = now < (callMediaRef.current.remotePlaybackEndAt || 0);
-        const remoteRms = callMediaRef.current.remoteAudioRms || 0;
-        // Smoothly decay tracked remote audio RMS energy
-        callMediaRef.current.remoteAudioRms = remoteRms * 0.92;
+        const hasWorkletSamples = (callMediaRef.current.playbackAvailableSamples || 0) > 64;
+        const isRemotePlaying = hasWorkletSamples || (now < (callMediaRef.current.remotePlaybackEndAt || 0));
+        const inEchoHangover = now < (callMediaRef.current.echoHangoverUntil || 0);
 
         // Calculate RMS of microphone input
         let sumSquares = 0;
@@ -871,21 +881,21 @@ export default function WhatsappPage() {
         const micRms = Math.sqrt(sumSquares / samples.length);
 
         // Acoustic Echo Suppression (AES):
-        // When remote audio is playing from speakers (remoteRms > 0.006 and isRemotePlaying):
-        // The laptop microphone picks up speaker sound in the room as acoustic bleed.
-        // Suppress this bleed (send silence) unless local user is actively speaking with higher energy
-        // (double-talk: micRms > remoteRms * 1.6 and micRms > 0.08).
-        // This eliminates the feedback loop where the remote caller's words repeat multiple times.
-        if (isRemotePlaying && remoteRms > 0.006) {
-          const isDoubleTalk = (micRms > remoteRms * 1.6) && (micRms > 0.08);
-          if (!isDoubleTalk) {
+        // While the remote party's speech is coming out of the speakers (or decaying during room reverb tail),
+        // the laptop microphone picks up acoustic speaker bleed.
+        // Send silence so the remote caller never hears their own voice echoed or repeated.
+        // If the local user is intentionally speaking loudly over the remote caller (micRms > 0.14),
+        // permit double-talk transmission.
+        if (isRemotePlaying || inEchoHangover) {
+          const isIntentionalDoubleTalk = micRms > 0.14;
+          if (!isIntentionalDoubleTalk) {
             sendRawPcm(new Int16Array(samples.length).buffer);
             return;
           }
         }
 
-        // Noise gate: if mic input is below room ambient background threshold (fan/AC noise < 0.008), send silence
-        if (micRms < 0.008) {
+        // Noise gate: if mic input is ambient room noise (fan, AC noise < 0.012), send silence
+        if (micRms < 0.012) {
           sendRawPcm(new Int16Array(samples.length).buffer);
           return;
         }

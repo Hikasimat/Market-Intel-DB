@@ -173,7 +173,8 @@ class WAHAClient:
             # Log without exposing the API key (silence benign probes that 404 on noweb-light).
             is_benign_404 = exc.code == 404 and (
                 path == "/api/chats"
-                or path.startswith(("/api/chats/", "/api/groups/"))
+                or path.startswith(("/api/chats/", "/api/groups/", "/api/contacts", "/api/"))
+                or "/contacts" in path
                 or path in ("/api/groups",)
             )
             is_rate_overlimit = exc.code == 500 and isinstance(detail, dict) and detail.get("message") == "rate-overlimit"
@@ -687,13 +688,13 @@ class WAHAClient:
         chat_id: str,
         limit: int = 100,
     ) -> list:
-        """Get messages for a specific chat across WAHA endpoints or memory buffer."""
+        """Get messages for a specific chat across WAHA endpoints for the logged-in session only."""
+        if not session_name or session_name == "default":
+            return []
         endpoints = [
             f"/api/{session_name}/chats/{chat_id}/messages",
             f"/api/chats/{chat_id}/messages",
         ]
-        if session_name != "default":
-            endpoints.append(f"/api/default/chats/{chat_id}/messages")
 
         for path in endpoints:
             try:
@@ -806,14 +807,34 @@ class WAHAClient:
             return body if isinstance(body, dict) else {}
 
     def get_contact_info(self, session_name: str, contact_id: str) -> dict:
-        """Get contact details (including phone number resolution for @lid) from WAHA."""
-        for path in (f"/api/{session_name}/contacts/{contact_id}", f"/api/contacts/{contact_id}"):
-            try:
-                _status, body = self._request("GET", path, query={"session": session_name}, timeout=4.0)
-                if isinstance(body, dict) and body:
-                    return body
-            except Exception:
-                continue
+        """Get contact details from WAHA for the logged-in session only."""
+        if not session_name or session_name == "default":
+            return {}
+        if not contact_id or str(contact_id).endswith("@lid"):
+            return {}
+
+        from django.core.cache import cache
+        cache_key = f"waha_contact_info_{session_name}_{contact_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached if isinstance(cached, dict) else {}
+
+        # Query WAHA with logged-in session only
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/{session_name}/contacts",
+                query={"contactId": contact_id},
+                timeout=3.0,
+            )
+            if isinstance(body, dict) and body:
+                cache.set(cache_key, body, 3600)
+                return body
+        except Exception:
+            pass
+
+        # Cache negative result for 15 minutes to avoid hammering WAHA with 404s
+        cache.set(cache_key, {}, 900)
         return {}
 
     def add_group_participants(self, session_name: str, group_id: str, participants: list) -> dict:
