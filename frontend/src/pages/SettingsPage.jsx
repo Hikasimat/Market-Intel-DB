@@ -29,7 +29,13 @@ const SettingsPage = () => {
 
       {editing ? (
         editing.kind === 'email' ? (
-          <EmailTemplateEditor key={editing.id || 'new'} id={editing.id} onClose={close} onSaved={close} />
+          <EmailTemplateEditor
+            key={`${editing.id || 'new'}_${editing.isHtml ? 'html' : 'plain'}`}
+            id={editing.id}
+            isHtml={editing.isHtml}
+            onClose={close}
+            onSaved={close}
+          />
         ) : (
           <SignatureTemplateEditor
             key={`${editing.id || 'new'}_${editing.isCustom ? 'custom' : 'standard'}`}
@@ -56,7 +62,12 @@ const SettingsPage = () => {
           {tab === 'mailbox' ? (
             <MailboxSettings />
           ) : tab === 'email' ? (
-            <EmailTemplateList refreshKey={refreshKey} onCreate={() => setEditing({ kind: 'email', id: null })} onEdit={(id) => setEditing({ kind: 'email', id })} />
+            <EmailTemplateList
+              refreshKey={refreshKey}
+              onCreate={() => setEditing({ kind: 'email', id: null, isHtml: false })}
+              onCreateHtml={() => setEditing({ kind: 'email', id: null, isHtml: true })}
+              onEdit={(id, isHtml) => setEditing({ kind: 'email', id, isHtml })}
+            />
           ) : (
             <SignatureTemplateList
               refreshKey={refreshKey}
