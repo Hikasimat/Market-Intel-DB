@@ -1,4 +1,5 @@
 """Optional Google Calendar connection endpoints (separate from Gmail/login)."""
+import uuid
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -10,6 +11,9 @@ from .calendar_services import (
     GoogleCalendarOAuthService,
     get_calendar_credentials,
     list_events,
+    delete_event,
+    _api_request,
+    extract_conference,
 )
 from .models import GoogleCalendarCredentials
 from .oauth_services import GoogleOAuthService
@@ -131,4 +135,99 @@ class CalendarEventsView(_CalendarBase):
                 "events": [],
                 "error": str(exc),
             }, status=status.HTTP_502_BAD_GATEWAY)
+
+    def post(self, request):
+        """Create a calendar event (with optional Google Meet conference)."""
+        creds = get_calendar_credentials(request.user)
+        summary = request.data.get('summary') or 'New Event'
+        description = request.data.get('description', '')
+        start = request.data.get('start')
+        end = request.data.get('end')
+        meet_url = request.data.get('meet_url')
+        attendees = request.data.get('attendees') or []
+        color_id = request.data.get('color_id')
+
+        if not start or not end:
+            return Response({'error': 'start and end times are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if creds:
+            try:
+                body = {
+                    'summary': summary,
+                    'description': description,
+                    'start': {'dateTime': start} if 'T' in str(start) else {'date': start},
+                    'end': {'dateTime': end} if 'T' in str(end) else {'date': end},
+                }
+                if color_id:
+                    body['colorId'] = str(color_id)
+                if attendees:
+                    clean_att = []
+                    for a in attendees:
+                        if isinstance(a, str) and a.strip():
+                            clean_att.append({'email': a.strip()})
+                        elif isinstance(a, dict) and a.get('email'):
+                            clean_att.append(a)
+                    if clean_att:
+                        body['attendees'] = clean_att
+
+                params = {'sendUpdates': 'all' if attendees else 'none'}
+                if meet_url and 'meet.google.com' in meet_url:
+                    body['conferenceData'] = {
+                        'createRequest': {
+                            'requestId': uuid.uuid4().hex,
+                            'conferenceSolutionKey': {'type': 'hangoutsMeet'},
+                        }
+                    }
+                    params['conferenceDataVersion'] = 1
+
+                created = _api_request(creds, 'POST', '/calendars/primary/events', body=body, params=params)
+                status_meet, extracted_url = extract_conference(created)
+                return Response({
+                    'success': True,
+                    'event': {
+                        'id': created.get('id'),
+                        'summary': created.get('summary'),
+                        'description': created.get('description'),
+                        'start': created.get('start', {}).get('dateTime') or created.get('start', {}).get('date'),
+                        'end': created.get('end', {}).get('dateTime') or created.get('end', {}).get('date'),
+                        'meet_url': extracted_url or meet_url,
+                        'html_link': created.get('htmlLink'),
+                        'attendees': created.get('attendees', []),
+                        'color_id': color_id,
+                    }
+                }, status=status.HTTP_201_CREATED)
+            except Exception as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fallback for disconnected / local mock
+        evt_id = f"evt_{uuid.uuid4().hex[:10]}"
+        return Response({
+            'success': True,
+            'event': {
+                'id': evt_id,
+                'summary': summary,
+                'description': description,
+                'start': start,
+                'end': end,
+                'meet_url': meet_url or f"https://meet.google.com/{uuid.uuid4().hex[:3]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:3]}",
+                'html_link': 'https://calendar.google.com',
+                'attendees': [{'email': a} if isinstance(a, str) else a for a in attendees],
+                'color_id': color_id,
+            }
+        }, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        """Delete an event by event_id."""
+        event_id = request.query_params.get('event_id') or request.data.get('event_id')
+        if not event_id:
+            return Response({'error': 'event_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        creds = get_calendar_credentials(request.user)
+        if creds and not event_id.startswith('evt_') and not event_id.startswith('mock_') and not event_id.startswith('sample_'):
+            try:
+                delete_event(creds, event_id)
+            except Exception as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({'success': True, 'deleted': event_id}, status=status.HTTP_200_OK)
 
