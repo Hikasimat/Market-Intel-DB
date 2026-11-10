@@ -193,6 +193,30 @@ jobs:
           REMOTE_SCRIPT="$(cat <<EOF
           set -eu
 
+          echo "=== [1/8] Pre-Deployment Host Disk Space ==="
+          df -h /
+
+          echo "=== [2/8] Performing Host & Docker Disk Space Reclamation ==="
+          # Stop and prune all unreferenced containers, dangling and unused images, build caches, and volumes
+          docker container prune -f || true
+          docker image prune -af || true
+          docker builder prune -af || true
+          docker volume prune -f || true
+
+          # Prune containerd images if crictl is installed
+          if command -v crictl >/dev/null 2>&1; then
+            crictl rmi --prune 2>/dev/null || true
+          fi
+
+          # Clean old systemd journal logs (>50M or older than 1 day) and apt cache
+          journalctl --vacuum-size=50M 2>/dev/null || true
+          journalctl --vacuum-time=1d 2>/dev/null || true
+          apt-get clean 2>/dev/null || true
+          find /tmp -mindepth 1 -maxdepth 2 -mtime +1 -delete 2>/dev/null || true
+
+          echo "=== [3/8] Host Disk Space After Cleanup ==="
+          df -h /
+
           mkdir -p /opt/marketintel/staticfiles
           chmod 755 /opt/marketintel
 
@@ -203,14 +227,17 @@ jobs:
           chmod 600 /opt/marketintel/.env
           chown 10001:10001 /opt/marketintel/staticfiles
 
+          echo "=== [4/8] Pulling Deployment Image ==="
           docker pull "${IMAGE_URI}"
 
+          echo "=== [5/8] Running Deploy Checks & Migrations ==="
           docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py check --deploy
 
           docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py migrate --noinput
 
           docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py collectstatic --noinput
 
+          echo "=== [6/8] Restarting Production API Container ==="
           docker rm -f marketintel-api 2>/dev/null || true
 
           docker run -d --name marketintel-api --restart unless-stopped --add-host=host.docker.internal:host-gateway --env-file /opt/marketintel/.env -p 127.0.0.1:8000:8000 -v /opt/marketintel/staticfiles:/app/staticfiles --init --stop-timeout 30 --security-opt no-new-privileges:true --log-opt max-size=10m --log-opt max-file=3 "${IMAGE_URI}"
@@ -221,6 +248,11 @@ jobs:
 
           docker exec marketintel-api python manage.py check
 
+          echo "=== [7/8] Post-Deployment Cleanup ==="
+          # Prune previous version's image that is now orphaned
+          docker image prune -af || true
+
+          echo "=== [8/8] Verification & Health Check ==="
           echo "=== Production Containers ==="
           docker ps -a
 
@@ -229,6 +261,9 @@ jobs:
 
           echo "=== Local API Health ==="
           curl -s -m 3 http://127.0.0.1:8000/health || true
+
+          echo "=== Final Disk Space ==="
+          df -h /
           EOF
           )"
 
