@@ -105,20 +105,20 @@ const Layout = () => {
     primaryNavItems.push(
       { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
-      { path: '/prospects', label: 'Prospects', icon: Users },
+      { 
+        path: '/prospects', 
+        label: 'Prospects', 
+        icon: Users,
+        subItems: [
+          { path: '/prospects', label: 'Prospect Directory', exact: true },
+          { path: '/prospects?tab=pipeline', label: 'LQ Pipeline', exact: true },
+          { path: '/prospects?tab=pipeline&filter=pending', label: 'Verification Pending', exact: true },
+          { path: '/prospects?tab=pipeline&filter=verified', label: 'Outreached', exact: true },
+        ]
+      },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
       { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
       { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
-      { 
-        path: '/lq-pipeline', 
-        label: 'LQ Pipeline', 
-        icon: Activity,
-        subItems: [
-          { path: '/lq-pipeline', label: 'All Prospects', exact: true },
-          { path: '/lq-pipeline/pending', label: 'Verification Pending', exact: true },
-          { path: '/lq-pipeline/verified', label: 'Outreached', exact: true },
-        ]
-      },
       { path: '/government-entities', label: 'Government Entities', icon: Building2 },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
@@ -128,11 +128,18 @@ const Layout = () => {
     primaryNavItems.push(
       { path: '/manager-dashboard', label: 'Manager Dashboard', icon: Shield },
       { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
-      { path: '/prospects', label: 'Prospects', icon: Users },
+      { 
+        path: '/prospects', 
+        label: 'Prospects', 
+        icon: Users,
+        subItems: [
+          { path: '/prospects', label: 'Prospect Directory', exact: true },
+          { path: '/prospects?tab=pipeline', label: 'LQ Pipeline', exact: true },
+        ]
+      },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
       { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
       { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
-      { path: '/lq-pipeline', label: 'LQ Pipeline', icon: Activity },
       { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
@@ -162,7 +169,7 @@ const Layout = () => {
     : primaryNavItems;
 
   const appItems = [
-    { label: 'LQ Pipeline', path: '/lq-pipeline', icon: Activity },
+    { label: 'Prospects', path: '/prospects', icon: Users },
     { label: 'Email', path: '/inbox', icon: Mail },
     { label: 'WhatsApp', path: '/whatsapp', icon: MessageCircle },
   ];
@@ -251,9 +258,10 @@ const Layout = () => {
                     {item.subItems && isActive && (
                       <div className="pl-7 pr-2 py-1 space-y-1">
                         {item.subItems.map((sub) => {
+                          const currentFullPath = location.pathname + (location.search || '');
                           const isSubActive = sub.exact
-                            ? location.pathname === sub.path
-                            : location.pathname.startsWith(sub.path);
+                            ? (currentFullPath === sub.path || (!location.search && sub.path === location.pathname))
+                            : currentFullPath.startsWith(sub.path);
                           return (
                             <Link
                               key={sub.path}
@@ -435,7 +443,7 @@ const Layout = () => {
               {/* Apps icon in rail */}
               <div className="group relative flex items-center justify-center">
                 <Link
-                  to="/lq-pipeline"
+                  to="/prospects"
                   className="p-2.5 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100/80 transition"
                 >
                   <Layers className="w-4 h-4 shrink-0" />

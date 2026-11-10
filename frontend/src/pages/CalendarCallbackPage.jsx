@@ -17,7 +17,7 @@ const CalendarCallbackPage = () => {
     const code = searchParams.get('code');
     const state = searchParams.get('state');
 
-    const returnUrl = localStorage.getItem('calendar_oauth_return_url') || '/lq-pipeline';
+    const returnUrl = localStorage.getItem('calendar_oauth_return_url') || '/prospects?tab=pipeline';
 
     if (error) {
       toast.error(`Google Calendar authorization was cancelled or denied: ${error}`);

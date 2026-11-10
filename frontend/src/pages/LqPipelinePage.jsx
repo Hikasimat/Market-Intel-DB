@@ -18,10 +18,21 @@ import LqWorkspaceModal from '../components/lq/LqWorkspaceModal';
 import Pagination from '../components/layout/Pagination';
 import api from '../services/api';
 
-const LqPipelinePage = ({ filter = 'all' }) => {
+const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const activeFilter = searchParams.get('filter') || filter || 'all';
+
+  const handleFilterChange = (newFilter) => {
+    const nextParams = new URLSearchParams(searchParams);
+    if (newFilter === 'all') {
+      nextParams.delete('filter');
+    } else {
+      nextParams.set('filter', newFilter);
+    }
+    setSearchParams(nextParams);
+  };
   const { items, loading, page, count } = useSelector((state) => state.lqPipeline);
   const { user } = useSelector((state) => state.auth);
   const isManager = user?.role === 'MANAGER';
@@ -169,9 +180,9 @@ const LqPipelinePage = ({ filter = 'all' }) => {
 
   const filteredItems = items.filter(item => {
     // Submenu filter logic
-    if (filter === 'pending' && (item.verification_status !== 'Unverified' && item.verification_status !== 'In Progress')) return false;
-    if (filter === 'verified' && item.verification_status !== 'Verified') return false;
-    if (filter === 'issued' && item.pre_task_status !== 'ISSUE_SENT_TO_PRE') return false;
+    if (activeFilter === 'pending' && (item.verification_status !== 'Unverified' && item.verification_status !== 'In Progress')) return false;
+    if (activeFilter === 'verified' && item.verification_status !== 'Verified') return false;
+    if (activeFilter === 'issued' && item.pre_task_status !== 'ISSUE_SENT_TO_PRE') return false;
 
     if (searchTerm) {
       const s = searchTerm.toLowerCase();
@@ -482,29 +493,79 @@ const LqPipelinePage = ({ filter = 'all' }) => {
       {/* Table Container */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex-1 flex flex-col min-h-0">
         <div className="p-3 border-b border-slate-200/80 bg-slate-50/70 flex flex-col md:flex-row md:items-center justify-between gap-3 shrink-0">
-          <div className="relative flex-1 max-w-md">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search className="h-3.5 w-3.5 text-slate-400" />
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 flex-1">
+            <div className="relative flex-1 max-w-md">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="h-3.5 w-3.5 text-slate-400" />
+              </div>
+              <input 
+                type="text" 
+                placeholder="Filter by master prospect name, country, industry..." 
+                className="w-full pl-9 pr-8 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 placeholder-slate-400 shadow-2xs hover:border-slate-300 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full hover:bg-slate-100 transition"
+                  title="Clear filter"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
-            <input 
-              type="text" 
-              placeholder="Filter by master prospect name, country, industry..." 
-              className="w-full pl-9 pr-8 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 placeholder-slate-400 shadow-2xs hover:border-slate-300 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-            {searchTerm && (
+
+            {/* Quick Status Sub-filters */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
               <button
                 type="button"
-                onClick={() => setSearchTerm('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full hover:bg-slate-100 transition"
-                title="Clear filter"
+                onClick={() => handleFilterChange('all')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer shrink-0 ${
+                  activeFilter === 'all'
+                    ? 'bg-indigo-600 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
               >
-                <X className="w-3.5 h-3.5" />
+                All Pipeline ({items.length})
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => handleFilterChange('pending')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeFilter === 'pending'
+                    ? 'bg-amber-600 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <span>Pending Verification</span>
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                  activeFilter === 'pending' ? 'bg-amber-700 text-white' : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {items.filter(i => i.verification_status !== 'Verified').length}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleFilterChange('verified')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeFilter === 'verified'
+                    ? 'bg-emerald-600 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <span>Outreached</span>
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                  activeFilter === 'verified' ? 'bg-emerald-700 text-white' : 'bg-emerald-100 text-emerald-800'
+                }`}>
+                  {verifiedCount}
+                </span>
+              </button>
+            </div>
           </div>
-          <div className="text-xs font-semibold text-slate-500 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs shrink-0">
+
+          <div className="text-xs font-semibold text-slate-500 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs shrink-0 self-end sm:self-auto">
             Total Records: <span className="font-bold text-slate-800">{filteredItems.length}</span>
           </div>
         </div>
@@ -551,8 +612,8 @@ const LqPipelinePage = ({ filter = 'all' }) => {
                           <Link to={`/lq-pipeline/${item.id}`} className="font-bold text-indigo-600 hover:text-indigo-800 hover:underline text-xs transition">
                             {p.company_name}
                           </Link>
-                          <p className="text-[10px] text-slate-500">
-                            {p.country_head_office} &bull; {p.primary_industries}
+                          <p className="text-[10px] text-slate-500 truncate max-w-md" title={p.primary_industries || ''}>
+                            {p.country_head_office} &bull; {p.primary_industries || '—'}
                           </p>
                           <div className="flex items-center gap-2 mt-1">
                             <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200">
