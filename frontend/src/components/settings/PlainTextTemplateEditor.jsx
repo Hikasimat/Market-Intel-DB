@@ -363,3 +363,4 @@ export default function PlainTextTemplateEditor({ id, onClose, onSaved }) {
     </div>
   );
 }
+

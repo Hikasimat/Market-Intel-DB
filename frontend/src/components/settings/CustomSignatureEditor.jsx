@@ -9,25 +9,14 @@ import {
   Globe,
   Phone,
   Mail,
-  Check,
   Upload,
   Info,
-  ExternalLink,
+  Plus,
+  Trash2,
+  Link as LinkIcon,
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { designApi, errorMessage } from '../../services/designApi';
-
-const LinkedInIcon = ({ className = 'w-3.5 h-3.5' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14m-.5 15.5v-5.3a3.26 3.26 0 0 0-3.26-3.26c-.85 0-1.84.52-2.28 1.3v-1.11h-2.79v8.37h2.79v-4.93c0-.77.62-1.4 1.39-1.4a1.4 1.4 0 0 1 1.4 1.4v4.93h2.75M6.88 8.56a1.68 1.68 0 0 0 1.68-1.68c0-.93-.75-1.69-1.68-1.69a1.69 1.69 0 0 0-1.69 1.69c0 .93.76 1.68 1.69 1.68m1.39 9.94v-8.37H5.5v8.37h2.77z"/>
-  </svg>
-);
-
-const TwitterIcon = ({ className = 'w-3.5 h-3.5' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-  </svg>
-);
 
 const cleanUrl = (u) => {
   if (!u) return '';
@@ -57,7 +46,7 @@ const escapeHtml = (str) => {
  * Phone: +91 98765 43210
  * Website: www.example.com
  *
- * Clickable website and social media profile links.
+ * Plus multiple customizable links with user-preferred labels.
  */
 export const buildStructuredSignature = (f) => {
   const name = f.name?.trim() || '';
@@ -66,8 +55,16 @@ export const buildStructuredSignature = (f) => {
   const email = f.email?.trim() || '';
   const phone = f.phone?.trim() || '';
   const website = f.website?.trim() || '';
-  const linkedin = f.linkedin?.trim() || '';
-  const twitter = f.twitter?.trim() || '';
+
+  // Custom links with preferred labels
+  const rawLinks = Array.isArray(f.links) ? f.links : [];
+  const links = [...rawLinks];
+  if (links.length === 0) {
+    if (f.linkedin) links.push({ label: 'LinkedIn', url: f.linkedin });
+    if (f.twitter) links.push({ label: 'X / Twitter', url: f.twitter });
+  }
+
+  const validLinks = links.filter((l) => l && (l.label?.trim() || l.url?.trim()));
 
   // Plain-text representation
   const textLines = [];
@@ -79,8 +76,13 @@ export const buildStructuredSignature = (f) => {
   if (email) contactTextLines.push(`Email: ${email}`);
   if (phone) contactTextLines.push(`Phone: ${phone}`);
   if (website) contactTextLines.push(`Website: ${website}`);
-  if (linkedin) contactTextLines.push(`LinkedIn: ${cleanUrl(linkedin)}`);
-  if (twitter) contactTextLines.push(`Twitter/X: ${cleanUrl(twitter)}`);
+  validLinks.forEach((l) => {
+    const label = l.label?.trim() || 'Link';
+    const url = cleanUrl(l.url?.trim() || '');
+    if (url) {
+      contactTextLines.push(`${label}: ${url}`);
+    }
+  });
 
   if (contactTextLines.length > 0) {
     if (textLines.length > 0) textLines.push('');
@@ -114,22 +116,22 @@ export const buildStructuredSignature = (f) => {
     contactHtmlParts.push(`<div>Website: <a href="${escapeHtml(webHref)}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: none; font-weight: 500;">${escapeHtml(website)}</a></div>`);
   }
 
-  const socialLinks = [];
-  if (linkedin) {
-    socialLinks.push(`<a href="${escapeHtml(cleanUrl(linkedin))}" target="_blank" rel="noopener noreferrer" style="color: #0077b5; text-decoration: none; font-weight: 600; margin-right: 14px;">LinkedIn</a>`);
-  }
-  if (twitter) {
-    socialLinks.push(`<a href="${escapeHtml(cleanUrl(twitter))}" target="_blank" rel="noopener noreferrer" style="color: #0f172a; text-decoration: none; font-weight: 600; margin-right: 14px;">X / Twitter</a>`);
-  }
+  const linkElements = validLinks
+    .filter((l) => l.url?.trim())
+    .map((l) => {
+      const href = cleanUrl(l.url.trim());
+      const label = l.label?.trim() || 'Link';
+      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: none; font-weight: 600; margin-right: 14px;">${escapeHtml(label)}</a>`;
+    });
 
-  if (socialLinks.length > 0) {
-    contactHtmlParts.push(`<div style="margin-top: 8px;">${socialLinks.join('')}</div>`);
+  if (linkElements.length > 0) {
+    contactHtmlParts.push(`<div style="margin-top: 8px;">${linkElements.join('')}</div>`);
   }
 
   let fullHtml = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; color: #1e293b; line-height: 1.5; padding: 4px 0;">
   ${htmlParts.join('\n  ')}
-  ${contactHtmlParts.length > 0 ? (htmlParts.length > 0 ? '<div style="height: 6px;"></div>' : '') + htmlParts.length > 0 ? contactHtmlParts.join('\n  ') : contactHtmlParts.join('\n  ') : ''}
+  ${contactHtmlParts.length > 0 ? (htmlParts.length > 0 ? '<div style="height: 6px;"></div>\n  ' : '') + contactHtmlParts.join('\n  ') : ''}
 </div>
   `.trim();
 
@@ -144,8 +146,9 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [website, setWebsite] = useState('');
-  const [linkedin, setLinkedin] = useState('');
-  const [twitter, setTwitter] = useState('');
+  const [links, setLinks] = useState([
+    { id: '1', label: 'LinkedIn', url: 'https://linkedin.com/in/example' },
+  ]);
   const [isDefault, setIsDefault] = useState(false);
 
   // HTML import state
@@ -167,7 +170,9 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
       setEmail('mohan@example.com');
       setPhone('+91 98765 43210');
       setWebsite('www.example.com');
-      setLinkedin('https://linkedin.com/in/example');
+      setLinks([
+        { id: '1', label: 'LinkedIn', url: 'https://linkedin.com/in/example' },
+      ]);
       return;
     }
 
@@ -191,8 +196,18 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
           setEmail(fields.email || '');
           setPhone(fields.phone || '');
           setWebsite(fields.website || '');
-          setLinkedin(fields.linkedin || '');
-          setTwitter(fields.twitter || '');
+
+          if (Array.isArray(fields.links) && fields.links.length > 0) {
+            setLinks(fields.links);
+          } else {
+            const loaded = [];
+            if (fields.linkedin) loaded.push({ id: '1', label: 'LinkedIn', url: fields.linkedin });
+            if (fields.twitter) loaded.push({ id: '2', label: 'Twitter / X', url: fields.twitter });
+            if (loaded.length === 0) {
+              loaded.push({ id: '1', label: 'LinkedIn', url: 'https://linkedin.com/in/example' });
+            }
+            setLinks(loaded);
+          }
         }
       } catch (err) {
         toast.error(errorMessage(err));
@@ -206,6 +221,28 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
       active = false;
     };
   }, [id, onClose]);
+
+  const handleAddLink = () => {
+    setLinks((prev) => [
+      ...prev,
+      { id: String(Date.now()), label: '', url: '' },
+    ]);
+    setIsDirty(true);
+  };
+
+  const handleUpdateLink = (index, key, value) => {
+    setLinks((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [key]: value };
+      return next;
+    });
+    setIsDirty(true);
+  };
+
+  const handleRemoveLink = (index) => {
+    setLinks((prev) => prev.filter((_, i) => i !== index));
+    setIsDirty(true);
+  };
 
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
@@ -263,8 +300,7 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
         email,
         phone,
         website,
-        linkedin,
-        twitter,
+        links,
       });
 
       payload = {
@@ -281,8 +317,7 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
             email,
             phone,
             website,
-            linkedin,
-            twitter,
+            links,
           },
         },
         is_default: isDefault,
@@ -334,8 +369,7 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
     email,
     phone,
     website,
-    linkedin,
-    twitter,
+    links,
   });
 
   return (
@@ -424,7 +458,7 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
               <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-xl text-[11px] text-blue-800 flex items-start gap-2">
                 <Info className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
                 <span>
-                  Enter your details below. The signature is structured as clean, professional text with clickable website, email, phone, and social profile links.
+                  Enter your details below. The signature is structured as clean, professional text with clickable website, email, phone, and customizable links.
                 </span>
               </div>
 
@@ -537,53 +571,71 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
                 </div>
               </div>
 
-              {/* Social Media Profile Links */}
+              {/* Dynamic Custom Links & Social Media with preferred labels */}
               <div className="pt-2 border-t border-slate-100 space-y-3">
-                <label className="block text-xs font-extrabold text-slate-800 uppercase tracking-wider">
-                  Social Media Profile Links (Clickable)
-                </label>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    LinkedIn Profile URL
-                  </label>
-                  <div className="relative flex items-center">
-                    <div className="absolute left-3 text-sky-700 pointer-events-none">
-                      <LinkedInIcon />
-                    </div>
-                    <input
-                      type="text"
-                      value={linkedin}
-                      onChange={(e) => {
-                        setLinkedin(e.target.value);
-                        setIsDirty(true);
-                      }}
-                      placeholder="https://linkedin.com/in/mohan"
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition"
-                    />
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                      Custom Links & Social Profiles (Clickable)
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-medium">
+                      Add any number of links with your preferred labels
+                    </span>
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleAddLink}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-xl border border-blue-200 transition cursor-pointer shadow-2xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Link</span>
+                  </button>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Twitter / X Profile URL
-                  </label>
-                  <div className="relative flex items-center">
-                    <div className="absolute left-3 text-slate-800 pointer-events-none">
-                      <TwitterIcon />
-                    </div>
-                    <input
-                      type="text"
-                      value={twitter}
-                      onChange={(e) => {
-                        setTwitter(e.target.value);
-                        setIsDirty(true);
-                      }}
-                      placeholder="https://x.com/mohan"
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition"
-                    />
+                {links.length === 0 ? (
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center text-xs text-slate-400">
+                    No custom links added yet. Click &quot;+ Add Link&quot; to add links with custom labels.
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    {links.map((link, idx) => (
+                      <div
+                        key={link.id || idx}
+                        className="flex items-center gap-2 bg-slate-50 p-2 rounded-xl border border-slate-200 shadow-2xs"
+                      >
+                        <div className="w-1/3 min-w-[110px]">
+                          <input
+                            type="text"
+                            value={link.label}
+                            onChange={(e) => handleUpdateLink(idx, 'label', e.target.value)}
+                            placeholder="Label (e.g. LinkedIn, Blog)"
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="relative flex items-center">
+                            <LinkIcon className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
+                            <input
+                              type="text"
+                              value={link.url}
+                              onChange={(e) => handleUpdateLink(idx, 'url', e.target.value)}
+                              placeholder="URL (e.g. https://...)"
+                              className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                            />
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveLink(idx)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition shrink-0 cursor-pointer"
+                          title="Remove link"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -691,7 +743,7 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
             <pre className="text-[10px] font-mono text-slate-600 whitespace-pre leading-relaxed bg-white p-2.5 rounded-lg border border-slate-200 overflow-x-auto">
               {isHtmlMode
                 ? '(Raw HTML rendered above)'
-                : `${name || '[Name]'}\n${designation || '[Job Title]'}\n${company || '[Company Name]'}\n\nEmail: ${email || '[Email]'}\nPhone: ${phone || '[Phone]'}\nWebsite: ${website || '[Website]'}${linkedin ? `\nLinkedIn: ${cleanUrl(linkedin)}` : ''}${twitter ? `\nTwitter: ${cleanUrl(twitter)}` : ''}`}
+                : `${name || '[Name]'}\n${designation || '[Job Title]'}\n${company || '[Company Name]'}\n\nEmail: ${email || '[Email]'}\nPhone: ${phone || '[Phone]'}\nWebsite: ${website || '[Website]'}${links.filter((l) => l && l.url).map((l) => `\n${l.label || 'Link'}: ${cleanUrl(l.url)}`).join('')}`}
             </pre>
           </div>
         </div>
@@ -701,4 +753,3 @@ const CustomSignatureEditor = ({ id, onClose, onSaved }) => {
 };
 
 export default CustomSignatureEditor;
-
