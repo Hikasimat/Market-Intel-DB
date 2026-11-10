@@ -438,6 +438,52 @@ class GmailOAuthService:
         return None
 
     @classmethod
+    def get_unread_count(cls, credentials, folder='INBOX'):
+        """
+        Get accurate unread message count directly from Gmail labels API.
+        Lightweight, official, and counts all unread emails in the folder.
+        """
+        try:
+            token = cls.get_valid_access_token(credentials)
+            label_id = (folder or 'INBOX').replace('"', '').strip().upper()
+            if label_id not in ('INBOX', 'STARRED', 'SENT', 'DRAFT', 'SPAM', 'TRASH'):
+                label_id = 'INBOX'
+            url = f"https://gmail.googleapis.com/gmail/v1/users/me/labels/{label_id}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'Accept': 'application/json',
+                }
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                return int(data.get('messagesUnread', 0))
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to get unread count via labels API: %s", e)
+
+        # Fallback to query with is:unread
+        try:
+            token = cls.get_valid_access_token(credentials)
+            folder_clean = (folder or 'INBOX').replace('"', '').strip().lower()
+            q = f"is:unread in:{folder_clean}"
+            url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={urllib.parse.quote(q)}&maxResults=50"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'Accept': 'application/json',
+                }
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                msgs = data.get('messages', [])
+                estimate = data.get('resultSizeEstimate', len(msgs))
+                return max(len(msgs), int(estimate or 0))
+        except Exception:
+            return 0
+
+    @classmethod
     def fetch_messages(cls, credentials, folder='INBOX', limit=20, search='', user=None, matcher=None):
         """
         Fetches messages from Gmail via Gmail REST API.

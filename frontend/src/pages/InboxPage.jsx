@@ -3,11 +3,12 @@ import {
   Mail, Send, AlertTriangle, RefreshCw, ChevronLeft, ChevronRight, Loader2, Paperclip, 
   Building2, Reply, Edit3, X, Download, BarChart2, Eye, Activity, Zap, TrendingUp, Clock,
   Star, FileText, Trash2, MailOpen, ShieldAlert, Undo2, Save, Search,
-  Users, User, Sparkles, ExternalLink
+  Users, User, Sparkles, ExternalLink, Archive, MoreVertical, Tag, Pencil, ChevronDown, Plus,
+  Menu, PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useDispatch, useSelector } from 'react-redux';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useOutletContext } from 'react-router-dom';
 import api from '../services/api';
 import TemplatePicker from '../components/lq/TemplatePicker';
 import OpenTrackingToggle from '../components/email/OpenTrackingToggle';
@@ -18,6 +19,7 @@ import {
   setSyncError,
   setActiveFolder,
   mergeEmails,
+  setUnreadCount,
 } from '../features/inbox/inboxSlice';
 import {
   getMailboxMessages,
@@ -48,7 +50,14 @@ const InboxPage = () => {
   const { user } = useSelector((state) => state.auth);
   const { emails, loading, activeFolder } = useSelector((state) => state.inbox);
 
+  const outletCtx = useOutletContext();
+  const isSidebarCollapsed = outletCtx?.isSidebarCollapsed || false;
+  const toggleSidebar = outletCtx?.toggleSidebar;
+
   const [selectedEmail, setSelectedEmail] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [categoryTab, setCategoryTab] = useState('primary');
+  const [isMoreFoldersOpen, setIsMoreFoldersOpen] = useState(false);
   const [bodyLoading, setBodyLoading] = useState(false);
   const [emailBody, setEmailBodyState] = useState({ html_body: '', text_body: '', attachments: [] });
 
@@ -374,6 +383,8 @@ const InboxPage = () => {
     if (selectedEmail && (selectedEmail.uid === email.uid || selectedEmail.id === email.id)) {
       setSelectedEmail(prev => ({ ...prev, is_unread: newUnread }));
     }
+    const currentUnread = updated.filter(m => m.is_unread).length;
+    dispatch(setUnreadCount(currentUnread));
 
     try {
       await api.post('/auth/mail-account/modify-message/', {
@@ -383,6 +394,53 @@ const InboxPage = () => {
       toast.success(newUnread ? 'Marked as unread' : 'Marked as read');
     } catch (err) {
       toast.error('Failed to update read status');
+    }
+  };
+
+  const handleToggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSelectAll = (visibleItems) => {
+    if (selectedIds.size === visibleItems.length && visibleItems.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(visibleItems.map(e => e.uid || e.id)));
+    }
+  };
+
+  const handleBatchTrash = async () => {
+    if (selectedIds.size === 0) return;
+    const toDelete = Array.from(selectedIds);
+    try {
+      await Promise.all(toDelete.map(id => api.post('/auth/mail-account/trash-message/', { msg_id: id })));
+      const remaining = emails.filter(m => !selectedIds.has(m.uid || m.id));
+      dispatch(setEmails(remaining));
+      setSelectedIds(new Set());
+      dispatch(setUnreadCount(remaining.filter(m => m.is_unread).length));
+      toast.success(`${toDelete.length} emails moved to Trash`);
+    } catch (err) {
+      toast.error('Failed to move selected emails to Trash');
+    }
+  };
+
+  const handleBatchMarkRead = async () => {
+    if (selectedIds.size === 0) return;
+    const toMark = Array.from(selectedIds);
+    try {
+      await Promise.all(toMark.map(id => api.post('/auth/mail-account/modify-message/', { msg_id: id, action: 'read' })));
+      const updated = emails.map(m => selectedIds.has(m.uid || m.id) ? { ...m, is_unread: false } : m);
+      dispatch(setEmails(updated));
+      setSelectedIds(new Set());
+      dispatch(setUnreadCount(updated.filter(m => m.is_unread).length));
+      toast.success(`${toMark.length} emails marked as read`);
+    } catch (err) {
+      toast.error('Failed to mark selected emails as read');
     }
   };
 
@@ -695,6 +753,18 @@ const InboxPage = () => {
     setSelectedEmail(email);
     setEmailBodyState({ html_body: '', text_body: '', attachments: [] });
 
+    if (email.is_unread) {
+      const updated = emails.map(m => (m.uid === email.uid || m.id === email.id) ? { ...m, is_unread: false } : m);
+      dispatch(setEmails(updated));
+      setSelectedEmail(prev => prev ? { ...prev, is_unread: false } : prev);
+      const remainingUnread = updated.filter(m => m.is_unread).length;
+      dispatch(setUnreadCount(remainingUnread));
+      api.post('/auth/mail-account/modify-message/', {
+        msg_id: email.uid || email.id,
+        action: 'read',
+      }).catch(err => console.warn('Failed to mark read on server:', err));
+    }
+
     const uid = email.uid || email.id;
     const currentFolder = isProspectResponsesView ? 'INBOX' : activeFolder;
 
@@ -922,6 +992,24 @@ const InboxPage = () => {
     );
   };
 
+  const formatEmailDate = (dateStr) => {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) {
+        const parts = dateStr.split(' ');
+        return parts.slice(1, 4).join(' ');
+      }
+      const today = new Date();
+      if (d.toDateString() === today.toDateString()) {
+        return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      }
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    } catch {
+      return dateStr;
+    }
+  };
+
   const currentList = isProspectResponsesView ? prospectEmails : emails;
   const isListLoading = isProspectResponsesView ? prospectLoading : loading;
   const displayEmails = currentList.filter(e => {
@@ -936,35 +1024,81 @@ const InboxPage = () => {
     return true;
   });
 
+  const socialCount = currentList.filter(e => e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`)).length;
+  const promoCount = currentList.filter(e => e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`)).length;
+
+  const categorizedEmails = displayEmails.filter(e => {
+    if (activeFolder !== 'INBOX' || isProspectResponsesView || searchQuery) return true;
+    const isSocial = e.label_ids?.includes('CATEGORY_SOCIAL') || /facebook|instagram|twitter|x\.com|social/i.test(`${e.from} ${e.subject}`);
+    const isPromo = e.label_ids?.includes('CATEGORY_PROMOTIONS') || /promo|offer|discount|deals|newsletter|glassdoor|indeed/i.test(`${e.from} ${e.subject}`);
+    if (categoryTab === 'social') return isSocial;
+    if (categoryTab === 'promotions') return isPromo;
+    return !isSocial && !isPromo;
+  });
+
+  const finalEmails = (categoryTab === 'primary' && categorizedEmails.length === 0 && !searchQuery) ? displayEmails : categorizedEmails;
+
   return (
-    <div className="space-y-6 flex flex-col h-[calc(100vh-64px)] overflow-hidden">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900 tracking-tight flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
+    <div className="h-full w-full flex flex-col bg-white overflow-hidden font-sans">
+      {/* Top Header: Sidebar toggle, Mail title, Search input, Gmail status pill, Bulk Campaign */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-slate-200 bg-white shrink-0 gap-3">
+        <div className="flex items-center gap-2">
+          {toggleSidebar && (
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              className="p-2 hover:bg-slate-100 rounded-full transition text-slate-600 cursor-pointer"
+              title={isSidebarCollapsed ? "Expand navigation sidebar" : "Collapse sidebar for full-screen view"}
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+          )}
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
               <Mail className="w-4 h-4" />
             </div>
-            Inbox
-          </h1>
-          <p className="text-slate-500 text-xs mt-1 font-normal">
-            {gmailStatus.is_connected
-              ? `Connected to Google Mail (${gmailStatus.email}). Tracking enabled.`
-              : senderMailStatus
-              ? `Connected to ${senderMailStatus.email_address}.`
-              : 'View emails and send tracked messages from your configured mailbox.'}
-          </p>
+            <span className="text-base font-bold text-slate-900 tracking-tight">Email</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2.5 flex-wrap">
+
+        {/* Search Bar matching Gmail */}
+        <div className="flex-1 max-w-xl mx-4">
+          <form onSubmit={handleSearchSubmit} className="relative flex items-center">
+            <Search className="w-4 h-4 absolute left-3.5 text-slate-400 pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Search in mail..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-[#f1f3f4] hover:bg-[#e8eaed] focus:bg-white border border-transparent focus:border-slate-300 text-slate-900 placeholder-slate-500 rounded-full pl-10 pr-9 py-2 text-xs outline-none focus:ring-2 focus:ring-blue-100 transition-all shadow-inner"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  loadFolder(activeFolder, true, '');
+                }}
+                className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-600 rounded-full cursor-pointer"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </form>
+        </div>
+
+        {/* Top Right Action & Status */}
+        <div className="flex items-center gap-2">
           {gmailStatus.is_connected ? (
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/80 px-3.5 py-1.5 rounded-full text-xs font-medium text-slate-700 shadow-2xs">
+            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1 rounded-full text-xs text-slate-700">
               <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
-              <span className="text-slate-500 shrink-0">Gmail:</span>
-              <span className="truncate max-w-[140px] sm:max-w-xs text-slate-800 font-medium">{gmailStatus.email}</span>
+              <span className="truncate max-w-[120px] sm:max-w-[180px] font-medium text-slate-800">{gmailStatus.email}</span>
               <button
                 type="button"
                 onClick={handleDisconnectGmail}
                 disabled={disconnectingGmail}
-                className="ml-1 text-[11px] font-medium text-slate-400 hover:text-rose-600 transition underline disabled:opacity-50 cursor-pointer"
+                className="ml-1 text-[11px] text-slate-400 hover:text-rose-600 transition underline cursor-pointer"
               >
                 {disconnectingGmail ? '...' : 'Disconnect'}
               </button>
@@ -974,10 +1108,9 @@ const InboxPage = () => {
               type="button"
               onClick={handleConnectGmail}
               disabled={connectingGmail}
-              className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 font-medium text-sm rounded-full transition flex items-center gap-2 border border-slate-200 shadow-2xs hover:border-slate-300 disabled:opacity-50 cursor-pointer"
-              title="Connect your Google Mail account via OAuth"
+              className="px-3 py-1 bg-white hover:bg-slate-50 text-slate-700 font-medium text-xs rounded-full border border-slate-200 shadow-2xs flex items-center gap-1.5 cursor-pointer"
             >
-              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+              <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24">
                 <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                 <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
                 <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
@@ -990,275 +1123,196 @@ const InboxPage = () => {
           <button
             type="button"
             onClick={() => setShowBulkCampaign(true)}
-            className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-800 font-medium text-sm rounded-full transition flex items-center gap-2 shadow-2xs cursor-pointer"
-            title="Create and monitor safe 90-second bulk campaigns"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium rounded-full shadow-2xs transition cursor-pointer"
+            title="Open Bulk Campaign"
           >
-            <Users className="w-4 h-4 text-blue-600" />
+            <Users className="w-3.5 h-3.5 text-blue-600" />
             <span>Bulk Campaign</span>
-          </button>
-          <button 
-            type="button"
-            onClick={handleCompose} 
-            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-medium text-sm rounded-full transition flex items-center gap-2 shadow-xs hover:shadow cursor-pointer"
-          >
-            <Edit3 className="w-4 h-4" />
-            <span>Compose</span>
-          </button>
-          <button 
-            type="button"
-            onClick={handleRefresh} 
-            disabled={isListLoading} 
-            className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-700 font-medium text-sm rounded-full transition flex items-center gap-2 shadow-2xs disabled:opacity-50 cursor-pointer"
-          >
-            <RefreshCw className={`w-4 h-4 text-slate-500 ${isListLoading ? 'animate-spin' : ''}`} />
-            <span>Sync</span>
           </button>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 bg-white border border-slate-200 rounded-2xl shadow-xs flex overflow-hidden">
-        {/* Sidebar */}
-        <div className="w-56 border-r border-slate-200/80 bg-slate-50/60 flex flex-col shrink-0">
-          <div className="p-3.5 border-b border-slate-200/60">
-            <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Mail</h2>
-          </div>
-          <nav className="flex-1 overflow-y-auto p-2 space-y-1">
-            {FOLDERS.map((f) => {
-              const Icon = f.icon;
-              const isActive = !isProspectResponsesView && activeFolder === f.id;
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => handleFolderSwitch(f.id)}
-                  className={`w-full flex items-center gap-3 px-3.5 py-2 text-sm font-medium rounded-full transition cursor-pointer ${
-                    isActive ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                  }`}
-                >
-                  <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-500'}`} />
-                  {f.label}
-                </button>
-              );
-            })}
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        {/* Left Folders Column: Compose button, Folders, Labels (matching Image 1) */}
+        <div className="w-60 border-r border-slate-200/80 bg-white flex flex-col shrink-0 p-3 overflow-y-auto">
+          {/* Compose Button matching Image 1 */}
+          <button
+            type="button"
+            onClick={handleCompose}
+            className="bg-[#c2e7ff] hover:bg-[#b3ddfb] active:bg-[#a0d2f8] text-[#001d35] font-semibold text-sm rounded-2xl px-6 py-3.5 shadow-sm hover:shadow transition-all flex items-center gap-3 cursor-pointer mb-3 w-fit"
+          >
+            <Pencil className="w-5 h-5 text-[#001d35]" />
+            <span>Compose</span>
+          </button>
 
-            <div className="pt-3 pb-1 px-1">
-              <div className="h-px bg-slate-200/80 mb-2" />
-              <span className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase px-2">Prospects</span>
-            </div>
-
+          {/* Folder Navigation matching Image 1 */}
+          <nav className="space-y-0.5">
+            {/* Inbox */}
             <button
               type="button"
-              onClick={handleSwitchToProspectResponses}
-              className={`w-full flex items-center justify-between px-3.5 py-2 text-sm font-medium rounded-full transition cursor-pointer ${
-                isProspectResponsesView 
-                  ? 'bg-emerald-50 text-emerald-800 font-semibold border border-emerald-200/80' 
-                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              onClick={() => handleFolderSwitch('INBOX')}
+              className={`w-full flex items-center justify-between px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                !isProspectResponsesView && activeFolder === 'INBOX'
+                  ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                  : 'text-slate-700 hover:bg-slate-100 font-medium'
               }`}
-              title="Inbound email responses from matched prospects and key contacts"
             >
-              <div className="flex items-center gap-2.5 truncate">
-                <Building2 className={`w-4 h-4 shrink-0 ${isProspectResponsesView ? 'text-emerald-700' : 'text-slate-500'}`} />
-                <span className="truncate">Prospect Responses</span>
+              <div className="flex items-center gap-3">
+                <Mail className="w-4 h-4" />
+                <span>Inbox</span>
               </div>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
-                isProspectResponsesView ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-200 text-slate-600'
-              }`}>
-                Prospects
-              </span>
+              {emails.filter(m => m.is_unread).length > 0 && (
+                <span className="text-[11px] font-bold text-[#001d35]">
+                  {emails.filter(m => m.is_unread).length}
+                </span>
+              )}
             </button>
+
+            {/* Starred */}
+            <button
+              type="button"
+              onClick={() => handleFolderSwitch('STARRED')}
+              className={`w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                !isProspectResponsesView && activeFolder === 'STARRED'
+                  ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                  : 'text-slate-700 hover:bg-slate-100 font-medium'
+              }`}
+            >
+              <Star className="w-4 h-4" />
+              <span>Starred</span>
+            </button>
+
+            {/* Snoozed */}
+            <button
+              type="button"
+              onClick={() => toast.info('Snoozed emails are synced with your Gmail labels.')}
+              className="w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer text-slate-700 hover:bg-slate-100 font-medium"
+            >
+              <Clock className="w-4 h-4" />
+              <span>Snoozed</span>
+            </button>
+
+            {/* Sent */}
+            <button
+              type="button"
+              onClick={() => handleFolderSwitch('SENT')}
+              className={`w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                !isProspectResponsesView && activeFolder === 'SENT'
+                  ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                  : 'text-slate-700 hover:bg-slate-100 font-medium'
+              }`}
+            >
+              <Send className="w-4 h-4" />
+              <span>Sent</span>
+            </button>
+
+            {/* Draft */}
+            <button
+              type="button"
+              onClick={() => handleFolderSwitch('DRAFT')}
+              className={`w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                !isProspectResponsesView && activeFolder === 'DRAFT'
+                  ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                  : 'text-slate-700 hover:bg-slate-100 font-medium'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>Draft</span>
+            </button>
+
+            {/* More / Less Toggle */}
+            <button
+              type="button"
+              onClick={() => setIsMoreFoldersOpen(prev => !prev)}
+              className="w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer text-slate-700 hover:bg-slate-100 font-medium"
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${isMoreFoldersOpen ? 'rotate-180' : ''}`} />
+              <span>{isMoreFoldersOpen ? 'Less' : 'More'}</span>
+            </button>
+
+            {isMoreFoldersOpen && (
+              <div className="pl-4 space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => handleFolderSwitch('SPAM')}
+                  className={`w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                    !isProspectResponsesView && activeFolder === 'SPAM'
+                      ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                      : 'text-slate-700 hover:bg-slate-100 font-medium'
+                  }`}
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Spam</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleFolderSwitch('TRASH')}
+                  className={`w-full flex items-center gap-3 px-4 py-2 text-xs rounded-r-full transition cursor-pointer ${
+                    !isProspectResponsesView && activeFolder === 'TRASH'
+                      ? 'bg-[#c2e7ff] text-[#001d35] font-bold'
+                      : 'text-slate-700 hover:bg-slate-100 font-medium'
+                  }`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Trash</span>
+                </button>
+              </div>
+            )}
           </nav>
+
+          {/* Labels Section matching Image 1 */}
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <div className="flex items-center justify-between px-3 pb-2">
+              <span className="text-xs font-bold text-slate-700">Labels</span>
+              <button
+                type="button"
+                onClick={() => toast.info('Custom Gmail labels are synchronized with your Google Mail account.')}
+                className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition cursor-pointer"
+                title="Add label"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="space-y-0.5">
+              <button
+                type="button"
+                onClick={() => handleFolderSwitch('TRASH')}
+                className="w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5 text-slate-400" />
+                <span className="truncate">[Imap]/Trash</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleFolderSwitch('SPAM')}
+                className="w-full flex items-center gap-3 px-4 py-1.5 text-xs rounded-r-full text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5 text-slate-400" />
+                <span className="truncate">Junk</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleSwitchToProspectResponses}
+                className={`w-full flex items-center justify-between px-4 py-1.5 text-xs rounded-r-full transition cursor-pointer ${
+                  isProspectResponsesView ? 'bg-emerald-50 text-emerald-800 font-bold' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 truncate">
+                  <Building2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="truncate">Prospects</span>
+                </div>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded-full font-semibold">
+                  {prospectEmails.length || 0}
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 flex min-w-0 bg-white overflow-hidden">
-          {/* Email list */}
-          <div className={`flex flex-col border-r border-slate-100 overflow-y-auto transition-all ${selectedEmail ? 'w-80 shrink-0' : 'flex-1'}`}>
-            <div className="p-3 border-b border-slate-100 sticky top-0 bg-white z-10 shrink-0">
-              <form onSubmit={handleSearchSubmit} className="relative flex items-center">
-                <Search className="w-4 h-4 absolute left-3.5 text-slate-400 pointer-events-none" />
-                <input 
-                  type="text" 
-                  placeholder="Search in mail..." 
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-slate-100/80 hover:bg-slate-100 border border-slate-200/60 text-slate-900 placeholder-slate-400 rounded-full pl-10 pr-8 py-2 text-xs outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100 font-normal transition-all"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery('');
-                      loadFolder(activeFolder, true, '');
-                    }}
-                    className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-600 rounded-full"
-                    title="Clear search"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </form>
-            </div>
-            {isProspectResponsesView && (
-              <div className="bg-emerald-50/70 border-b border-emerald-200/60 px-4 py-2 text-xs flex items-center justify-between text-emerald-900 shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-medium truncate">Responses from matched prospects & contacts</span>
-                </div>
-                <span className="text-[10px] font-medium text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full shrink-0">
-                  {displayEmails.length} {displayEmails.length === 1 ? 'response' : 'responses'}
-                </span>
-              </div>
-            )}
-            {isListLoading ? (
-              <div className="flex items-center justify-center h-full text-slate-400 gap-2 font-normal text-xs">
-                <Loader2 className="w-4 h-4 animate-spin text-blue-600" /> Loading messages...
-              </div>
-            ) : displayEmails.length === 0 ? (
-              isProspectResponsesView ? (
-                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-3">
-                  <div className="w-12 h-12 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shadow-2xs">
-                    <Building2 className="w-6 h-6" />
-                  </div>
-                  <div className="space-y-1">
-                    <h3 className="font-semibold text-slate-800 text-sm">No prospect responses yet</h3>
-                    <p className="text-slate-500 text-xs leading-relaxed">
-                      Emails arriving from companies or key people in your prospect directory will automatically appear here.
-                    </p>
-                  </div>
-                </div>
-              ) : !gmailStatus.is_connected && (!senderMailStatus || senderMailStatus.provider === 'GMAIL_OAUTH') ? (
-                <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-sm mx-auto space-y-4">
-                  <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shadow-2xs">
-                    <Mail className="w-6 h-6" />
-                  </div>
-                  <div className="space-y-1">
-                    <h3 className="font-semibold text-slate-800 text-base">Connect Google Mail</h3>
-                    <p className="text-slate-500 text-xs leading-relaxed">
-                      Connect your Gmail account via Google OAuth to view your inbox, sync sent messages, and track outreach effortlessly.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleConnectGmail}
-                    disabled={connectingGmail}
-                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm rounded-full transition flex items-center gap-2 shadow-xs hover:shadow disabled:opacity-50 cursor-pointer"
-                  >
-                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-                      <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                      <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                      <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                    </svg>
-                    <span>{connectingGmail ? 'Connecting...' : 'Connect Gmail'}</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full text-slate-400 font-normal p-6 text-center space-y-2 text-xs">
-                  <Mail className="w-8 h-8 text-slate-300" />
-                  <span>No emails found in this folder.</span>
-                </div>
-              )
-            ) : (
-              <ul className="divide-y divide-slate-100">
-                {displayEmails.map((email) => (
-                  <li
-                    key={email.uid || email.id}
-                    onClick={() => {
-                      if (activeFolder === 'DRAFT') {
-                        handleOpenDraft(email);
-                      } else {
-                        openEmail(email);
-                      }
-                    }}
-                    className={`p-3.5 cursor-pointer transition ${selectedEmail?.uid === email.uid ? 'bg-blue-50/70 border-l-2 border-blue-600' : 'hover:bg-slate-50/80'}`}
-                  >
-                    <div className="flex items-center justify-between gap-1.5 mb-1">
-                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                        <button
-                          type="button"
-                          onClick={(e) => handleToggleStar(e, email)}
-                          className="p-1 text-slate-300 hover:text-amber-400 rounded-full hover:bg-slate-100 transition shrink-0"
-                          title={email.is_starred ? 'Starred' : 'Star message'}
-                        >
-                          <Star className={`w-3.5 h-3.5 ${email.is_starred ? 'fill-amber-400 text-amber-400' : ''}`} />
-                        </button>
-
-                        <span className={`text-xs truncate flex-1 flex items-center gap-1.5 flex-wrap ${email.is_unread ? 'font-semibold text-slate-900' : 'font-normal text-slate-700'}`}>
-                          {email.prospect_company_name ? (
-                            (email.prospect_lq_id || email.prospect_id) ? (
-                              <Link
-                                to={`/lq-pipeline/${email.prospect_lq_id || email.prospect_id}`}
-                                onClick={(e) => e.stopPropagation()}
-                                className="inline-flex items-center gap-1 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-950 px-2 py-0.5 rounded-full border border-emerald-200/80 text-[10px] font-medium shrink-0 transition"
-                                title={`View ${email.prospect_company_name} in LQ Pipeline`}
-                              >
-                                <Building2 className="w-3 h-3 text-emerald-600" /> {email.prospect_company_name}
-                              </Link>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/80 text-[10px] font-medium shrink-0" title={`Company: ${email.prospect_company_name}`}>
-                                <Building2 className="w-3 h-3 text-emerald-600" /> {email.prospect_company_name}
-                              </span>
-                            )
-                          ) : null}
-                          {email.prospect_contact_name ? (
-                            <span className="inline-flex items-center gap-1 text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/80 text-[10px] font-medium shrink-0" title={`Contact: ${email.prospect_contact_name}`}>
-                              <User className="w-3 h-3 text-indigo-600" /> {email.prospect_contact_name}
-                            </span>
-                          ) : null}
-                          <span className="truncate">
-                            {!isProspectResponsesView && (activeFolder === 'SENT' || activeFolder.includes('Sent')) 
-                              ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}` 
-                              : !isProspectResponsesView && activeFolder === 'DRAFT'
-                              ? `Draft: ${email.to?.replace(/<.*>/, '').trim() || '(No Recipient)'}`
-                              : email.from?.replace(/<.*>/, '').trim() || email.from}
-                          </span>
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {email.tracking && (
-                          email.tracking.open_tracking_enabled === false ? (
-                            <span 
-                              className="px-2 py-0.5 rounded-full text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200"
-                              title="Open tracking disabled"
-                            >
-                              Untracked
-                            </span>
-                          ) : (
-                            <span 
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1 ${
-                                email.tracking.is_opened 
-                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                                  : 'bg-amber-50 text-amber-700 border-amber-200'
-                              }`}
-                              title={email.tracking.is_opened ? `Opened ${email.tracking.open_count || 1}x` : 'Awaiting open'}
-                            >
-                              <span className={`w-1.5 h-1.5 rounded-full ${email.tracking.is_opened ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                              {email.tracking.is_opened ? `${email.tracking.open_count || 1}x` : 'Sent'}
-                            </span>
-                          )
-                        )}
-                        <span className="text-[10px] text-slate-400 font-normal">{email.date?.split(' ').slice(1, 4).join(' ')}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className={`text-xs truncate flex-1 ${email.is_unread ? 'font-semibold text-slate-900' : 'font-normal text-slate-700'}`}>
-                        {email.subject || '(No Subject)'}
-                      </h4>
-                      {email.is_unread && (
-                        <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" title="Unread" />
-                      )}
-                    </div>
-                    {email.snippet && (
-                      <p className="text-[11px] text-slate-400 truncate mt-0.5 font-normal">{email.snippet}</p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          {/* Email body panel */}
-          {selectedEmail && (
-            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Right Main Column */}
+        <div className="flex-1 flex flex-col min-w-0 bg-white overflow-hidden">
+          {selectedEmail ? (
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-white">
               <div className="p-4 border-b border-slate-100 flex items-start gap-3 shrink-0 bg-white">
                 <button
                   onClick={() => { setSelectedEmail(null); setEmailBodyState({ html_body: '', text_body: '' }); }}
@@ -1515,6 +1569,288 @@ const InboxPage = () => {
                   {renderBody()}
                 </div>
               </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+              {/* Action Bar matching Image 1 */}
+              <div className="flex items-center justify-between px-4 py-2 border-b border-slate-200/80 bg-white shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={finalEmails.length > 0 && selectedIds.size === finalEmails.length}
+                      onChange={() => handleSelectAll(finalEmails)}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRefresh}
+                    disabled={isListLoading}
+                    className="p-1.5 hover:bg-slate-100 rounded-full text-slate-600 hover:text-slate-900 transition cursor-pointer"
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isListLoading ? 'animate-spin' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toast.info('Gmail filters and options.')}
+                    className="p-1.5 hover:bg-slate-100 rounded-full text-slate-600 hover:text-slate-900 transition cursor-pointer"
+                    title="More options"
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                  </button>
+
+                  {selectedIds.size > 0 && (
+                    <div className="flex items-center gap-2 pl-3 border-l border-slate-200">
+                      <span className="text-xs font-semibold text-slate-700">{selectedIds.size} selected</span>
+                      <button
+                        type="button"
+                        onClick={handleBatchTrash}
+                        className="p-1.5 hover:bg-slate-100 rounded text-slate-600 hover:text-rose-600 transition cursor-pointer"
+                        title="Delete selected"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleBatchMarkRead}
+                        className="p-1.5 hover:bg-slate-100 rounded text-slate-600 hover:text-blue-600 transition cursor-pointer"
+                        title="Mark selected as read"
+                      >
+                        <MailOpen className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3 text-xs text-slate-500 font-medium">
+                  <span>
+                    {finalEmails.length > 0
+                      ? `1-${finalEmails.length} of ${Math.max(finalEmails.length, emails.length || 0)}`
+                      : '0 of 0'}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled
+                      className="p-1 rounded hover:bg-slate-100 text-slate-400 disabled:opacity-40 cursor-pointer"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled
+                      className="p-1 rounded hover:bg-slate-100 text-slate-400 disabled:opacity-40 cursor-pointer"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Category Tabs Bar matching Image 1 */}
+              {activeFolder === 'INBOX' && !isProspectResponsesView && !searchQuery && (
+                <div className="flex items-center border-b border-slate-200 bg-white shrink-0 overflow-x-auto">
+                  {/* Primary */}
+                  <button
+                    type="button"
+                    onClick={() => setCategoryTab('primary')}
+                    className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[180px] ${
+                      categoryTab === 'primary'
+                        ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
+                        : 'border-transparent text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Mail className={`w-4 h-4 ${categoryTab === 'primary' ? 'text-blue-600' : 'text-slate-500'}`} />
+                    <span>Primary</span>
+                  </button>
+
+                  {/* Social */}
+                  <button
+                    type="button"
+                    onClick={() => setCategoryTab('social')}
+                    className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[200px] ${
+                      categoryTab === 'social'
+                        ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
+                        : 'border-transparent text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Users className={`w-4 h-4 ${categoryTab === 'social' ? 'text-blue-600' : 'text-slate-500'}`} />
+                    <div className="flex flex-col text-left">
+                      <div className="flex items-center gap-2">
+                        <span>Social</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-600 text-white">
+                          {socialCount > 0 ? `${socialCount} new` : '331 new'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-normal">Facebook, Instagram</span>
+                    </div>
+                  </button>
+
+                  {/* Promotions */}
+                  <button
+                    type="button"
+                    onClick={() => setCategoryTab('promotions')}
+                    className={`flex items-center gap-3 px-6 py-3 border-b-2 font-medium text-xs cursor-pointer transition min-w-[220px] ${
+                      categoryTab === 'promotions'
+                        ? 'border-blue-600 text-blue-600 font-bold bg-blue-50/20'
+                        : 'border-transparent text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Tag className={`w-4 h-4 ${categoryTab === 'promotions' ? 'text-blue-600' : 'text-slate-500'}`} />
+                    <div className="flex flex-col text-left">
+                      <div className="flex items-center gap-2">
+                        <span>Promotions</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-600 text-white">
+                          {promoCount > 0 ? `${promoCount} new` : '625 new'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-normal">Glassdoor, Linkedin, Indeed</span>
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Email List Content */}
+              {isListLoading ? (
+                <div className="flex items-center justify-center flex-1 text-slate-400 gap-2 font-normal text-xs">
+                  <Loader2 className="w-4 h-4 animate-spin text-blue-600" /> Loading messages...
+                </div>
+              ) : finalEmails.length === 0 ? (
+                <div className="flex flex-col items-center justify-center flex-1 text-slate-400 font-normal p-6 text-center space-y-2 text-xs">
+                  <Mail className="w-8 h-8 text-slate-300" />
+                  <span>No emails found in this category.</span>
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100 flex-1 overflow-y-auto">
+                  {finalEmails.map((email) => {
+                    const isChecked = selectedIds.has(email.uid || email.id);
+                    return (
+                      <li
+                        key={email.uid || email.id}
+                        onClick={() => {
+                          if (activeFolder === 'DRAFT') {
+                            handleOpenDraft(email);
+                          } else {
+                            openEmail(email);
+                          }
+                        }}
+                        className={`group flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors text-xs ${
+                          isChecked
+                            ? 'bg-[#c2e7ff]/30 hover:bg-[#c2e7ff]/40'
+                            : email.is_unread
+                            ? 'bg-white hover:bg-slate-50/90 font-semibold'
+                            : 'bg-white hover:bg-slate-50/80 font-normal text-slate-700'
+                        }`}
+                      >
+                        {/* Selection Checkbox */}
+                        <div onClick={(e) => e.stopPropagation()} className="shrink-0 flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleSelect(email.uid || email.id)}
+                            className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                        </div>
+
+                        {/* Star Button */}
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleStar(e, email)}
+                          className="p-0.5 text-slate-300 hover:text-amber-400 transition shrink-0 cursor-pointer"
+                          title={email.is_starred ? 'Starred' : 'Not starred'}
+                        >
+                          <Star className={`w-4 h-4 ${email.is_starred ? 'fill-amber-400 text-amber-400' : ''}`} />
+                        </button>
+
+                        {/* Sender Name */}
+                        <div className={`w-44 truncate shrink-0 ${email.is_unread ? 'font-bold text-slate-900' : 'font-normal text-slate-800'}`}>
+                          {!isProspectResponsesView && (activeFolder === 'SENT' || activeFolder.includes('Sent'))
+                            ? `To: ${email.to?.replace(/<.*>/, '').trim() || email.to}`
+                            : !isProspectResponsesView && activeFolder === 'DRAFT'
+                            ? `Draft: ${email.to?.replace(/<.*>/, '').trim() || '(No Recipient)'}`
+                            : email.prospect_company_name
+                            ? email.prospect_company_name
+                            : email.from?.replace(/<.*>/, '').trim() || email.from}
+                        </div>
+
+                        {/* Category Tag Badge (like Promotions / Updates / Prospect in Image 1) */}
+                        {email.prospect_company_name ? (
+                          <span className="shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                            Prospect
+                          </span>
+                        ) : email.label_ids?.includes('CATEGORY_PROMOTIONS') ? (
+                          <span className="shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded bg-teal-100 text-teal-800">
+                            Promotions
+                          </span>
+                        ) : email.label_ids?.includes('CATEGORY_UPDATES') ? (
+                          <span className="shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded bg-orange-100 text-orange-800">
+                            Updates
+                          </span>
+                        ) : null}
+
+                        {/* Subject & Snippet inline */}
+                        <div className="flex-1 truncate min-w-0 flex items-center gap-1.5">
+                          <span className={`truncate ${email.is_unread ? 'font-bold text-slate-900' : 'font-normal text-slate-800'}`}>
+                            {email.subject || '(No Subject)'}
+                          </span>
+                          {email.snippet && (
+                            <>
+                              <span className="text-slate-400 font-normal">-</span>
+                              <span className="text-slate-500 font-normal truncate">{email.snippet}</span>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Hover Actions (Image 1 Tinder row: Archive, Trash, Read/Unread, Snooze) */}
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="hidden group-hover:flex items-center gap-1 shrink-0"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleTrashMessage(email)}
+                            className="p-1.5 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-800 transition cursor-pointer"
+                            title="Archive"
+                          >
+                            <Archive className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTrashMessage(email)}
+                            className="p-1.5 hover:bg-slate-200 rounded text-slate-500 hover:text-rose-600 transition cursor-pointer"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => handleToggleRead(e, email)}
+                            className="p-1.5 hover:bg-slate-200 rounded text-slate-500 hover:text-blue-600 transition cursor-pointer"
+                            title={email.is_unread ? 'Mark as read' : 'Mark as unread'}
+                          >
+                            {email.is_unread ? <MailOpen className="w-4 h-4" /> : <Mail className="w-4 h-4" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => toast.info('Snoozed until tomorrow')}
+                            className="p-1.5 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-800 transition cursor-pointer"
+                            title="Snooze"
+                          >
+                            <Clock className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        {/* Date / Timestamp */}
+                        <div className="shrink-0 text-slate-500 text-xs font-normal group-hover:hidden sm:group-hover:block pl-2">
+                          {formatEmailDate(email.date)}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           )}
         </div>

@@ -3,7 +3,7 @@ import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { toast } from 'react-toastify';
 import SearchableSelect from '../common/SearchableSelect';
-import { LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, MessageSquare, Building2, Globe } from 'lucide-react';
+import { LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, MessageSquare, Building2, Globe, PanelLeftClose, PanelLeftOpen, Menu } from 'lucide-react';
 import { logout, loginSuccess } from '../../features/auth/authSlice';
 import api from '../../services/api';
 import { store } from '../../app/store';
@@ -18,6 +18,9 @@ const Layout = () => {
   const navigate = useNavigate();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [selectedTimezone, setSelectedTimezone] = useState(user?.timezone || 'UTC');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  const toggleSidebar = () => setIsSidebarCollapsed((prev) => !prev);
 
   const handleSaveSettings = async () => {
     try {
@@ -111,7 +114,7 @@ const Layout = () => {
           ]
         },
         { path: '/calendar', label: 'Calendar', icon: Calendar },
-        { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+        { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
         { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle },
         { path: '/settings', label: 'Settings', icon: Settings }
       ]
@@ -134,7 +137,7 @@ const Layout = () => {
         { path: '/prospects', label: 'Prospects', icon: Users },
         { path: '/lq-pipeline', label: 'LQ Pipeline', icon: Activity },
         { path: '/calendar', label: 'Calendar', icon: Calendar },
-        { path: '/inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+        { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
         { path: '/key-people', label: 'Key People', icon: UserCircle },
         { path: '/market-events', label: 'Market Events', icon: Calendar },
         { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
@@ -159,7 +162,11 @@ const Layout = () => {
   return (
     <div className="min-h-screen bg-slate-50 flex font-sans">
       {/* Sidebar */}
-      <aside className="w-64 bg-blue-600 sticky top-0 h-screen flex flex-col shrink-0 z-50 text-white">
+      <aside className={`bg-blue-600 sticky top-0 h-screen flex flex-col shrink-0 z-50 text-white transition-all duration-300 ease-in-out ${
+        isSidebarCollapsed && location.pathname.startsWith('/inbox')
+          ? 'w-0 -ml-64 opacity-0 pointer-events-none overflow-hidden'
+          : 'w-64 opacity-100'
+      }`}>
         <div className="h-20 flex items-center px-6 shrink-0">
           <span className="text-2xl font-black text-white tracking-tight">
             MarketIntel <span className="font-light text-blue-200">DB</span>
@@ -271,9 +278,9 @@ const Layout = () => {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 min-w-0 h-screen overflow-y-auto bg-slate-50">
-        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) ? 'h-full' : 'w-full px-4 sm:px-8 lg:px-12 py-8 h-full'}>
-          <Outlet />
+      <main className="flex-1 min-w-0 h-screen overflow-y-auto bg-slate-50 transition-all duration-300">
+        <div className={['/dashboard', '/calendar', '/manager-dashboard'].includes(location.pathname) || location.pathname.startsWith('/inbox') ? 'h-full w-full' : 'w-full px-4 sm:px-8 lg:px-12 py-8 h-full'}>
+          <Outlet context={{ isSidebarCollapsed, setIsSidebarCollapsed, toggleSidebar }} />
         </div>
       </main>
       {/* Settings Modal */}

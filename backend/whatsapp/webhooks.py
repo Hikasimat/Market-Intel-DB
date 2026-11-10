@@ -2074,14 +2074,14 @@ def _handle_session_status(
 
         old_status = session.status
 
-        # If already READY and has phone_number, DO NOT disconnect automatically on transient blips!
-        if session.status == WhatsAppSession.Status.READY and session.phone_number:
+        # If already READY, DO NOT disconnect automatically on transient blips!
+        if session.status == WhatsAppSession.Status.READY:
             if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
                 session.status = WhatsAppSession.Status.READY
             elif raw_status_upper in ("LOGGED_OUT", "UNPAIRED"):
                 session.status = WhatsAppSession.Status.DISCONNECTED
                 session.phone_number = None
-            elif raw_status_upper in ("FAILED", "STOPPED"):
+            elif raw_status_upper in ("FAILED", "STOPPED", "STARTING", "SCAN_QR_CODE", "CONNECTING", "RESUMING"):
                 # Preserve READY status and trigger seamless auto-recovery in WAHA
                 logger.info("Preserving READY status for session %s despite WAHA status: %s (auto-recovering)", session_name, waha_status)
                 from .client import get_waha_client
@@ -2092,10 +2092,10 @@ def _handle_session_status(
             else:
                 logger.info("Preserving READY status for session %s despite WAHA status: %s", session_name, waha_status)
         else:
-            if mapped_status:
-                session.status = mapped_status
-            elif raw_status_upper in ("WORKING", "READY"):
+            if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
                 session.status = WhatsAppSession.Status.READY
+            elif mapped_status:
+                session.status = mapped_status
 
         if phone:
             session.phone_number = phone

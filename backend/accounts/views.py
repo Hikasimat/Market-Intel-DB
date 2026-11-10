@@ -1276,15 +1276,17 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             'new_messages': [],
         }
         try:
-            unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=5)
-            messages = unread_res.get('messages', [])
-            unseen = sum(1 for m in messages if m.get('is_unread'))
+            unseen = GmailOAuthService.get_unread_count(google_creds, folder='INBOX')
+            messages = []
+            if unseen > 0:
+                unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=5)
+                messages = [m for m in unread_res.get('messages', []) if m.get('is_unread')]
             return Response({
                 'uidvalidity': 1,
                 'uidvalidity_changed': False,
                 'unseen_count': unseen,
                 'highest_uid': 0,
-                'new_messages': messages if unseen > 0 else [],
+                'new_messages': messages,
             }, status=status.HTTP_200_OK)
         except Exception as e:
             logging.getLogger(__name__).warning("Error in check_new_mail: %s", e)

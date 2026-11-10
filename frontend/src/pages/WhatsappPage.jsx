@@ -1138,7 +1138,7 @@ export default function WhatsappPage() {
       if (res.data && res.data.length > 0) {
         const found = res.data[0];
         setSelectedSession(prev => {
-          if (prev?.status === 'READY' && found.status !== 'READY' && prev.phone_number) {
+          if (prev?.status === 'READY' && found.status !== 'READY') {
             return prev;
           }
           return found;
@@ -1157,7 +1157,7 @@ export default function WhatsappPage() {
   const isFetchingQRRef = useRef(false);
 
   const fetchQR = useCallback(async (forceRestart = false) => {
-    if (selectedSession?.status === 'READY' && selectedSession?.phone_number && !forceRestart) {
+    if (selectedSession?.status === 'READY' && !forceRestart) {
       return;
     }
     if (isFetchingQRRef.current && !forceRestart) return;
@@ -1193,11 +1193,11 @@ export default function WhatsappPage() {
       isFetchingQRRef.current = false;
       setLoadingQR(false);
     }
-  }, [selectedSession?.status, selectedSession?.phone_number]);
+  }, [selectedSession?.status]);
 
   // QR Polling: Sequential polling prevents request piling and worker thread starvation
   useEffect(() => {
-    const isReady = (selectedSession?.status === 'READY' && !!selectedSession?.phone_number) || sessionStatus?.connected;
+    const isReady = selectedSession?.status === 'READY' || sessionStatus?.connected;
     if (isReady) return;
 
     let active = true;
@@ -1217,7 +1217,7 @@ export default function WhatsappPage() {
       active = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [selectedSession?.status, selectedSession?.phone_number, sessionStatus?.connected, fetchQR]);
+  }, [selectedSession?.status, sessionStatus?.connected, fetchQR]);
 
   // Request 8-digit Pairing Code via Phone Number
   const handleRequestPairingCode = async (e) => {
