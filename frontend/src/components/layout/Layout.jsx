@@ -117,7 +117,6 @@ const Layout = () => {
           { path: '/lq-pipeline', label: 'All Prospects', exact: true },
           { path: '/lq-pipeline/pending', label: 'Verification Pending', exact: true },
           { path: '/lq-pipeline/verified', label: 'Outreached', exact: true },
-          { path: '/lq-pipeline/issued', label: 'Issued Task to PRE', exact: true },
         ]
       },
       { path: '/government-entities', label: 'Government Entities', icon: Building2 },

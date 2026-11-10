@@ -4,7 +4,7 @@ import { toast } from 'react-toastify';
 import { fetchProspects, deleteProspect } from '../features/prospects/prospectSlice';
 import { fetchMarketEvents } from '../features/marketEvents/marketEventSlice';
 import ProspectForm from '../components/prospects/ProspectForm';
-import { Plus, Search, Edit2, Trash2, Building2, Eye, CheckCircle, XCircle } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, Building2, Eye, CheckCircle, XCircle, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Pagination from '../components/layout/Pagination';
 import SearchableSelect from '../components/common/SearchableSelect';
@@ -128,20 +128,30 @@ const ProspectsPage = () => {
       </div>
 
       {/* Filter / Search Card */}
-      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden flex-1 flex flex-col min-h-[350px]">
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden flex-1 flex flex-col min-h-0">
         <div className="p-3 border-b border-slate-200/80 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
           <div className="flex flex-1 max-w-2xl gap-3">
             <form onSubmit={handleSearch} className="flex-1 relative">
-              <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <Search className="h-3.5 w-3.5 text-slate-400" />
               </div>
               <input
                 type="text"
-                className="block w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-white placeholder-slate-400 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-colors"
-                placeholder="Search companies..."
+                className="block w-full pl-9 pr-8 py-1.5 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 bg-white placeholder-slate-400 shadow-2xs hover:border-slate-300 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition"
+                placeholder="Search companies by name..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full hover:bg-slate-100 transition"
+                  title="Clear search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </form>
             
             <div className="w-56">
@@ -160,13 +170,13 @@ const ProspectsPage = () => {
             </div>
           </div>
           
-          <div className="text-xs text-slate-500 font-medium">
-            Total Records: {count}
+          <div className="text-xs font-semibold text-slate-500 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs shrink-0">
+            Total Records: <span className="font-bold text-slate-800">{count}</span>
           </div>
         </div>
         
         {marketEventFilter && (
-          <div className="px-3.5 py-2 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between text-xs">
+          <div className="px-3.5 py-2 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between text-xs shrink-0">
             <div>
               <span className="text-slate-700">
                 Showing prospects participating in: <span className="font-bold text-indigo-900">{marketEventsList?.find(e => e.id === marketEventFilter)?.event_title}</span>
@@ -185,21 +195,21 @@ const ProspectsPage = () => {
         )}
 
         {error && (
-          <div className="p-3 bg-red-50 border-b border-red-200 text-red-700 text-xs font-medium">
+          <div className="p-3 bg-red-50 border-b border-red-200 text-red-700 text-xs font-medium shrink-0">
             {error}
           </div>
         )}
 
-        <div className="overflow-x-auto flex-1 flex flex-col">
-          <table className="min-w-full divide-y divide-slate-100 flex-1">
+        <div className="overflow-x-auto flex-1">
+          <table className="min-w-full divide-y divide-slate-100">
             <thead className="bg-slate-50/80">
               <tr>
-                <th scope="col" className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Prospect Name</th>
-                <th scope="col" className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Country</th>
-                <th scope="col" className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Structure</th>
-                <th scope="col" className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Status</th>
-                <th scope="col" className="px-4 py-2.5 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Primary Industry</th>
-                <th scope="col" className="px-4 py-2.5 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Prospect Name</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Country</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Structure</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Primary Industry</th>
+                <th scope="col" className="px-3.5 py-2 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-slate-100">
@@ -221,7 +231,7 @@ const ProspectsPage = () => {
               ) : (
                 items.map((prospect) => (
                   <tr key={prospect.id} className="hover:bg-slate-50/70 transition-colors">
-                    <td className="px-4 py-2.5 whitespace-nowrap">
+                    <td className="px-3.5 py-2 whitespace-nowrap">
                       <div className="flex items-center gap-1.5">
                         <Link to={`/prospects/${prospect.id}`} className="text-xs font-bold text-slate-900 hover:text-indigo-600 transition">
                           {prospect.company_name}
@@ -234,13 +244,13 @@ const ProspectsPage = () => {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-2.5 whitespace-nowrap text-xs text-slate-600">{prospect.country_head_office}</td>
-                    <td className="px-4 py-2.5 whitespace-nowrap">
+                    <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600">{prospect.country_head_office}</td>
+                    <td className="px-3.5 py-2 whitespace-nowrap">
                       <span className="px-2 py-0.5 inline-flex text-[10px] leading-4 font-bold rounded-full bg-slate-100 text-slate-700 border border-slate-200">
                         {prospect.company_structure}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 whitespace-nowrap">
+                    <td className="px-3.5 py-2 whitespace-nowrap">
                       <span className={`px-2 py-0.5 inline-flex text-[10px] leading-4 font-bold rounded-full border ${
                         prospect.operational_status === 'Active' ? 'bg-green-50 text-green-700 border-green-200' :
                         prospect.operational_status === 'Inactive' ? 'bg-amber-50 text-amber-700 border-amber-200' :
@@ -249,8 +259,8 @@ const ProspectsPage = () => {
                         {prospect.operational_status}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 whitespace-nowrap text-xs text-slate-600">{prospect.primary_industries}</td>
-                    <td className="px-4 py-2.5 whitespace-nowrap text-right text-xs font-medium">
+                    <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600">{prospect.primary_industries}</td>
+                    <td className="px-3.5 py-2 whitespace-nowrap text-right text-xs font-medium">
                       <div className="flex justify-end gap-1.5 items-center">
                         {user?.role === 'PRE' && (
                           <>

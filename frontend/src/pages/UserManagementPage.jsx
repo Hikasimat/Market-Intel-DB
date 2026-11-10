@@ -61,73 +61,73 @@ const UserManagementPage = () => {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="sm:flex sm:items-center sm:justify-between">
+    <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
+      <div className="sm:flex sm:items-center sm:justify-between shrink-0">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-            <Users className="h-6 w-6 text-indigo-600" />
+          <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Users className="h-5 w-5 text-indigo-600" />
             User Management
           </h1>
-          <p className="mt-2 text-sm text-slate-600">
+          <p className="mt-0.5 text-xs text-slate-500">
             {isManager
               ? 'Create, edit, and manage user accounts (Manager cannot modify superusers).'
               : 'Create, edit, and manage user accounts and their roles (PRE / LQ / MANAGER / DM).'}
           </p>
         </div>
-        <div className="mt-4 sm:mt-0">
+        <div className="mt-3 sm:mt-0">
           <button
             onClick={handleAddClick}
-            className="inline-flex items-center px-4 py-2 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+            className="inline-flex items-center px-3.5 py-1.5 border border-transparent rounded-xl shadow-xs text-xs font-bold text-white bg-slate-900 hover:bg-black transition-colors"
           >
-            <Plus className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+            <Plus className="-ml-0.5 mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
             Add User
           </button>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden flex-1 flex flex-col min-h-0">
         {error && (
-          <div className="p-4 bg-red-50 border-b border-red-200 text-red-700 text-sm">
+          <div className="p-3 bg-red-50 border-b border-red-200 text-red-700 text-xs shrink-0">
             {error}
           </div>
         )}
 
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200">
-            <thead className="bg-slate-50">
+        <div className="overflow-x-auto flex-1">
+          <table className="min-w-full divide-y divide-slate-100">
+            <thead className="bg-slate-50/80">
               <tr>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">User</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Role</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Email (Username)</th>
-                <th scope="col" className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">User</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Role</th>
+                <th scope="col" className="px-3.5 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Email (Username)</th>
+                <th scope="col" className="px-3.5 py-2 text-right text-[10px] font-bold text-slate-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-slate-200">
+            <tbody className="bg-white divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td colSpan="4" className="px-6 py-12 text-center text-slate-500">
+                  <td colSpan="4" className="px-6 py-12 text-center text-slate-500 text-xs">
                     <div className="flex justify-center items-center gap-2">
-                      <div className="w-4 h-4 rounded-full bg-indigo-600 animate-ping"></div>
+                      <div className="w-3.5 h-3.5 rounded-full bg-indigo-600 animate-ping"></div>
                       Loading users...
                     </div>
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan="4" className="px-6 py-12 text-center text-slate-500">
+                  <td colSpan="4" className="px-6 py-12 text-center text-slate-500 text-xs">
                     No users found.
                   </td>
                 </tr>
               ) : (
                 items.map((user) => (
-                  <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-slate-900">
+                  <tr key={user.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3.5 py-2 whitespace-nowrap">
+                      <div className="text-xs font-bold text-slate-900">
                         {user.first_name} {user.last_name}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2.5 py-1 inline-flex text-xs leading-4 font-bold rounded-lg text-white ${
+                    <td className="px-3.5 py-2 whitespace-nowrap">
+                      <span className={`px-2 py-0.5 inline-flex text-[10px] leading-4 font-bold rounded-lg text-white ${
                         user.is_superuser
                           ? 'bg-slate-700'
                           : user.role === 'PRE'
@@ -149,17 +149,17 @@ const UserManagementPage = () => {
                           : user.role}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">
+                    <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600">
                       {user.email || user.username}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <div className="flex justify-end gap-3 items-center">
-                        <button onClick={() => handleEditClick(user)} className="text-indigo-600 hover:text-indigo-900" title="Edit User">
-                          <Edit2 size={18} />
+                    <td className="px-3.5 py-2 whitespace-nowrap text-right text-xs font-medium">
+                      <div className="flex justify-end gap-2 items-center">
+                        <button onClick={() => handleEditClick(user)} className="text-slate-400 hover:text-indigo-600 p-1 rounded-lg hover:bg-slate-100 transition" title="Edit User">
+                          <Edit2 size={15} />
                         </button>
                         {currentUser?.is_superuser && (
-                          <button onClick={() => handleDelete(user.id)} className="text-red-500 hover:text-red-700" title="Delete User">
-                            <Trash2 size={18} />
+                          <button onClick={() => handleDelete(user.id)} className="text-slate-400 hover:text-red-600 p-1 rounded-lg hover:bg-slate-100 transition" title="Delete User">
+                            <Trash2 size={15} />
                           </button>
                         )}
                       </div>

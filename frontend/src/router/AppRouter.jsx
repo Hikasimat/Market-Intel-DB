@@ -154,7 +154,7 @@ const AppRouter = () => {
             <Route path="lq-pipeline" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="all" /></RoleRoute>} />
             <Route path="lq-pipeline/pending" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="pending" /></RoleRoute>} />
             <Route path="lq-pipeline/verified" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="verified" /></RoleRoute>} />
-            <Route path="lq-pipeline/issued" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelinePage filter="issued" /></RoleRoute>} />
+            <Route path="lq-pipeline/issued" element={<Navigate to="/lq-pipeline" replace />} />
             <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
 
             <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
