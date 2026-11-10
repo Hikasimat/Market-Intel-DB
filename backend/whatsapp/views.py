@@ -1035,36 +1035,40 @@ class WhatsAppConversationsView(APIView):
             "prospect_contact", "prospect", "session"
         ).filter(is_deleted=False)
 
-        # Opportunistically sync groups from WAHA for this user's active session
+        # Opportunistically sync groups from WAHA for this user's active session (cached every 10 min to prevent rate-limiting)
         if user_session and user_session.status == WhatsAppSession.Status.READY:
-            try:
-                from .client import get_waha_client
-                client = get_waha_client()
-                waha_groups = client.get_groups(user_session.session_name)
-                for wc in waha_groups:
-                    raw_id = wc.get("id") or wc.get("gid") or wc.get("chatId") or ""
-                    c_id = re.sub(r":[0-9]+@", "@", raw_id)
-                    if not c_id:
-                        continue
-                    if not c_id.endswith("@g.us"):
-                        c_id = f"{c_id}@g.us"
-                    w_name = wc.get("name") or wc.get("subject") or "WhatsApp Group"
+            from django.core.cache import cache
+            group_sync_cache_key = f"waha_groups_sync_{user_session.id}"
+            if not cache.get(group_sync_cache_key):
+                cache.set(group_sync_cache_key, True, 600)  # 10 minutes cache
+                try:
+                    from .client import get_waha_client
+                    client = get_waha_client()
+                    waha_groups = client.get_groups(user_session.session_name)
+                    for wc in (waha_groups or []):
+                        raw_id = wc.get("id") or wc.get("gid") or wc.get("chatId") or ""
+                        c_id = re.sub(r":[0-9]+@", "@", raw_id)
+                        if not c_id:
+                            continue
+                        if not c_id.endswith("@g.us"):
+                            c_id = f"{c_id}@g.us"
+                        w_name = wc.get("name") or wc.get("subject") or "WhatsApp Group"
 
-                    conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id=c_id).first()
-                    if not conv_obj:
-                        conv_obj = WhatsAppConversation.objects.create(
-                            session=user_session,
-                            chat_id=c_id,
-                            whatsapp_name=w_name,
-                            unread_count=wc.get("unreadCount", 0),
-                            is_matched=True,
-                        )
-                    elif w_name and conv_obj.whatsapp_name != w_name:
-                        conv_obj.whatsapp_name = w_name
-                        conv_obj.is_matched = True
-                        conv_obj.save(update_fields=["whatsapp_name", "is_matched"])
-            except Exception as e:
-                logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
+                        conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id=c_id).first()
+                        if not conv_obj:
+                            conv_obj = WhatsAppConversation.objects.create(
+                                session=user_session,
+                                chat_id=c_id,
+                                whatsapp_name=w_name,
+                                unread_count=wc.get("unreadCount", 0),
+                                is_matched=True,
+                            )
+                        elif w_name and conv_obj.whatsapp_name != w_name:
+                            conv_obj.whatsapp_name = w_name
+                            conv_obj.is_matched = True
+                            conv_obj.save(update_fields=["whatsapp_name", "is_matched"])
+                except Exception as e:
+                    logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
         # Strictly scoped to current user's session and ownership
         qs = qs.filter(Q(session=user_session) | Q(session__owner=user))

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Bell, Clock, X, Mail, MessageCircle } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Bell, Clock, X, Mail, MessageCircle, Phone, PhoneCall, PhoneOff } from 'lucide-react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import api from '../../services/api';
 import { setUnreadCount, mergeEmails } from '../../features/inbox/inboxSlice';
-import { setWhatsappUnreadCount } from '../../features/whatsapp/whatsappSlice';
+import { setWhatsappUnreadCount, setIncomingCall, setIsCallingPaired } from '../../features/whatsapp/whatsappSlice';
 import {
   getMailboxState,
   setMailboxState,
@@ -19,14 +19,17 @@ import { formatTimeForUser, formatDateTimeForUser } from '../../utils/timezone';
 const REMINDER_INTERVAL_MS = 30_000;
 /** New-mail polling interval: 60 seconds */
 const NEW_MAIL_INTERVAL_MS = 60_000;
-/** WhatsApp polling interval: 30 seconds */
-const WHATSAPP_POLL_INTERVAL_MS = 30_000;
+/** WhatsApp message polling interval: 10 seconds */
+const WHATSAPP_POLL_INTERVAL_MS = 10_000;
+/** WhatsApp call polling interval: 2.5 seconds */
+const WHATSAPP_CALL_POLL_INTERVAL_MS = 2_500;
 /** Primary folder to poll for new mail */
 const POLL_FOLDER = 'INBOX';
 
 export default function NotificationCenter() {
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useSelector((state) => state.auth);
 
   // ─── Reminder state (unchanged) ─────────────────────────────────────────
@@ -41,6 +44,7 @@ export default function NotificationCenter() {
 
   // ─── WhatsApp notification state ─────────────────────────────────────────
   const [whatsappToasts, setWhatsappToasts] = useState([]);
+  const [incomingCall, setIncomingCallState] = useState(null);
   const notifiedWhatsappRef = useRef(new Map());
   const isFirstWhatsappPollRef = useRef(true);
 
@@ -259,7 +263,28 @@ export default function NotificationCenter() {
 
   // ─── WhatsApp polling & notifications ──────────────────────────────────
 
+  const playMessageSound = () => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, now);
+      osc.frequency.setValueAtTime(880, now + 0.08);
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.25);
+      setTimeout(() => ctx.close().catch(() => {}), 300);
+    } catch (_) {}
+  };
+
   const triggerWhatsappToast = (toastId, title, message) => {
+    playMessageSound();
     setWhatsappToasts((prev) => {
       if (prev.find((t) => t.id === toastId)) return prev;
       return [
@@ -277,6 +302,123 @@ export default function NotificationCenter() {
 
   const removeWhatsappToast = (id) => {
     setWhatsappToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const markCallHandled = useCallback((rawCallId) => {
+    const clean = String(rawCallId || '').replace(/^call_/, '').trim();
+    if (!clean) return;
+    try {
+      const saved = sessionStorage.getItem('wa_handled_call_ids');
+      const set = saved ? new Set(JSON.parse(saved)) : new Set();
+      set.add(clean);
+      sessionStorage.setItem('wa_handled_call_ids', JSON.stringify(Array.from(set).slice(-200)));
+    } catch (_) {}
+  }, []);
+
+  const isCallHandled = useCallback((rawCallId) => {
+    const clean = String(rawCallId || '').replace(/^call_/, '').trim();
+    if (!clean) return true;
+    try {
+      const saved = sessionStorage.getItem('wa_handled_call_ids');
+      const set = saved ? new Set(JSON.parse(saved)) : new Set();
+      return set.has(clean);
+    } catch (_) {
+      return false;
+    }
+  }, []);
+
+  const checkWhatsAppCalling = useCallback(async () => {
+    const currentUser = userRef.current;
+    if (!currentUser?.id) return;
+
+    try {
+      const res = await api.get('/whatsapp/calls/status/');
+      const paired = Boolean(res.data?.calling?.paired || res.data?.paired || res.data?.connected);
+      dispatch(setIsCallingPaired(paired));
+
+      const incoming = res.data?.incoming_call;
+      if (incoming && incoming.call_id) {
+        const cleanId = String(incoming.call_id).replace(/^call_/, '').trim();
+        if (!cleanId || incoming.status !== 'ringing' || isCallHandled(cleanId)) {
+          setIncomingCallState(null);
+          dispatch(setIncomingCall(null));
+        } else {
+          const callObj = { ...incoming, call_id: cleanId };
+          setIncomingCallState(callObj);
+          dispatch(setIncomingCall(callObj));
+        }
+      } else {
+        setIncomingCallState(null);
+        dispatch(setIncomingCall(null));
+      }
+    } catch (_) {}
+  }, [dispatch, isCallHandled]);
+
+  useEffect(() => {
+    if (!user) return;
+    checkWhatsAppCalling();
+    const interval = setInterval(checkWhatsAppCalling, WHATSAPP_CALL_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [user, checkWhatsAppCalling]);
+
+  // Audible ring tone for incoming calls when user is NOT on /whatsapp
+  useEffect(() => {
+    if (!incomingCall || location.pathname === '/whatsapp') return;
+    let ringInterval = null;
+    let ringCtx = null;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      ringCtx = new AudioCtx();
+      const playTone = () => {
+        if (!ringCtx || ringCtx.state === 'closed') return;
+        if (ringCtx.state === 'suspended') ringCtx.resume().catch(() => {});
+        const now = ringCtx.currentTime;
+        const osc = ringCtx.createOscillator();
+        const gain = ringCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.setValueAtTime(480, now + 0.1);
+        gain.gain.setValueAtTime(0.14, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+        osc.connect(gain);
+        gain.connect(ringCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.8);
+      };
+      playTone();
+      ringInterval = setInterval(playTone, 2000);
+    } catch (_) {}
+    return () => {
+      if (ringInterval) clearInterval(ringInterval);
+      if (ringCtx) ringCtx.close().catch(() => {});
+    };
+  }, [incomingCall, location.pathname]);
+
+  const handleDeclineCall = async (call) => {
+    const cleanId = String(call?.call_id || '').replace(/^call_/, '').trim();
+    if (!cleanId) return;
+    markCallHandled(cleanId);
+    setIncomingCallState(null);
+    dispatch(setIncomingCall(null));
+    try {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanId)}/reject/`, {
+        session_name: call.session_name || 'default',
+      });
+    } catch (_) {}
+  };
+
+  const handleAcceptCall = async (call) => {
+    const cleanId = String(call?.call_id || '').replace(/^call_/, '').trim();
+    if (!cleanId) return;
+    markCallHandled(cleanId);
+    setIncomingCallState(null);
+    dispatch(setIncomingCall(null));
+    try {
+      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanId)}/accept/`, {
+        session_name: call.session_name || 'default',
+      });
+    } catch (_) {}
+    navigate('/whatsapp', { state: { autoAcceptCall: call } });
   };
 
   const checkNewWhatsApp = useCallback(async () => {
@@ -487,6 +629,47 @@ export default function NotificationCenter() {
           </div>
         ))}
       </div>
+
+      {/* Global WhatsApp Incoming Call Modal (active when user is anywhere else in the application) */}
+      {incomingCall && location.pathname !== '/whatsapp' && (
+        <div className="fixed top-6 right-6 z-[9999] pointer-events-auto bg-slate-900/95 backdrop-blur-md text-white border-2 border-emerald-500 rounded-2xl shadow-2xl p-5 w-88 max-w-[calc(100vw-2rem)] animate-in fade-in zoom-in-95 duration-200">
+          <div className="flex items-center gap-3.5 mb-3.5">
+            <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-400 flex items-center justify-center shrink-0">
+              <PhoneCall className="w-6 h-6 text-emerald-400 animate-bounce" />
+            </div>
+            <div className="flex-1 min-w-0 text-left">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] uppercase tracking-wider font-extrabold text-emerald-400">Incoming WhatsApp Call</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              </div>
+              <h4 className="text-sm font-bold text-white truncate mt-0.5">
+                {incomingCall.caller_name || incomingCall.caller_phone || 'WhatsApp Contact'}
+              </h4>
+              <p className="text-xs text-slate-300 font-mono truncate">
+                {incomingCall.caller_phone || 'WhatsApp Voice Call'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5 pt-2.5 border-t border-slate-700/60">
+            <button
+              type="button"
+              onClick={() => handleDeclineCall(incomingCall)}
+              className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+            >
+              <PhoneOff className="w-4 h-4" />
+              <span>Decline</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleAcceptCall(incomingCall)}
+              className="flex-1 py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/30 ring-2 ring-emerald-400/50 active:scale-95 cursor-pointer animate-pulse"
+            >
+              <PhoneCall className="w-4 h-4" />
+              <span>Accept</span>
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 }

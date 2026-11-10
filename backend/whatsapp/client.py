@@ -176,9 +176,16 @@ class WAHAClient:
                 or path.startswith(("/api/chats/", "/api/groups/"))
                 or path in ("/api/groups",)
             )
+            is_rate_overlimit = exc.code == 500 and isinstance(detail, dict) and detail.get("message") == "rate-overlimit"
             if is_benign_404:
                 logger.debug(
                     "WAHA probe 404 (benign/unsupported route): method=%s path=%s",
+                    method,
+                    path,
+                )
+            elif is_rate_overlimit:
+                logger.debug(
+                    "WAHA rate-overlimit (throttling): method=%s path=%s",
                     method,
                     path,
                 )

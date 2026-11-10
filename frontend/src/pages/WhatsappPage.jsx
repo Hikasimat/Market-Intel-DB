@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { setWhatsappUnreadCount } from '../features/whatsapp/whatsappSlice';
 import {
@@ -372,12 +373,36 @@ registerProcessor("playback-processor", PlaybackProcessor);
 // ---------------------------------------------------------------------------
 export default function WhatsappPage() {
   const dispatch = useDispatch();
+  const location = useLocation();
   const { user } = useSelector((state) => state.auth);
 
+  // Retrieve cached active WhatsApp session from sessionStorage to eliminate UI flash on page navigation
+  const getCachedActiveSession = () => {
+    try {
+      const saved = sessionStorage.getItem('wa_cached_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && (parsed.status === 'READY' || parsed.phone_number)) {
+          return parsed;
+        }
+      }
+    } catch (_) {}
+    return null;
+  };
+
+  const initialCachedSession = getCachedActiveSession();
+
   // Session & Connection state
-  const [sessions, setSessions] = useState([]);
-  const [selectedSession, setSelectedSession] = useState(null);
-  const [sessionStatus, setSessionStatus] = useState(null);
+  const [sessions, setSessions] = useState(initialCachedSession ? [initialCachedSession] : []);
+  const [selectedSession, setSelectedSession] = useState(initialCachedSession);
+  const [sessionStatus, setSessionStatus] = useState(
+    initialCachedSession ? {
+      status: 'WORKING',
+      connected: true,
+      session_name: initialCachedSession.session_name,
+      phone_number: initialCachedSession.phone_number,
+    } : null
+  );
   const [qrCodeData, setQrCodeData] = useState(null);
   const [loadingQR, setLoadingQR] = useState(false);
   const [qrExpired, setQrExpired] = useState(false);
@@ -593,11 +618,21 @@ export default function WhatsappPage() {
       const incoming = res.data?.incoming_call;
       if (incoming && incoming.call_id) {
         const cleanIncId = String(incoming.call_id).replace(/^call_/, '').trim();
+        let isHandledAlready = handledCallIdsRef.current.has(cleanIncId);
+        if (!isHandledAlready) {
+          try {
+            const saved = sessionStorage.getItem('wa_handled_call_ids');
+            if (saved && JSON.parse(saved).includes(cleanIncId)) {
+              handledCallIdsRef.current.add(cleanIncId);
+              isHandledAlready = true;
+            }
+          } catch (_) {}
+        }
         if (
           !cleanIncId ||
           incoming.status !== 'ringing' ||
           callState.active ||
-          handledCallIdsRef.current.has(cleanIncId)
+          isHandledAlready
         ) {
           setIncomingCall(null);
         } else {
@@ -1130,6 +1165,17 @@ export default function WhatsappPage() {
     }
   }, [incomingCall, selectedSession?.session_name, markCallIdHandled, showToast]);
 
+  // Auto-accept incoming call if user answered from another page
+  useEffect(() => {
+    if (location.state?.autoAcceptCall) {
+      const callToAccept = location.state.autoAcceptCall;
+      try {
+        window.history.replaceState({}, document.title);
+      } catch (_) {}
+      handleAcceptIncomingCall(callToAccept);
+    }
+  }, [location.state, handleAcceptIncomingCall]);
+
   // -------------------------------------------------------------------
   // 1. Session & QR Code Management
   // -------------------------------------------------------------------
@@ -1142,6 +1188,17 @@ export default function WhatsappPage() {
         setSelectedSession(prev => {
           if (prev?.status === 'READY' && found.status !== 'READY') {
             return prev;
+          }
+          if (found.status === 'READY') {
+            try {
+              sessionStorage.setItem('wa_cached_session', JSON.stringify(found));
+            } catch (_) {}
+            setSessionStatus({
+              status: 'WORKING',
+              connected: true,
+              session_name: found.session_name,
+              phone_number: found.phone_number,
+            });
           }
           return found;
         });
@@ -1162,6 +1219,18 @@ export default function WhatsappPage() {
     if (selectedSession?.status === 'READY' && !forceRestart) {
       return;
     }
+    // Fast exit if cached session is already ready
+    if (!forceRestart) {
+      try {
+        const saved = sessionStorage.getItem('wa_cached_session');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed && (parsed.status === 'READY' || parsed.phone_number)) {
+            return;
+          }
+        }
+      } catch (_) {}
+    }
     if (isFetchingQRRef.current && !forceRestart) return;
     isFetchingQRRef.current = true;
     if (forceRestart) {
@@ -1176,11 +1245,17 @@ export default function WhatsappPage() {
       if (data.status === 'WORKING' || data.connected) {
         setQrCodeData(null);
         setQrExpired(false);
+        const readySession = {
+          session_name: data.session_name || selectedSession?.session_name,
+          status: 'READY',
+          phone_number: data.phone_number || selectedSession?.phone_number
+        };
+        try {
+          sessionStorage.setItem('wa_cached_session', JSON.stringify(readySession));
+        } catch (_) {}
         setSelectedSession(prev => ({
           ...(prev || {}),
-          session_name: data.session_name || prev?.session_name,
-          status: 'READY',
-          phone_number: data.phone_number || prev?.phone_number
+          ...readySession,
         }));
       } else if (data.status === 'SCAN_QR_CODE') {
         const qr = data.qrBase64 || data.qr || data.value || data.data;
@@ -1195,7 +1270,7 @@ export default function WhatsappPage() {
       isFetchingQRRef.current = false;
       setLoadingQR(false);
     }
-  }, [selectedSession?.status]);
+  }, [selectedSession?.status, selectedSession?.session_name, selectedSession?.phone_number]);
 
   // QR Polling: Sequential polling prevents request piling and worker thread starvation
   useEffect(() => {
@@ -1254,14 +1329,17 @@ export default function WhatsappPage() {
     if (!window.confirm("Are you sure you want to disconnect WhatsApp? You will need to scan the QR code again.")) return;
     try {
       const sessionName = selectedSession?.session_name || '';
+      try {
+        sessionStorage.removeItem('wa_cached_session');
+      } catch (_) {}
       await api.post('/whatsapp/session/logout/', { session_name: sessionName });
       showToast('WhatsApp session disconnected.', 'info');
-      setSelectedSession(prev => prev ? { ...prev, status: 'DISCONNECTED', phone_number: null } : null);
+      setSelectedSession(null);
       setSessionStatus({ status: 'SCAN_QR_CODE', connected: false });
       setChats([]);
       setSelectedChat(null);
       setMessages([]);
-      fetchQR();
+      fetchQR(true);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Failed to disconnect session.', 'error');
     }
