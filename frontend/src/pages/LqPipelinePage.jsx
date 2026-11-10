@@ -345,28 +345,14 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative overflow-hidden shadow-sm shrink-0">
         <div className="relative z-10">
-          <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Lead Verification & Outreach Workspace</h1>
-          <p className="text-blue-100 text-xs max-w-2xl">Review and verify prospect master data, qualify opportunities, and continue the lead qualification workflow.</p>
+          <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Outreach Workspace</h1>
+          <p className="text-blue-100 text-xs max-w-2xl">Execute outreach communication, log call outcomes, and qualify opportunities.</p>
         </div>
       </div>
 
       {/* KPI Cards */}
       {!isManager && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-500">LQ Pipeline Prospects</span>
-              <Building2 className="w-4 h-4 text-slate-400" />
-            </div>
-            <p className="text-2xl font-black text-slate-900 mt-1">{pipelineCount}</p>
-          </div>
-          <div className="bg-white p-4 rounded-xl border border-amber-200 bg-amber-50/30 shadow-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-amber-900">Issues Sent to PRE</span>
-              <AlertTriangle className="w-4 h-4 text-amber-600" />
-            </div>
-            <p className="text-2xl font-black text-amber-900 mt-1">{preIssuesCount}</p>
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-white p-4 rounded-xl border border-emerald-200 bg-emerald-50/30 shadow-sm">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-emerald-700">Outreached</span>
@@ -468,28 +454,6 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
         </div>
       )}
 
-      {/* PRE Updated Confirmation Banner for LQ */}
-      {!isManager && items.some(i => i.pre_task_status === 'PRE_UPDATED') && (
-        <div className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
-          <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
-              <CheckCircle className="w-5 h-5 text-emerald-600" />
-            </div>
-            <div>
-              <h4 className="font-black text-emerald-950 text-sm flex items-center gap-2">
-                <span>PRE Has Completed Data Updates</span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold uppercase">
-                  {items.filter(i => i.pre_task_status === 'PRE_UPDATED').length} Prospect(s) Ready
-                </span>
-              </h4>
-              <p className="text-xs text-emerald-800 mt-1">
-                PRE has updated the missing information (such as missing email addresses) for {items.filter(i => i.pre_task_status === 'PRE_UPDATED').map(i => i.prospect?.company_name).filter(Boolean).slice(0, 3).join(', ')}{items.filter(i => i.pre_task_status === 'PRE_UPDATED').length > 3 ? '...' : ''}. Click &quot;Confirm Fixes&quot; on the record to review and proceed with outreach.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Table Container */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex-1 flex flex-col min-h-0">
         <div className="p-3 border-b border-slate-200/80 bg-slate-50/70 flex flex-col md:flex-row md:items-center justify-between gap-3 shrink-0">
@@ -528,23 +492,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
                     : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
                 }`}
               >
-                All Pipeline ({items.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => handleFilterChange('pending')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                  activeFilter === 'pending'
-                    ? 'bg-amber-600 text-white shadow-2xs'
-                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-                }`}
-              >
-                <span>Pending Verification</span>
-                <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
-                  activeFilter === 'pending' ? 'bg-amber-700 text-white' : 'bg-amber-100 text-amber-800'
-                }`}>
-                  {items.filter(i => i.verification_status !== 'Verified').length}
-                </span>
+                All Outreach ({items.length})
               </button>
               <button
                 type="button"
@@ -574,16 +522,15 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
           <table className="w-full text-left text-xs border-collapse">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
-                <th className="px-3.5 py-2">Master Prospect & PRE Data</th>
-                <th className="px-3.5 py-2">PRE Task Status</th>
-                <th className="px-3.5 py-2">Verification Status</th>
+                <th className="px-3.5 py-2">Prospect & Company Details</th>
+                <th className="px-3.5 py-2">Status</th>
                 {!isManager && <th className="px-3.5 py-2 text-right">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={isManager ? 3 : 4} className="p-8 text-center text-slate-500 bg-slate-50">
+                  <td colSpan={isManager ? 2 : 3} className="p-8 text-center text-slate-500 bg-slate-50">
                     <div className="flex flex-col items-center justify-center">
                       <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100 mb-2">
                         <Activity className="w-5 h-5 text-slate-400" />
@@ -596,93 +543,78 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
               ) : (
                 filteredItems.map(item => {
                   const p = item.prospect;
-                const isIssue = item.pre_task_status === 'ISSUE_SENT_TO_PRE';
-                const isUpdated = item.pre_task_status === 'PRE_UPDATED';
-                const isLeadFreeze = item.qualification_status === 'Lead Freeze';
-                const isLeadQualified = item.qualification_status === 'Lead Qualified';
+                  const isLeadFreeze = item.qualification_status === 'Lead Freeze';
+                  const isLeadQualified = item.qualification_status === 'Lead Qualified';
 
-                return (
-                  <tr key={item.id} className="hover:bg-slate-50/80 transition">
-                    <td className="px-3.5 py-2">
-                      <div className="flex items-start gap-2.5">
-                        <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 mt-0.5">
-                          <Building2 className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <Link to={`/lq-pipeline/${item.id}`} className="font-bold text-indigo-600 hover:text-indigo-800 hover:underline text-xs transition">
-                            {p.company_name}
-                          </Link>
-                          <p className="text-[10px] text-slate-500 truncate max-w-md" title={p.primary_industries || ''}>
-                            {p.country_head_office} &bull; {p.primary_industries || '—'}
-                          </p>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200">
-                              Calls Logged: {item.calls_logged_count || 0}
-                            </span>
-                            <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200">
-                              Emails Sent: {item.emails_sent_count || 0}
-                            </span>
+                  return (
+                    <tr key={item.id} className="hover:bg-slate-50/80 transition">
+                      <td className="px-3.5 py-2">
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 mt-0.5">
+                            <Building2 className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <Link to={`/lq-pipeline/${item.id}`} className="font-bold text-indigo-600 hover:text-indigo-800 hover:underline text-xs transition">
+                              {p.company_name}
+                            </Link>
+                            <p className="text-[10px] text-slate-500 truncate max-w-md" title={p.primary_industries || ''}>
+                              {p.country_head_office} &bull; {p.primary_industries || '—'}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200">
+                                Calls Logged: {item.calls_logged_count || 0}
+                              </span>
+                              <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200">
+                                Emails Sent: {item.emails_sent_count || 0}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="px-3.5 py-2">
-                      {isIssue && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 font-semibold text-[10px]">
-                          <AlertTriangle className="w-3 h-3" /> Issue Sent to PRE
-                        </span>
-                      )}
-                      {isUpdated && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 text-slate-700 border border-slate-200 font-semibold text-[10px]">
-                          <RefreshCw className="w-3 h-3 text-emerald-500" /> PRE Updated Data
-                        </span>
-                      )}
-                      {!isIssue && !isUpdated && <span className="text-slate-400 italic text-[10px]">None</span>}
-                    </td>
-                    <td className="px-3.5 py-2">
-                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold text-[10px] border ${
-                        item.verification_status === 'Verified' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                        'bg-slate-50 text-slate-600 border-slate-200'
-                      }`}>
-                        {item.verification_status}
-                      </span>
-                    </td>
-                    {!isManager && (
-                      <td className="px-3.5 py-2 text-right">
-                        {isUpdated ? (
-                          <button
-                            onClick={() => handleConfirmReverify(item)}
-                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold transition flex items-center gap-1 ml-auto"
-                          >
-                            <CheckCircle className="w-3 h-3" /> Confirm Fixes
-                          </button>
+                      </td>
+                      <td className="px-3.5 py-2">
+                        {isLeadQualified ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <CheckCircle className="w-3 h-3 text-emerald-600" /> Lead Qualified
+                          </span>
+                        ) : isLeadFreeze ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold text-[10px] bg-rose-50 text-rose-700 border border-rose-200">
+                            <XCircle className="w-3 h-3 text-rose-600" /> Lead Freeze
+                          </span>
+                        ) : item.email_status && item.email_status !== 'Not Sent' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold text-[10px] bg-blue-50 text-blue-700 border border-blue-200">
+                            <Mail className="w-3 h-3 text-blue-600" /> {item.email_status}
+                          </span>
                         ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            <Phone className="w-3 h-3 text-indigo-600" /> Ready for Outreach
+                          </span>
+                        )}
+                      </td>
+                      {!isManager && (
+                        <td className="px-3.5 py-2 text-right">
                           <button
                             onClick={() => openWorkspace(item)}
                             disabled={isLeadFreeze}
                             title={isLeadFreeze ? 'Outreach disabled — Prospect is Lead Freeze' : ''}
-                            className={`w-28 justify-center px-2.5 py-1 rounded text-[10px] font-bold transition flex items-center gap-1 ml-auto ${
-                              isLeadFreeze ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 
-                              isLeadQualified ? 'bg-emerald-600 hover:bg-emerald-700 text-white' :
-                              isIssue ? 'bg-amber-600 hover:bg-amber-700 text-white' :
-                              item.verification_status === 'Verified' ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 
-                              'bg-slate-800 hover:bg-slate-900 text-white'
+                            className={`w-28 justify-center px-2.5 py-1 rounded text-[10px] font-bold transition flex items-center gap-1 ml-auto cursor-pointer ${
+                              isLeadFreeze 
+                                ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
+                                : isLeadQualified 
+                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white' 
+                                : 'bg-indigo-600 hover:bg-indigo-700 text-white'
                             }`}
                           >
                             {isLeadFreeze ? (
                               <><XCircle className="w-3 h-3 text-white" /><span>Lead Freeze</span></>
                             ) : isLeadQualified ? (
-                              <><CheckCircle className="w-4 h-4 text-white" /> <span>Lead Qualified</span></>
-                            ) : item.verification_status === 'Verified' ? (
-                              <><Phone className="w-3 h-3" /> Outreach</>
+                              <><CheckCircle className="w-3.5 h-3.5 text-white" /> <span>Qualified</span></>
                             ) : (
-                              <><FileEdit className="w-3 h-3" /> Verify</>
+                              <><Phone className="w-3 h-3" /> Outreach</>
                             )}
                           </button>
-                        )}
-                      </td>
-                    )}
-                  </tr>
+                        </td>
+                      )}
+                    </tr>
                 );
               }))}
             </tbody>
@@ -700,7 +632,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
       {showWorkspace && selectedLq && (
         <LqWorkspaceModal
           selectedLq={selectedLq}
-          initialTab={forcedWorkspaceTab || (selectedLq.verification_status === 'Verified' ? 'outreach' : 'verification')}
+          initialTab="outreach"
           onClose={() => { setShowWorkspace(false); dispatch(fetchLqPipeline()); }}
           hasIncorrect={hasIncorrect}
           allCorrect={allCorrect}
@@ -708,7 +640,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
           handleFieldToggle={handleFieldToggle}
           handleSubmitIssue={handleSubmitIssue}
           handleReadyForOutreach={handleReadyForOutreach}
-          isConfirmingFixes={selectedLq.pre_task_status === 'PRE_UPDATED'}
+          isConfirmingFixes={false}
           correctedFields={correctedFields}
         />
       )}

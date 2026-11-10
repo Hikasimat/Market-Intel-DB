@@ -111,9 +111,7 @@ const Layout = () => {
         icon: Users,
         subItems: [
           { path: '/prospects', label: 'Prospect Directory', exact: true },
-          { path: '/prospects?tab=pipeline', label: 'LQ Pipeline', exact: true },
-          { path: '/prospects?tab=pipeline&filter=pending', label: 'Verification Pending', exact: true },
-          { path: '/prospects?tab=pipeline&filter=verified', label: 'Outreached', exact: true },
+          { path: '/prospects?tab=outreach', label: 'Outreach', exact: true },
         ]
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
@@ -134,7 +132,7 @@ const Layout = () => {
         icon: Users,
         subItems: [
           { path: '/prospects', label: 'Prospect Directory', exact: true },
-          { path: '/prospects?tab=pipeline', label: 'LQ Pipeline', exact: true },
+          { path: '/prospects?tab=outreach', label: 'Outreach', exact: true },
         ]
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
@@ -259,8 +257,11 @@ const Layout = () => {
                       <div className="pl-7 pr-2 py-1 space-y-1">
                         {item.subItems.map((sub) => {
                           const currentFullPath = location.pathname + (location.search || '');
+                          const isTabOutreach = location.search.includes('tab=outreach') || location.search.includes('tab=pipeline');
                           const isSubActive = sub.exact
-                            ? (currentFullPath === sub.path || (!location.search && sub.path === location.pathname))
+                            ? (sub.path.includes('tab=outreach')
+                                ? isTabOutreach
+                                : (!isTabOutreach && sub.path === location.pathname))
                             : currentFullPath.startsWith(sub.path);
                           return (
                             <Link

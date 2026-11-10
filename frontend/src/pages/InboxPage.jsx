@@ -1577,7 +1577,7 @@ const InboxPage = () => {
                                 className="px-3 py-1.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 text-indigo-600 hover:text-indigo-700 rounded-lg text-xs font-semibold shadow-2xs transition flex items-center gap-1.5"
                                 title="Open related Lead Qualification Pipeline record"
                               >
-                                <span>View in LQ Pipeline</span>
+                                <span>View in Outreach</span>
                                 <ChevronRight className="w-3.5 h-3.5" />
                               </Link>
                             )}

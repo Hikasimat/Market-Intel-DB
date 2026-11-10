@@ -127,10 +127,10 @@ const LqPipelineDetailPage = () => {
       {/* Top Navigation */}
       <div className="flex items-center justify-between">
         <Link 
-          to="/prospects?tab=pipeline" 
+          to="/prospects?tab=outreach" 
           className="inline-flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-indigo-600 transition"
         >
-          <ArrowLeft className="w-4 h-4" /> Back to Pipeline
+          <ArrowLeft className="w-4 h-4" /> Back to Outreach
         </Link>
         {!isManager && (
           <button

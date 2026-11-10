@@ -150,11 +150,12 @@ const AppRouter = () => {
             {/* Manager Audit */}
             <Route path="manager-audit" element={<RoleRoute allowedRoles={['MANAGER']}><ManagerAuditPage /></RoleRoute>} />
 
-            {/* LQ Pipeline — Merged into Prospects module; Redirect preserved routes */}
-            <Route path="lq-pipeline" element={<Navigate to="/prospects?tab=pipeline" replace />} />
-            <Route path="lq-pipeline/pending" element={<Navigate to="/prospects?tab=pipeline&filter=pending" replace />} />
-            <Route path="lq-pipeline/verified" element={<Navigate to="/prospects?tab=pipeline&filter=verified" replace />} />
-            <Route path="lq-pipeline/issued" element={<Navigate to="/prospects?tab=pipeline" replace />} />
+            {/* Outreach (formerly LQ Pipeline) — Merged into Prospects module; Redirect preserved routes */}
+            <Route path="lq-pipeline" element={<Navigate to="/prospects?tab=outreach" replace />} />
+            <Route path="lq-pipeline/pending" element={<Navigate to="/prospects?tab=outreach" replace />} />
+            <Route path="lq-pipeline/verified" element={<Navigate to="/prospects?tab=outreach" replace />} />
+            <Route path="lq-pipeline/issued" element={<Navigate to="/prospects?tab=outreach" replace />} />
+            <Route path="outreach" element={<Navigate to="/prospects?tab=outreach" replace />} />
             <Route path="lq-pipeline/:id" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqPipelineDetailPage /></RoleRoute>} />
 
             <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />

@@ -29,7 +29,6 @@ import {
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
-import { reportIssueToPre, confirmReverification } from '../../features/lqPipeline/lqPipelineSlice';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
@@ -94,35 +93,17 @@ export default function LqWorkspaceModal({
   // Dynamic prospect and LQ state
   const [currentProspect, setCurrentProspect] = useState(selectedLq?.prospect || {});
   const [currentLq, setCurrentLq] = useState(selectedLq);
-  const [localIssueSent, setLocalIssueSent] = useState(selectedLq?.pre_task_status === 'ISSUE_SENT_TO_PRE');
-  const [isReportingMissingEmail, setIsReportingMissingEmail] = useState(false);
-  const [isConfirmingPreUpdate, setIsConfirmingPreUpdate] = useState(false);
 
   // Get safe prospect reference pointing to dynamic currentProspect
   const prospect = currentProspect;
-  const [localVerified, setLocalVerified] = useState(selectedLq?.verification_status === 'Verified');
-  const isVerified = localVerified;
   const isLeadQualified = selectedLq?.qualification_status === 'Lead Qualified';
 
   useEffect(() => {
     if (selectedLq) {
-      setCurrentLq(prev => {
-        if (prev?.id === selectedLq.id) {
-          if (localIssueSent && selectedLq.pre_task_status === 'NONE') {
-            return { ...selectedLq, pre_task_status: 'ISSUE_SENT_TO_PRE' };
-          }
-          if (prev?.pre_task_status === 'PRE_UPDATED' && selectedLq.pre_task_status === 'NONE') {
-            return { ...selectedLq, pre_task_status: 'PRE_UPDATED' };
-          }
-        }
-        return selectedLq;
-      });
+      setCurrentLq(selectedLq);
       setCurrentProspect(selectedLq.prospect || {});
-      if (selectedLq.pre_task_status === 'ISSUE_SENT_TO_PRE') {
-        setLocalIssueSent(true);
-      }
     }
-  }, [selectedLq, localIssueSent]);
+  }, [selectedLq]);
 
   // Immediately load fresh authoritative LQ details on modal mount or prospect ID change
   useEffect(() => {
@@ -139,8 +120,6 @@ export default function LqWorkspaceModal({
         const res = await api.get(`/lq-pipeline/${lqId}/`);
         if (res.data) {
           setCurrentLq(res.data);
-          const freshStatus = res.data.pre_task_status;
-          setLocalIssueSent(freshStatus === 'ISSUE_SENT_TO_PRE');
           if (res.data.prospect) {
             setCurrentProspect(res.data.prospect);
             const keyContactWithEmail = res.data.prospect.key_contacts?.find(c => c.official_email && c.official_email.trim());
@@ -158,7 +137,6 @@ export default function LqWorkspaceModal({
         setCurrentProspect(res.data);
         if (res.data.lead_qualification) {
           setCurrentLq(res.data.lead_qualification);
-          setLocalIssueSent(res.data.lead_qualification.pre_task_status === 'ISSUE_SENT_TO_PRE');
         }
         return res.data;
       }
@@ -166,59 +144,6 @@ export default function LqWorkspaceModal({
       console.error('Failed to refresh prospect details', e);
     }
     return null;
-  };
-
-  const handleSendMissingEmailToPre = async () => {
-    try {
-      setIsReportingMissingEmail(true);
-      const lqId = currentLq?.id || selectedLq?.id;
-      const issuePayload = {
-        issue_category: 'Missing Email Address',
-        issue_details: `Email address is missing for prospect "${currentProspect?.company_name}". Please enter the official company email or key contact email address so the introduction email can be sent.`,
-        verification_checklist: {
-          ...(currentLq?.verification_checklist || selectedLq?.verification_checklist || {}),
-          email: 'Incorrect',
-          official_email_address: 'Incorrect',
-          keyContacts: 'Incorrect'
-        }
-      };
-
-      const result = await dispatch(reportIssueToPre({ id: lqId, issueData: issuePayload })).unwrap();
-      setLocalIssueSent(true);
-      setCurrentLq(prev => ({
-        ...prev,
-        ...result,
-        pre_task_status: 'ISSUE_SENT_TO_PRE',
-        issue_category: 'Missing Email Address',
-        issue_details: `Email address was missing for prospect "${currentProspect?.company_name}".`
-      }));
-      toast.info('Missing email reported to PRE. A task has been sent to PRE.');
-    } catch (err) {
-      console.error('Failed to report missing email to PRE:', err);
-      toast.error('Failed to report task to PRE. Please try again.');
-    } finally {
-      setIsReportingMissingEmail(false);
-    }
-  };
-
-  const handleConfirmPreUpdate = async () => {
-    try {
-      setIsConfirmingPreUpdate(true);
-      const lqId = currentLq?.id || selectedLq?.id;
-      await dispatch(confirmReverification(lqId)).unwrap();
-      setLocalIssueSent(false);
-      setCurrentLq(prev => ({
-        ...prev,
-        pre_task_status: 'NONE'
-      }));
-      await refreshProspectDetails();
-      toast.success('PRE update confirmed! You can now select the recipient and proceed with outreach.');
-    } catch (err) {
-      console.error('Failed to confirm PRE update:', err);
-      toast.error('Failed to confirm update. Please try again.');
-    } finally {
-      setIsConfirmingPreUpdate(false);
-    }
   };
 
   // --- OUTREACH  // Outreach State
@@ -607,6 +532,8 @@ export default function LqWorkspaceModal({
 
   const activeEmailTracking = liveTrackingData || sentEmailData;
 
+  const [customToInput, setCustomToInput] = useState('');
+
   const toggleToRecipient = (email) => {
     if (toEmails.includes(email)) setToEmails(toEmails.filter(e => e !== email));
     else setToEmails([...toEmails, email]);
@@ -615,8 +542,16 @@ export default function LqWorkspaceModal({
     if (ccEmails.includes(email)) setCcEmails(ccEmails.filter(e => e !== email));
     else setCcEmails([...ccEmails, email]);
   };
+  const handleAddCustomTo = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const em = customToInput.trim();
+    if (em && !toEmails.includes(em)) {
+      setToEmails(prev => [...prev, em]);
+      setCustomToInput('');
+    }
+  };
   const handleAddCustomRecipient = (e) => {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     const em = customRecipientInput.trim();
     if (em && !ccEmails.includes(em) && !toEmails.includes(em)) {
       setCcEmails([...ccEmails, em]);
@@ -1022,264 +957,35 @@ export default function LqWorkspaceModal({
     toast.success("Activity saved successfully.");
   };
 
-  const getFieldValue = (key) => {
-    switch (key) {
-      case 'companyName': return prospect.company_name || '-';
-      case 'country': return prospect.country_head_office || '-';
-      case 'address': return prospect.complete_address || '-';
-      case 'website': return prospect.official_website_url || '-';
-      case 'linkedIn': return prospect.linkedin_company_page || '-';
-      case 'email': return prospect?.official_email_address || '-';
-      case 'contactNo': return prospect.official_phone_number || '-';
-      case 'productService': return prospect.primary_offering_type || '-';
-      case 'primaryIndustries': return prospect.primary_industries || '-';
-      case 'companyStructure': return prospect.company_structure || '-';
-      case 'operationalStatus': return prospect.operational_status || '-';
-      case 'marketEvents': return prospect.market_events?.length ? prospect.market_events.map(e => e.name).join(', ') : '-';
-      case 'keyContacts': return prospect.key_contacts?.length ? prospect.key_contacts.map(c => `${c.contact_name} (${c.designation || 'No Designation'}) - ${c.official_email || 'No Email'}`).join(', ') : '-';
-      case 'products': return prospect.products?.length ? prospect.products.map(p => p.name).join(', ') : '-';
-      case 'services': return prospect.services?.length ? prospect.services.map(p => p.name).join(', ') : '-';
-      case 'solutions': return prospect.solutions?.length ? prospect.solutions.map(p => p.name).join(', ') : '-';
-      default: return '-';
-    }
-  };
-
-  const fieldNames = {
-    companyName: 'Company Name',
-    country: 'Country',
-    address: 'Address',
-    website: 'Website',
-    linkedIn: 'LinkedIn Page',
-    email: 'Official Email',
-    contactNo: 'Contact No.',
-    productService: 'Product, Service & Solution',
-    primaryIndustries: 'Primary Industries',
-    companyStructure: 'Company Structure',
-    operationalStatus: 'Operational Status',
-    marketEvents: 'Market Events',
-    keyContacts: 'Key Contacts',
-    products: 'Products',
-    services: 'Services',
-    solutions: 'Solutions'
-  };
-
-  // Helper for automated issues
-  const incorrectFields = Object.keys(verificationFields).filter(key => verificationFields[key] === 'Incorrect');
-  const autoIssueCategory = incorrectFields.map(key => fieldNames[key]).join(', ');
-  const autoDetails = incorrectFields.length > 0
-    ? `The following fields are incorrect and need to be fixed by PRE:\n${incorrectFields.map(k => `- ${fieldNames[k]}`).join('\n')}`
-    : '';
-
   return (
     <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 font-sans">
       <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full overflow-hidden border border-slate-200 flex flex-col max-h-[92vh]">
         {/* Modal Header */}
-        <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-indigo-950 p-5 text-white flex items-center justify-between shrink-0">
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-5 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center border border-white/10 shrink-0">
+              <Phone className="w-5 h-5 text-indigo-400" />
+            </div>
             <div>
               <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-extrabold text-[10px] uppercase tracking-wider border border-indigo-400/30">
+                  Outreach Workspace
+                </span>
+                {prospect.country_head_office && (
+                  <span className="text-xs text-slate-400">&bull; {prospect.country_head_office}</span>
+                )}
               </div>
-              <h3 className="text-xl font-bold text-white mt-1">{prospect.company_name}</h3>
+              <h3 className="text-lg font-black text-white mt-0.5">{prospect.company_name}</h3>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white p-1.5 rounded-xl hover:bg-slate-800 transition cursor-pointer">
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-white/10 transition cursor-pointer">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Modal Navigation Tabs */}
-        {initialTab !== 'outreach' && (
-          <div className="bg-slate-100 border-b border-slate-200 px-6 pt-3 flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setActiveTab('verification')}
-              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${activeTab === 'verification' ? 'bg-white text-slate-900 border-t-2 border-sky-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
-            >
-              <Shield className={`w-4 h-4 ${activeTab === 'verification' ? 'text-sky-600' : 'text-slate-400'}`} />
-              <span>Field Verification & Data Details</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('outreach')}
-              className={`px-4 py-2.5 font-extrabold text-xs rounded-t-xl transition flex items-center gap-2 cursor-pointer ${activeTab === 'outreach' ? 'bg-white text-slate-900 border-t-2 border-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
-            >
-              {isVerified ? (
-                <Phone className={`w-4 h-4 ${activeTab === 'outreach' ? 'text-emerald-600' : 'text-slate-400'}`} />
-              ) : (
-                <Lock className="w-4 h-4 text-amber-500" />
-              )}
-              <span>Outreach & Call Outcomes</span>
-              {!isVerified && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded font-bold border border-amber-300">Locked</span>}
-            </button>
-          </div>
-        )}
-
         {/* Modal Scrollable Content Body */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-slate-50">
-          {/* Top Banner when PRE has updated data */}
-          {currentLq?.pre_task_status === 'PRE_UPDATED' && (
-            <div className="p-4 bg-emerald-50 border-2 border-emerald-300 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm animate-in fade-in">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
-                  <CheckCircle className="w-5 h-5 text-emerald-600" />
-                </div>
-                <div>
-                  <h4 className="font-black text-emerald-950 text-sm flex items-center gap-2">
-                    <span>PRE Task Completed — Data Updated</span>
-                    <span className="px-2 py-0.5 bg-emerald-200 text-emerald-900 rounded-full text-[10px] font-extrabold uppercase">Action Required</span>
-                  </h4>
-                  <p className="text-xs text-emerald-800 mt-1">
-                    PRE has updated the missing information ({currentLq?.issue_category || 'Missing Email Address'}) for {prospect.company_name}. Confirm the update to refresh and proceed with your outreach.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleConfirmPreUpdate}
-                disabled={isConfirmingPreUpdate}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition flex items-center gap-1.5 shrink-0 shadow-sm cursor-pointer disabled:opacity-50"
-              >
-                <CheckCircle className="w-4 h-4" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed to Outreach'}
-              </button>
-            </div>
-          )}
-          {activeTab === 'verification' && (
-            <div className="space-y-6">
-              <div className="p-4 bg-sky-50 border border-sky-200 rounded-xl flex items-start gap-3">
-                <div className="w-8 h-8 rounded-full bg-sky-600 text-white font-black flex items-center justify-center shrink-0 mt-0.5 text-sm">
-                  <Shield className="w-4 h-4" />
-                </div>
-                <div>
-                  <h4 className="font-extrabold text-sky-950 text-sm">Prospect Field Verification Workspace</h4>
-                  <p className="text-xs text-sky-800 mt-0.5">Validate master prospect information before initiating outreach.</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Left Side: PRE Master Data */}
-                <div className="space-y-4">
-                  <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                    <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
-                      <h3 className="font-bold text-slate-800">PRE Master Data</h3>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider bg-slate-100 px-2 py-1 rounded">Read-Only</span>
-                    </div>
-                    <div className="space-y-3">
-                      <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">Company Name:</span>
-                        <span className="font-medium text-sm text-slate-900">{prospect.company_name}</span>
-                      </div>
-                      <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">Country:</span>
-                        <span className="font-medium text-sm text-slate-900">{prospect.country_head_office}</span>
-                      </div>
-                      <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">Industries:</span>
-                        <span className="font-medium text-sm text-slate-900">{prospect.primary_industries}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {hasIncorrect && (
-                    <div className="bg-amber-50 p-5 rounded-xl border border-amber-200 shadow-sm">
-                      <h3 className="font-bold text-amber-900 mb-3 flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-amber-600" />
-                        Issue Report (Auto-Generated)
-                      </h3>
-                      <div className="space-y-3">
-                        <div>
-                          <label className="block text-[10px] font-bold text-amber-700 uppercase mb-1">Issue Category</label>
-                          <input readOnly type="text" className="w-full p-2 border border-amber-200 rounded-xl text-sm bg-white text-amber-900 font-medium" value={autoIssueCategory} />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-bold text-amber-700 uppercase mb-1">Details</label>
-                          <textarea readOnly className="w-full p-2 border border-amber-200 rounded-xl text-sm bg-white text-amber-900 font-medium" rows="3" value={autoDetails}></textarea>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Right Side: Verification Checklist */}
-                <div className="space-y-4">
-                  <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                    <h3 className="font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100">Verification Checklist</h3>
-                    <div className="space-y-3">
-                      {Object.entries(fieldNames).map(([key, label]) => (
-                        <div key={key} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl">
-                          <div className="flex-1 min-w-0 pr-4">
-                            <div className="flex items-center gap-2 mb-1">
-                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{label}</label>
-                              {isConfirmingFixes && correctedFields.includes(key) && (
-                                <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-black rounded uppercase tracking-widest border border-emerald-200">Fixed by PRE</span>
-                              )}
-                            </div>
-                            <div className="text-sm font-medium text-slate-900 truncate" title={getFieldValue(key)}>{getFieldValue(key)}</div>
-                          </div>
-                          <div className="flex bg-white rounded-xl border border-slate-200 overflow-hidden shrink-0 shadow-sm mt-2 sm:mt-0">
-                            <button
-                              type="button"
-                              onClick={() => handleFieldToggle(key, 'Correct')}
-                              className={`px-3 py-1.5 text-xs font-bold transition ${verificationFields[key] === 'Correct' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}
-                            >Correct</button>
-                            <button
-                              type="button"
-                              onClick={() => handleFieldToggle(key, 'Incorrect')}
-                              className={`px-3 py-1.5 text-xs font-bold transition border-l border-slate-200 ${verificationFields[key] === 'Incorrect' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}
-                            >Incorrect</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t border-slate-200">
-                {hasIncorrect ? (
-                  <button onClick={handleSubmitIssue} className="px-5 py-2 text-sm font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition shadow-sm flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4" /> Submit Issue to PRE
-                  </button>
-                ) : allCorrect ? (
-                  <button onClick={async () => {
-                    if (isConfirmingFixes) {
-                      await dispatch(confirmReverification(selectedLq.id));
-                    }
-                    if (!localVerified) {
-                      await handleReadyForOutreach(true);
-                      setLocalVerified(true);
-                    }
-                    setActiveTab('outreach');
-                  }} className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition shadow-sm flex items-center gap-2">
-                    <CheckCircle className="w-4 h-4" /> {(selectedLq?.verification_status === 'Verified' || localVerified) ? 'Move back to Outreach' : 'Ready for Outreach'}
-                  </button>
-                ) : (
-                  <button disabled className="px-5 py-2 text-sm font-bold text-slate-400 bg-slate-100 rounded-lg cursor-not-allowed">
-                    Verify All Fields
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'outreach' && (
-
-            <div className="space-y-6">
-              {!isVerified ? (
-                <div className="p-8 bg-white border border-slate-200 rounded-2xl text-center space-y-4 shadow-sm">
-                  <div className="w-14 h-14 rounded-full bg-amber-100 text-amber-700 mx-auto flex items-center justify-center font-black shadow-sm">
-                    <Lock className="w-7 h-7 text-amber-600" />
-                  </div>
-                  <div>
-                    <span className="px-2.5 py-1 rounded bg-amber-100 text-amber-800 font-extrabold text-[11px] uppercase tracking-wider border border-amber-200">Verification Required</span>
-                    <h4 className="text-lg font-black text-slate-900 mt-2">🔒 Outreach & Call Outcomes Locked</h4>
-                    <p className="text-sm text-slate-600 mt-1 max-w-md mx-auto leading-relaxed">Outreach features activate only after the prospect’s 8 data fields are fully verified.</p>
-                  </div>
-                  <button onClick={() => setActiveTab('verification')} className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-extrabold text-sm rounded-xl transition cursor-pointer shadow-md inline-flex items-center gap-2">
-                    <Shield className="w-4 h-4" /> Go to Field Verification
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-6">
+          <div className="space-y-6">
                   {/* Email Section */}
                   <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
                     <div className="bg-gradient-to-r from-slate-900 to-indigo-950 p-4 text-white flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1368,148 +1074,230 @@ export default function LqWorkspaceModal({
                     </div>
                     {!emailCollapsed && (
                       <div className="p-5 bg-slate-50 border-t border-slate-200 space-y-4 text-xs">
+                        {/* Separated TO and CC Email Fields */}
                         <div className="space-y-2">
-                          <label className="block font-extrabold text-slate-800 uppercase tracking-wider text-[10px]">Select Introduction Email Recipients</label>
-                          <div className="grid grid-cols-1 gap-2">
-                            {prospect?.key_contacts?.map(contact => contact.official_email && (
-                              <div key={contact.id} className={`flex flex-col gap-2 p-2.5 rounded-xl border transition ${toEmails.includes(contact.official_email) ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200'}`}>
-                                <label className="flex items-center gap-2.5 cursor-pointer">
-                                  <input type="checkbox" checked={toEmails.includes(contact.official_email)} onChange={() => toggleToRecipient(contact.official_email)} disabled={isEmailSent} className="accent-indigo-600 disabled:opacity-50" />
-                                  <div className="overflow-hidden flex-1">
-                                    <span className={`block truncate text-sm ${toEmails.includes(contact.official_email) ? 'text-indigo-950 font-bold' : 'text-slate-700'}`}>{contact.official_email}</span>
-                                    <span className="text-[10px] text-slate-400 font-semibold">{contact.contact_name} ({contact.designation}) - TO</span>
-                                  </div>
-                                </label>
-                              </div>
-                            ))}
-
-                            {prospect?.official_email_address && (
-                              <div className={`flex flex-col gap-2 p-2.5 rounded-xl border transition ${ccEmails.includes(prospect.official_email_address) ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200'}`}>
-                                <label className="flex items-center gap-2.5 cursor-pointer">
-                                  <input type="checkbox" checked={ccEmails.includes(prospect.official_email_address)} onChange={() => toggleCcRecipient(prospect.official_email_address)} disabled={isEmailSent} className="accent-indigo-600 disabled:opacity-50" />
-                                  <div className="overflow-hidden flex-1">
-                                    <span className={`block truncate text-sm ${ccEmails.includes(prospect.official_email_address) ? 'text-indigo-950 font-bold' : 'text-slate-700'}`}>{prospect.official_email_address}</span>
-                                    <span className="text-[10px] text-slate-400 font-semibold">Reception / Official Email - CC</span>
-                                  </div>
-                                </label>
-                              </div>
-                            )}
-
-                            {/* Banner if email exists but PRE just updated it */}
-                            {Boolean(
-                              (prospect?.official_email_address && prospect.official_email_address.trim()) ||
-                              (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
-                            ) && currentLq?.pre_task_status === 'PRE_UPDATED' && (
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-emerald-50 border border-emerald-300 rounded-xl mb-1">
-                                  <div className="flex items-center gap-2">
-                                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                                    <span className="text-xs font-bold text-emerald-950">
-                                      PRE updated the email address! Click confirm to finalize.
+                          <label className="block font-black text-slate-800 uppercase tracking-wider text-[10px]">
+                            Introduction Email Recipients
+                          </label>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {/* TO: Primary Recipients */}
+                            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
+                              <div>
+                                <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-700 font-black text-[10px] uppercase tracking-wide">
+                                      TO
                                     </span>
+                                    <span className="font-bold text-xs text-slate-800">Primary Recipients</span>
                                   </div>
+                                  <span className="text-[10px] font-semibold text-slate-400">
+                                    {toEmails.length} selected
+                                  </span>
+                                </div>
+
+                                <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                  {prospect?.key_contacts?.filter(c => c.official_email && c.official_email.trim()).length > 0 ? (
+                                    prospect.key_contacts
+                                      .filter(c => c.official_email && c.official_email.trim())
+                                      .map(contact => {
+                                        const isSelected = toEmails.includes(contact.official_email);
+                                        return (
+                                          <label
+                                            key={contact.id}
+                                            className={`flex items-start gap-2.5 p-2 rounded-xl border transition cursor-pointer ${
+                                              isSelected
+                                                ? 'bg-indigo-50/70 border-indigo-300 text-indigo-950 font-medium shadow-2xs'
+                                                : 'bg-slate-50/60 border-slate-200/80 text-slate-700 hover:bg-slate-100/70'
+                                            }`}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={isSelected}
+                                              onChange={() => toggleToRecipient(contact.official_email)}
+                                              disabled={isEmailSent}
+                                              className="mt-0.5 accent-indigo-600 rounded disabled:opacity-50 cursor-pointer"
+                                            />
+                                            <div className="min-w-0 flex-1">
+                                              <div className="text-xs font-bold text-slate-900 truncate">
+                                                {contact.contact_name || contact.official_email}
+                                              </div>
+                                              <div className="text-[10px] text-slate-500 truncate">
+                                                {contact.official_email} {contact.designation ? `• ${contact.designation}` : ''}
+                                              </div>
+                                            </div>
+                                          </label>
+                                        );
+                                      })
+                                  ) : prospect?.official_email_address ? (
+                                    <label
+                                      className={`flex items-start gap-2.5 p-2 rounded-xl border transition cursor-pointer ${
+                                        toEmails.includes(prospect.official_email_address)
+                                          ? 'bg-indigo-50/70 border-indigo-300 text-indigo-950 font-medium shadow-2xs'
+                                          : 'bg-slate-50/60 border-slate-200/80 text-slate-700 hover:bg-slate-100/70'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={toEmails.includes(prospect.official_email_address)}
+                                        onChange={() => toggleToRecipient(prospect.official_email_address)}
+                                        disabled={isEmailSent}
+                                        className="mt-0.5 accent-indigo-600 rounded disabled:opacity-50 cursor-pointer"
+                                      />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-bold text-slate-900 truncate">
+                                          Official Company Email
+                                        </div>
+                                        <div className="text-[10px] text-slate-500 truncate">
+                                          {prospect.official_email_address}
+                                        </div>
+                                      </div>
+                                    </label>
+                                  ) : (
+                                    <div className="p-3 text-center bg-slate-50 border border-dashed border-slate-200 rounded-xl text-slate-400 text-xs">
+                                      No recipient email on file. Enter one below.
+                                    </div>
+                                  )}
+
+                                  {/* Custom TO emails */}
+                                  {toEmails
+                                    .filter(e => e !== prospect?.official_email_address && !prospect?.key_contacts?.some(c => c.official_email === e))
+                                    .map(em => (
+                                      <div key={em} className="flex items-center justify-between p-2 rounded-xl border bg-indigo-50/70 border-indigo-200 text-xs">
+                                        <span className="font-semibold text-indigo-950 truncate">{em}</span>
+                                        {!isEmailSent && (
+                                          <button
+                                            type="button"
+                                            onClick={() => toggleToRecipient(em)}
+                                            className="text-slate-400 hover:text-red-500 font-bold ml-1.5"
+                                          >
+                                            ×
+                                          </button>
+                                        )}
+                                      </div>
+                                    ))}
+                                </div>
+                              </div>
+
+                              {!isEmailSent && (
+                                <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5">
+                                  <input
+                                    type="email"
+                                    placeholder="Add custom TO email..."
+                                    value={customToInput}
+                                    onChange={(e) => setCustomToInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleAddCustomTo(e);
+                                      }
+                                    }}
+                                    className="flex-1 px-2.5 py-1 text-xs bg-slate-50 border border-slate-200 rounded-lg placeholder-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500"
+                                  />
                                   <button
                                     type="button"
-                                    onClick={handleConfirmPreUpdate}
-                                    disabled={isConfirmingPreUpdate}
-                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shrink-0 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                    onClick={handleAddCustomTo}
+                                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold rounded-lg transition cursor-pointer"
                                   >
-                                    <CheckCircle className="w-3.5 h-3.5" /> Confirm Fixes
+                                    Add
                                   </button>
                                 </div>
                               )}
+                            </div>
 
-                            {/* Handling when NO emails are available */}
-                            {!Boolean(
-                              (prospect?.official_email_address && prospect.official_email_address.trim()) ||
-                              (prospect?.key_contacts && prospect.key_contacts.some(c => c.official_email && c.official_email.trim()))
-                            ) && (
-                                <div className="rounded-2xl border p-4 shadow-sm transition-all bg-white">
-                                  {localIssueSent || currentLq?.pre_task_status === 'ISSUE_SENT_TO_PRE' ? (
-                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl">
-                                      <div className="flex items-start gap-3">
-                                        <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
-                                          <Clock className="w-4 h-4 animate-spin text-amber-600" />
+                            {/* CC: Carbon Copy */}
+                            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
+                              <div>
+                                <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-black text-[10px] uppercase tracking-wide">
+                                      CC
+                                    </span>
+                                    <span className="font-bold text-xs text-slate-800">Carbon Copy (Optional)</span>
+                                  </div>
+                                  <span className="text-[10px] font-semibold text-slate-400">
+                                    {ccEmails.length} selected
+                                  </span>
+                                </div>
+
+                                <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                  {prospect?.official_email_address && (
+                                    <label
+                                      className={`flex items-start gap-2.5 p-2 rounded-xl border transition cursor-pointer ${
+                                        ccEmails.includes(prospect.official_email_address)
+                                          ? 'bg-slate-100 border-slate-300 text-slate-950 font-medium shadow-2xs'
+                                          : 'bg-slate-50/60 border-slate-200/80 text-slate-700 hover:bg-slate-100/70'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={ccEmails.includes(prospect.official_email_address)}
+                                        onChange={() => toggleCcRecipient(prospect.official_email_address)}
+                                        disabled={isEmailSent}
+                                        className="mt-0.5 accent-indigo-600 rounded disabled:opacity-50 cursor-pointer"
+                                      />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-bold text-slate-900 truncate">
+                                          Reception / Official Email
                                         </div>
-                                        <div>
-                                          <div className="flex items-center gap-2">
-                                            <span className="font-black text-amber-900 text-xs uppercase tracking-wide">Missing Email Task Sent to PRE</span>
-                                            <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-800 text-[10px] font-extrabold">In Progress</span>
-                                          </div>
-                                          <p className="text-xs text-amber-800 mt-1">
-                                            A task has been assigned to PRE to find and enter the missing email address. Once PRE completes this task, you will receive a confirmation here to proceed.
-                                          </p>
-                                        </div>
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={refreshProspectDetails}
-                                        className="px-3.5 py-1.5 bg-white border border-amber-300 hover:bg-amber-100/50 text-amber-900 font-extrabold text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5 text-amber-700" /> Check Status
-                                      </button>
-                                    </div>
-                                  ) : currentLq?.pre_task_status === 'PRE_UPDATED' ? (
-                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl">
-                                      <div className="flex items-start gap-3">
-                                        <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
-                                          <CheckCircle className="w-4 h-4 text-emerald-600" />
-                                        </div>
-                                        <div>
-                                          <div className="flex items-center gap-2">
-                                            <span className="font-black text-emerald-950 text-xs uppercase tracking-wide">PRE Task Completed</span>
-                                            <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-extrabold">Ready to Confirm</span>
-                                          </div>
-                                          <p className="text-xs text-emerald-800 mt-1">
-                                            PRE has updated the master data for this prospect. Please confirm to refresh and proceed with your email outreach.
-                                          </p>
+                                        <div className="text-[10px] text-slate-500 truncate">
+                                          {prospect.official_email_address}
                                         </div>
                                       </div>
-                                      <button
-                                        type="button"
-                                        onClick={handleConfirmPreUpdate}
-                                        disabled={isConfirmingPreUpdate}
-                                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                                      >
-                                        <CheckCircle className="w-3.5 h-3.5" /> {isConfirmingPreUpdate ? 'Confirming...' : 'Confirm & Proceed'}
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-amber-50/50 border border-amber-200 rounded-xl">
-                                      <div className="flex items-start gap-3">
-                                        <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
-                                          <AlertTriangle className="w-4 h-4 text-amber-600" />
-                                        </div>
-                                        <div>
-                                          <span className="font-black text-amber-950 text-xs uppercase tracking-wide block">No Email Address Available</span>
-                                          <p className="text-xs text-amber-800 mt-1 leading-relaxed">
-                                            The email address was not entered for this prospect. You cannot send an introduction email without an email address. Send this to PRE as a task to find and enter the missing email.
-                                          </p>
-                                        </div>
+                                    </label>
+                                  )}
+
+                                  {/* Custom CC emails */}
+                                  {ccEmails
+                                    .filter(email => email !== prospect?.official_email_address)
+                                    .map(email => (
+                                      <div key={email} className="flex items-center justify-between p-2 rounded-xl border bg-slate-100 border-slate-200 text-xs">
+                                        <span className="font-semibold text-slate-800 truncate">{email}</span>
+                                        {!isEmailSent && (
+                                          <button
+                                            type="button"
+                                            onClick={() => toggleCcRecipient(email)}
+                                            className="text-slate-400 hover:text-red-500 font-bold ml-1.5 cursor-pointer"
+                                          >
+                                            ×
+                                          </button>
+                                        )}
                                       </div>
-                                      <button
-                                        type="button"
-                                        onClick={handleSendMissingEmailToPre}
-                                        disabled={isReportingMissingEmail}
-                                        className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl transition shrink-0 flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                                      >
-                                        <Send className="w-3.5 h-3.5" /> {isReportingMissingEmail ? 'Sending Task...' : 'Send Task to PRE'}
-                                      </button>
+                                    ))}
+
+                                  {!prospect?.official_email_address && ccEmails.length === 0 && (
+                                    <div className="p-3 text-center bg-slate-50 border border-dashed border-slate-200 rounded-xl text-slate-400 text-xs">
+                                      No CC recipient added yet.
                                     </div>
                                   )}
                                 </div>
-                              )}
+                              </div>
 
-                            {ccEmails.filter(email => email !== prospect?.official_email_address).map((email) => (
-                              <label key={email} className="flex items-center gap-2.5 p-2.5 rounded-xl border transition cursor-pointer bg-slate-50 border-indigo-200 text-slate-800 font-bold">
-                                <input type="checkbox" checked={true} onChange={() => toggleCcRecipient(email)} disabled={isEmailSent} className="accent-indigo-600 disabled:opacity-50" />
-                                <div className="overflow-hidden">
-                                  <span className="block truncate text-sm">{email}</span>
-                                  <span className="text-[10px] text-indigo-500 font-extrabold uppercase">CC</span>
+                              {!isEmailSent && (
+                                <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5">
+                                  <input
+                                    type="email"
+                                    placeholder="Add custom CC email..."
+                                    value={customRecipientInput}
+                                    onChange={(e) => setCustomRecipientInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleAddCustomRecipient(e);
+                                      }
+                                    }}
+                                    className="flex-1 px-2.5 py-1 text-xs bg-slate-50 border border-slate-200 rounded-lg placeholder-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={handleAddCustomRecipient}
+                                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold rounded-lg transition cursor-pointer"
+                                  >
+                                    Add
+                                  </button>
                                 </div>
-                              </label>
-                            ))}
+                              )}
+                            </div>
                           </div>
-
                         </div>
                         <TemplatePicker
                           prospect={prospect}
@@ -1528,8 +1316,11 @@ export default function LqWorkspaceModal({
                           <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} disabled={isEmailSent} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-900 text-xs disabled:bg-slate-100 disabled:text-slate-500" />
                         </div>
                         <div>
-                          <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Email Message Content</label>
-                          <textarea rows={4} value={emailBody} onChange={(e) => setEmailBody(e.target.value)} disabled={isEmailSent} className="w-full p-3 bg-white border border-slate-200 rounded-t-xl text-xs font-medium text-slate-800 leading-relaxed focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-100 disabled:text-slate-500" />
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block font-extrabold text-slate-800 uppercase tracking-wider text-[10px]">Email Message Content</label>
+                            <span className="text-[10px] text-slate-400 font-medium">{emailBody.length} characters</span>
+                          </div>
+                          <textarea rows={10} value={emailBody} onChange={(e) => setEmailBody(e.target.value)} disabled={isEmailSent} placeholder="Write your introductory email here..." className="w-full p-4 bg-white border border-slate-200 rounded-t-xl text-xs font-normal text-slate-800 leading-relaxed focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-100 disabled:text-slate-500 min-h-[260px] md:min-h-[300px] resize-y shadow-2xs" />
                           {senderMailStatus && senderMailStatus.default_signature && !templateSelection.signatureId && (
                             <div className="w-full p-3 bg-slate-50 border border-t-0 border-slate-200 rounded-b-xl text-xs text-slate-500 whitespace-pre-wrap">
                               {senderMailStatus.default_signature}
@@ -2003,10 +1794,7 @@ export default function LqWorkspaceModal({
                     )}
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+              </div>
 
         {/* Modal Footer */}
         <div className="p-4 bg-white border-t border-slate-200 flex items-center justify-end shrink-0">

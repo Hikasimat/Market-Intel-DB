@@ -4,7 +4,7 @@ import { toast } from 'react-toastify';
 import { fetchProspects, deleteProspect } from '../features/prospects/prospectSlice';
 import { fetchMarketEvents } from '../features/marketEvents/marketEventSlice';
 import ProspectForm from '../components/prospects/ProspectForm';
-import { Plus, Search, Edit2, Trash2, Building2, Eye, CheckCircle, XCircle, X, Activity } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, Building2, Eye, CheckCircle, XCircle, X, Activity, Phone } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import Pagination from '../components/layout/Pagination';
 import SearchableSelect from '../components/common/SearchableSelect';
@@ -13,7 +13,7 @@ import LqPipelinePage from './LqPipelinePage';
 const ProspectsPage = () => {
   const dispatch = useDispatch();
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = searchParams.get('tab') === 'pipeline' ? 'pipeline' : 'directory';
+  const activeTab = (searchParams.get('tab') === 'outreach' || searchParams.get('tab') === 'pipeline') ? 'outreach' : 'directory';
   const pipelineFilter = searchParams.get('filter') || 'all';
 
   const { items, loading, error, count } = useSelector((state) => state.prospects);
@@ -80,8 +80,8 @@ const ProspectsPage = () => {
 
   const handleTabSwitch = (newTab) => {
     const nextParams = new URLSearchParams(searchParams);
-    if (newTab === 'pipeline') {
-      nextParams.set('tab', 'pipeline');
+    if (newTab === 'outreach' || newTab === 'pipeline') {
+      nextParams.set('tab', 'outreach');
     } else {
       nextParams.delete('tab');
       nextParams.delete('filter');
@@ -125,7 +125,7 @@ const ProspectsPage = () => {
           <p className="mt-0.5 text-xs text-slate-500 font-medium">
             {activeTab === 'directory'
               ? 'Manage your market intelligence prospects, corporate structures, and key contacts.'
-              : 'Review and verify prospect master data, qualify opportunities, and execute lead outreach.'}
+              : 'Review prospects, execute outreach communications, and qualify opportunities.'}
           </p>
         </div>
 
@@ -149,20 +149,15 @@ const ProspectsPage = () => {
             </button>
             <button
               type="button"
-              onClick={() => handleTabSwitch('pipeline')}
+              onClick={() => handleTabSwitch('outreach')}
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'pipeline'
+                activeTab === 'outreach'
                   ? 'bg-white text-slate-900 shadow-2xs'
                   : 'text-slate-500 hover:text-slate-900'
               }`}
             >
-              <Activity className="w-3.5 h-3.5 text-blue-600" />
-              <span>LQ Pipeline</span>
-              {pendingLqCount > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
-                  {pendingLqCount}
-                </span>
-              )}
+              <Phone className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Outreach</span>
             </button>
           </div>
 
@@ -187,7 +182,7 @@ const ProspectsPage = () => {
       </div>
 
       {/* Main Tab Content */}
-      {activeTab === 'pipeline' ? (
+      {activeTab === 'outreach' ? (
         <div className="flex-1 flex flex-col min-h-0">
           <LqPipelinePage filter={pipelineFilter} embedded={true} />
         </div>
