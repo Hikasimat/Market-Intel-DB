@@ -102,7 +102,7 @@ const PreDashboardPage = () => {
   if (!stats) return null;
 
   return (
-    <div className="min-h-[calc(100vh-64px)] bg-slate-50 p-6 md:p-8 lg:p-10 font-sans text-slate-800">
+    <div className="min-h-[calc(100vh-64px)] bg-slate-50 p-6 md:p-8 lg:p-10 font-sans text-slate-800 max-w-[1600px] mx-auto">
       
       {/* Header */}
       <div className="w-full mx-auto mb-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
