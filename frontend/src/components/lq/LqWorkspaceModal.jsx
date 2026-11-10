@@ -19,7 +19,13 @@ import {
   RefreshCw,
   Send,
   AlertCircle,
-  Zap
+  Zap,
+  Smartphone,
+  Laptop,
+  Radio,
+  CheckCircle2,
+  ShieldCheck,
+  Sparkles
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
@@ -582,6 +588,20 @@ export default function LqWorkspaceModal({
       });
     } catch {
       return dtStr;
+    }
+  };
+
+  const formatTrackingTimeAgo = (dtStr) => {
+    if (!dtStr) return '';
+    try {
+      const diffSecs = Math.max(0, Math.floor((Date.now() - new Date(dtStr).getTime()) / 1000));
+      if (diffSecs < 60) return 'Just now';
+      if (diffSecs < 3600) return `${Math.floor(diffSecs / 60)}m ago`;
+      if (diffSecs < 86400) return `${Math.floor(diffSecs / 3600)}h ago`;
+      if (diffSecs < 604800) return `${Math.floor(diffSecs / 86400)}d ago`;
+      return '';
+    } catch {
+      return '';
     }
   };
 
@@ -2000,205 +2020,412 @@ export default function LqWorkspaceModal({
           <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
             <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-200">
               {/* Modal Header */}
-              <div className="bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 p-5 text-white flex items-center justify-between border-b border-indigo-900/50">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 flex items-center justify-center font-bold shadow-inner">
-                    <BarChart2 className="w-5 h-5" />
+              <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950 px-6 py-5 text-white flex items-center justify-between shrink-0 border-b border-indigo-900/40 relative overflow-hidden">
+                {/* Ambient decorative glow */}
+                <div className="absolute -top-10 -right-10 w-44 h-44 bg-indigo-500/15 rounded-full blur-3xl pointer-events-none" />
+
+                <div className="flex items-center gap-3.5 relative z-10 min-w-0">
+                  <div className="w-11 h-11 rounded-2xl bg-white/10 backdrop-blur-md border border-white/15 text-indigo-300 flex items-center justify-center shrink-0 shadow-inner">
+                    {activeEmailTracking?.is_opened ? (
+                      <Sparkles className="w-5 h-5 text-emerald-400" />
+                    ) : (
+                      <Radio className="w-5 h-5 text-amber-400 animate-pulse" />
+                    )}
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-base font-extrabold tracking-tight text-white">Email Tracking & Engagement Analytics</h3>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-base font-bold text-white tracking-tight">Email Tracking & Intelligence</h3>
                       {activeEmailTracking?.open_tracking_enabled === false ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border bg-slate-500/20 text-slate-300 border-slate-400/40 flex items-center gap-1">
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider border bg-slate-500/20 text-slate-300 border-slate-400/30">
                           Tracking Disabled
                         </span>
                       ) : (
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase border flex items-center gap-1 ${activeEmailTracking?.is_opened
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border shadow-xs ${
+                          activeEmailTracking?.is_opened
                             ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
                             : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
-                          }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${activeEmailTracking?.is_opened ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                          {activeEmailTracking?.is_opened ? `Viewed (${activeEmailTracking?.open_count || 1}x)` : 'Awaiting Open'}
+                        }`}>
+                          <span className="relative flex h-2 w-2">
+                            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                              activeEmailTracking?.is_opened ? 'bg-emerald-400' : 'bg-amber-400'
+                            }`} />
+                            <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                              activeEmailTracking?.is_opened ? 'bg-emerald-400' : 'bg-amber-400'
+                            }`} />
+                          </span>
+                          {activeEmailTracking?.is_opened 
+                            ? `Opened ${activeEmailTracking?.open_count || 1}x` 
+                            : 'Radar Active • Awaiting Open'}
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-slate-300 mt-0.5 truncate max-w-md">
-                      {prospect.company_name} &bull; <span className="text-indigo-200 font-semibold">{activeEmailTracking?.subject || 'Introductory Email'}</span>
-                    </p>
+                    <div className="flex items-center gap-2 text-xs text-slate-300 mt-1 flex-wrap">
+                      <span className="inline-flex items-center gap-1 bg-white/10 px-2 py-0.5 rounded-md font-mono text-[11px] text-slate-200 border border-white/10 truncate max-w-[200px]">
+                        <Building2 className="w-3 h-3 text-slate-300 shrink-0" />
+                        {prospect?.company_name || 'Prospect'}
+                      </span>
+                      <span className="text-slate-400">&bull;</span>
+                      <span className="text-slate-300 font-medium truncate max-w-[260px]">
+                        {activeEmailTracking?.subject || 'Introductory Email'}
+                      </span>
+                    </div>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowTrackingModal(false)}
-                  className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+
+                <div className="flex items-center gap-2.5 relative z-10 shrink-0">
+                  <div className="hidden sm:flex items-center gap-1 text-[10px] text-emerald-300 bg-emerald-500/10 border border-emerald-400/30 px-2.5 py-1 rounded-full font-medium shadow-xs">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Spam-Safe Ghost Pixel</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowTrackingModal(false)}
+                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer border border-white/10"
+                    title="Close"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               {/* Modal Body - Scrollable */}
-              <div className="p-6 space-y-6 overflow-y-auto flex-1 text-slate-700 text-xs">
+              <div className="p-6 space-y-5 overflow-y-auto flex-1 bg-slate-50/60 text-slate-700">
                 {activeEmailTracking?.open_tracking_enabled === false && (
-                  <div className="p-3 bg-slate-100 border border-slate-300 rounded-xl text-slate-700 text-xs font-semibold flex items-center gap-2">
-                    <span>🛡️ Open tracking was disabled for this email. Deliverability was prioritized and no tracking pixel was injected.</span>
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 text-xs font-medium flex items-center gap-2.5 shadow-2xs">
+                    <Shield className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Open tracking was disabled for this email. Deliverability was prioritized and no tracking pixel was injected.</span>
                   </div>
                 )}
+
                 {/* 4 KPI Metrics */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {/* Total Opens */}
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-slate-400">
-                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Total Opens</span>
-                      <Eye className="w-3.5 h-3.5 text-indigo-600" />
+                  <div className="p-4 bg-white border border-slate-200/90 rounded-2xl flex flex-col justify-between shadow-2xs hover:shadow-xs transition">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total Opens</span>
+                      <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                        <Eye className="w-3.5 h-3.5" />
+                      </div>
                     </div>
-                    <div className="mt-2">
+                    <div className="my-2">
                       <span className="text-2xl font-black text-slate-900 tracking-tight">
                         {activeEmailTracking?.open_count || (activeEmailTracking?.is_opened ? 1 : 0)}
                       </span>
-                      <span className="text-[10px] text-slate-400 ml-1">times</span>
+                      <span className="text-xs text-slate-400 ml-1 font-medium">times</span>
                     </div>
-                    <span className={`text-[10px] font-bold mt-1 ${(activeEmailTracking?.open_count || 0) > 1 ? 'text-indigo-600' : activeEmailTracking?.is_opened ? 'text-emerald-600' : 'text-slate-400'
-                      }`}>
-                      {(activeEmailTracking?.open_count || 0) > 2 ? '🔥 Highly Engaged' : activeEmailTracking?.is_opened ? 'Opened & Seen' : 'Not opened yet'}
-                    </span>
+                    <div>
+                      {(() => {
+                        const count = activeEmailTracking?.open_count || 0;
+                        const isOpened = activeEmailTracking?.is_opened;
+                        if (count >= 3) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-50 text-orange-700 border border-orange-200/80">
+                              🔥 High Engagement
+                            </span>
+                          );
+                        }
+                        if (isOpened) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Opened
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 border border-slate-200">
+                            ⏳ Awaiting read
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </div>
 
                   {/* Time Spent */}
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-slate-400">
-                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Time Spent</span>
-                      <Clock className="w-3.5 h-3.5 text-violet-600" />
+                  <div className="p-4 bg-white border border-slate-200/90 rounded-2xl flex flex-col justify-between shadow-2xs hover:shadow-xs transition">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Time Spent</span>
+                      <div className="w-7 h-7 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
+                        <Clock className="w-3.5 h-3.5" />
+                      </div>
                     </div>
-                    <div className="mt-2">
+                    <div className="my-2">
                       <span className="text-2xl font-black text-slate-900 tracking-tight">
-                        {activeEmailTracking?.estimated_read_time_formatted || (activeEmailTracking?.total_seconds_spent ? `${activeEmailTracking.total_seconds_spent}s` : '0s')}
+                        {activeEmailTracking?.estimated_read_time_formatted || 
+                         (activeEmailTracking?.total_seconds_spent ? `${activeEmailTracking.total_seconds_spent}s` : '0s')}
                       </span>
                     </div>
-                    <span className="text-[10px] font-bold text-violet-600 mt-1">
-                      {activeEmailTracking?.reading_engagement || (activeEmailTracking?.is_opened ? 'Read in Detail' : 'No Reading Time')}
-                    </span>
+                    <div>
+                      {(() => {
+                        if (activeEmailTracking?.reading_engagement) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-violet-50 text-violet-700 border border-violet-200/80">
+                              {activeEmailTracking.reading_engagement}
+                            </span>
+                          );
+                        }
+                        if (activeEmailTracking?.is_opened) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-violet-50 text-violet-700 border border-violet-200/80">
+                              Read in Detail
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 border border-slate-200">
+                            No dwell time yet
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </div>
 
                   {/* First Opened */}
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-slate-400">
-                      <span className="text-[10px] font-extrabold uppercase tracking-wider">First Opened</span>
-                      <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                  <div className="p-4 bg-white border border-slate-200/90 rounded-2xl flex flex-col justify-between shadow-2xs hover:shadow-xs transition">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">First Opened</span>
+                      <div className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <TrendingUp className="w-3.5 h-3.5" />
+                      </div>
                     </div>
-                    <div className="mt-2">
-                      <span className="text-xs font-bold text-slate-900 line-clamp-2">
-                        {formatTrackingDateTime(activeEmailTracking?.first_opened_at || activeEmailTracking?.opened_at)}
-                      </span>
+                    <div className="my-2">
+                      {(() => {
+                        const dt = activeEmailTracking?.first_opened_at || activeEmailTracking?.opened_at;
+                        if (!dt) {
+                          return <span className="text-base font-bold text-slate-400">Pending</span>;
+                        }
+                        return (
+                          <div>
+                            <span className="text-xs font-bold text-slate-900 block truncate">
+                              {new Date(dt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </span>
+                            <span className="text-[11px] text-slate-500 font-medium">
+                              {new Date(dt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
-                    <span className="text-[10px] text-slate-400 mt-1">Initial Read</span>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-medium">Initial Read</span>
+                    </div>
                   </div>
 
-                  {/* Last Opened */}
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-slate-400">
-                      <span className="text-[10px] font-extrabold uppercase tracking-wider">Most Recent</span>
-                      <Activity className="w-3.5 h-3.5 text-sky-600" />
+                  {/* Most Recent */}
+                  <div className="p-4 bg-white border border-slate-200/90 rounded-2xl flex flex-col justify-between shadow-2xs hover:shadow-xs transition">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Most Recent</span>
+                      <div className="w-7 h-7 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center">
+                        <Activity className="w-3.5 h-3.5" />
+                      </div>
                     </div>
-                    <div className="mt-2">
-                      <span className="text-xs font-bold text-slate-900 line-clamp-2">
-                        {formatTrackingDateTime(activeEmailTracking?.last_opened_at || activeEmailTracking?.opened_at)}
-                      </span>
+                    <div className="my-2">
+                      {(() => {
+                        const dt = activeEmailTracking?.last_opened_at || activeEmailTracking?.opened_at;
+                        if (!dt) {
+                          return <span className="text-base font-bold text-slate-400">Pending</span>;
+                        }
+                        return (
+                          <div>
+                            <span className="text-xs font-bold text-slate-900 block truncate">
+                              {new Date(dt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </span>
+                            <span className="text-[11px] text-slate-500 font-medium">
+                              {new Date(dt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
-                    <span className="text-[10px] text-slate-400 mt-1">Latest Open</span>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-medium">Latest Open</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* Engagement Level Progress Card */}
-                <div className="p-4 bg-gradient-to-br from-indigo-50/60 to-slate-50 border border-indigo-100/80 rounded-2xl space-y-2.5">
+                {/* Reading & Engagement Stage Progress Card */}
+                <div className="p-5 bg-white border border-slate-200/90 rounded-2xl shadow-2xs space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-extrabold text-slate-900 uppercase tracking-wider">Reading & Engagement Level</span>
-                    <span className="text-xs font-extrabold text-indigo-700">
-                      {activeEmailTracking?.reading_engagement || (activeEmailTracking?.is_opened ? 'Read in Detail' : 'Unopened')}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                        <Activity className="w-3.5 h-3.5" />
+                      </div>
+                      <span className="text-xs font-bold text-slate-900 tracking-tight">Reading & Engagement Level</span>
+                    </div>
+                    {(() => {
+                      const label = activeEmailTracking?.reading_engagement || (activeEmailTracking?.is_opened ? 'Read in Detail' : 'Unopened');
+                      const isOpened = activeEmailTracking?.is_opened;
+                      return (
+                        <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                          label === 'Deeply Engaged' 
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                            : label === 'Read in Detail' 
+                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                            : isOpened 
+                            ? 'bg-amber-50 text-amber-700 border-amber-200' 
+                            : 'bg-slate-100 text-slate-600 border-slate-200'
+                        }`}>
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </div>
-                  {/* Visual meter */}
-                  <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden flex">
-                    <div className={`h-full transition-all duration-500 ${!activeEmailTracking?.is_opened ? 'w-0' :
-                        (activeEmailTracking?.open_count >= 3 || (activeEmailTracking?.total_seconds_spent || 0) >= 60) ? 'w-full bg-gradient-to-r from-indigo-500 to-emerald-500' :
-                          (activeEmailTracking?.open_count >= 2 || (activeEmailTracking?.total_seconds_spent || 0) >= 15) ? 'w-2/3 bg-indigo-600' :
-                            'w-1/3 bg-amber-500'
+
+                  {/* Visual Meter Bar */}
+                  <div className="relative pt-1 pb-1">
+                    <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden p-0.5 border border-slate-200/60">
+                      <div className={`h-full rounded-full transition-all duration-700 ease-out ${
+                        !activeEmailTracking?.is_opened 
+                          ? 'w-[4%] bg-slate-300' 
+                          : ((activeEmailTracking?.open_count >= 3) || ((activeEmailTracking?.total_seconds_spent || 0) >= 60)) 
+                          ? 'w-full bg-gradient-to-r from-blue-500 via-indigo-500 to-emerald-500' 
+                          : ((activeEmailTracking?.open_count >= 2) || ((activeEmailTracking?.total_seconds_spent || 0) >= 15)) 
+                          ? 'w-2/3 bg-gradient-to-r from-blue-500 to-indigo-600' 
+                          : 'w-1/3 bg-gradient-to-r from-blue-400 to-amber-500'
                       }`} />
-                    t                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-semibold pt-0.5">
-                    <span>Skimmed (&lt;10s)</span>
-                    <span>Read in Detail (10s - 45s)</span>
-                    <span>Deeply Engaged (1m+)</span>
+                    </div>
+                  </div>
+
+                  {/* Milestones labels */}
+                  <div className="grid grid-cols-3 text-center text-[11px] pt-1">
+                    <div className="text-left">
+                      <span className="font-bold text-slate-700 block">Skimmed</span>
+                      <span className="text-[10px] text-slate-400">&lt;10s dwell</span>
+                    </div>
+                    <div className="text-center">
+                      <span className="font-bold text-slate-700 block">Read in Detail</span>
+                      <span className="text-[10px] text-slate-400">10s – 45s dwell</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold text-slate-700 block">Deeply Engaged</span>
+                      <span className="text-[10px] text-slate-400">1m+ dwell or 3+ opens</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* Detailed Open Event History */}
+                {/* Detailed Open Event History or Live Radar Listening */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-indigo-600" />
-                      Open History & Device Timeline
-                    </h4>
-                    <span className="text-[11px] text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                        <Radio className="w-3.5 h-3.5" />
+                      </div>
+                      <h4 className="text-xs font-bold text-slate-900 tracking-tight">
+                        Open History & Device Timeline
+                      </h4>
+                    </div>
+                    <span className="text-[11px] font-medium text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
                       {activeEmailTracking?.open_history?.length || 0} event{activeEmailTracking?.open_history?.length === 1 ? '' : 's'} recorded
                     </span>
                   </div>
 
                   {activeEmailTracking?.open_history && activeEmailTracking.open_history.length > 0 ? (
-                    <div className="divide-y divide-slate-100 border border-slate-200 rounded-2xl overflow-hidden bg-white max-h-48 overflow-y-auto">
-                      {[...activeEmailTracking.open_history].reverse().map((ev, idx) => (
-                        <div key={ev.id || idx} className="p-3 flex items-center justify-between gap-3 hover:bg-slate-50/80 transition text-[11px]">
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-7 h-7 rounded-xl bg-indigo-50 border border-indigo-200/60 text-indigo-700 flex items-center justify-center font-extrabold text-xs shrink-0">
-                              #{ev.id || activeEmailTracking.open_history.length - idx}
+                    <div className="divide-y divide-slate-100 border border-slate-200/90 rounded-2xl overflow-hidden bg-white shadow-2xs max-h-56 overflow-y-auto">
+                      {[...activeEmailTracking.open_history].reverse().map((ev, idx) => {
+                        const total = activeEmailTracking.open_history.length;
+                        const itemNumber = ev.id || (total - idx);
+                        const isMobile = (ev.device || '').toLowerCase().includes('mobile') || (ev.client || '').toLowerCase().includes('iphone') || (ev.client || '').toLowerCase().includes('android');
+                        const cleanedClient = (ev.client || 'Mail Client').replace(/\s*\((Proxy|Test Ping)\)/gi, '').trim() || 'Mail Client';
+                        const timeAgo = formatTrackingTimeAgo(ev.timestamp);
+
+                        return (
+                          <div key={ev.id || idx} className="p-3.5 flex items-center justify-between gap-3 hover:bg-slate-50/80 transition text-xs">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-50 to-blue-50 border border-indigo-200/70 text-indigo-700 flex items-center justify-center font-black text-xs shrink-0 shadow-2xs">
+                                #{itemNumber}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-800 flex items-center gap-2 truncate">
+                                  {isMobile ? (
+                                    <Smartphone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                  ) : (
+                                    <Laptop className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                  )}
+                                  <span className="truncate">{cleanedClient}</span>
+                                  <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[10px] font-medium border border-slate-200 shrink-0">
+                                    {ev.device || (isMobile ? 'Mobile' : 'Desktop')}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                  <span>{formatTrackingDateTime(ev.timestamp)}</span>
+                                  {timeAgo && (
+                                    <>
+                                      <span>&bull;</span>
+                                      <span className="text-slate-500 font-medium">{timeAgo}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
                             </div>
-                            <div className="min-w-0">
-                              <div className="font-extrabold text-slate-800 flex items-center gap-1.5 truncate">
-                                <span>{(ev.client || 'Mail Client').replace(/\s*\((Proxy|Test Ping)\)/gi, '').trim()}</span>
-                                <span className="px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded text-[9px] font-semibold border border-slate-200 shrink-0">
-                                  {ev.device || 'Desktop'}
-                                </span>
-                              </div>
-                              <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
-                                <span>{formatTrackingDateTime(ev.timestamp)}</span>
-                              </div>
+                            <div className="text-right shrink-0">
+                              <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 font-bold rounded-lg text-[11px] border border-emerald-200/70 inline-flex items-center gap-1 shadow-2xs">
+                                <Clock className="w-3 h-3 text-emerald-600" />
+                                +{ev.dwell_seconds || 15}s read
+                              </span>
                             </div>
                           </div>
-                          <div className="text-right shrink-0">
-                            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 font-extrabold rounded-md text-[10px] border border-emerald-200/60 block">
-                              +{ev.dwell_seconds || 15}s read
-                            </span>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : activeEmailTracking?.is_opened ? (
-                    <div className="p-4 border border-slate-200 rounded-2xl bg-slate-50 text-center space-y-1">
-                      <p className="text-xs font-bold text-slate-700">Email was opened on {formatTrackingDateTime(activeEmailTracking?.opened_at)}</p>
-                      <p className="text-[11px] text-slate-400">Timestamps and device details are recorded for each open.</p>
+                    <div className="p-5 border border-emerald-200/80 rounded-2xl bg-gradient-to-br from-emerald-50/50 via-white to-slate-50 text-center space-y-1.5 shadow-2xs">
+                      <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto mb-2">
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                      </div>
+                      <p className="text-xs font-bold text-slate-800">
+                        Email was verified opened on {formatTrackingDateTime(activeEmailTracking?.opened_at || activeEmailTracking?.first_opened_at)}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        Future opens and reading dwell duration will be recorded automatically in real-time.
+                      </p>
                     </div>
                   ) : (
-                    <div className="p-6 border border-dashed border-slate-200 rounded-2xl bg-slate-50/60 text-center space-y-2">
-                      <Mail className="w-8 h-8 text-slate-300 mx-auto" />
-                      <p className="text-xs font-extrabold text-slate-700">No Open Events Recorded Yet</p>
-                      <p className="text-[11px] text-slate-400 max-w-sm mx-auto">
-                        When the recipient opens this email, the opening timestamp, device, and reading duration will appear here.
+                    /* World-class Live Radar listening state when unopened */
+                    <div className="p-7 border border-indigo-100/90 rounded-2xl bg-gradient-to-b from-indigo-50/30 via-white to-slate-50/60 text-center relative overflow-hidden shadow-2xs">
+                      {/* Concentric live radar animation */}
+                      <div className="relative w-16 h-16 mx-auto flex items-center justify-center mb-3">
+                        <span className="absolute inset-0 rounded-full bg-indigo-500/10 animate-ping duration-1000" />
+                        <span className="absolute inset-1.5 rounded-full bg-indigo-500/15 animate-pulse" />
+                        <div className="relative w-11 h-11 rounded-2xl bg-gradient-to-tr from-indigo-600 to-blue-500 text-white flex items-center justify-center shadow-md shadow-indigo-500/25">
+                          <Radio className="w-5 h-5 animate-pulse" />
+                        </div>
+                      </div>
+                      <h5 className="text-xs font-bold text-slate-900 tracking-tight">
+                        Live Radar Active &amp; Listening
+                      </h5>
+                      <p className="text-[11px] text-slate-500 max-w-sm mx-auto mt-1 leading-relaxed">
+                        Waiting for recipient to view this email. As soon as it is opened, opening timestamps, device type, and reading dwell time will stream here in real time.
                       </p>
+                      <div className="flex items-center justify-center gap-2 mt-4 flex-wrap">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 rounded-full text-[10px] font-semibold text-slate-600 shadow-2xs">
+                          <Zap className="w-3 h-3 text-amber-500" /> Instant Webhook Detection
+                        </span>
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 rounded-full text-[10px] font-semibold text-slate-600 shadow-2xs">
+                          <ShieldCheck className="w-3 h-3 text-emerald-500" /> Anti-Spam Pixel
+                        </span>
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 rounded-full text-[10px] font-semibold text-slate-600 shadow-2xs">
+                          <Clock className="w-3 h-3 text-indigo-500" /> Live Dwell Tracking
+                        </span>
+                      </div>
                     </div>
                   )}
                 </div>
               </div>
 
               {/* Modal Footer */}
-              <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
-                <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <div className="p-4 px-6 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
+                <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                  </span>
                   <span>Live real-time tracking active</span>
+                  <span className="text-[11px] text-slate-400 hidden sm:inline">&bull; auto-syncing every 4s</span>
                 </div>
 
                 <button
                   type="button"
                   onClick={() => setShowTrackingModal(false)}
-                  className="px-5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs rounded-xl transition shadow-sm cursor-pointer"
+                  className="px-6 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-xl shadow-xs hover:shadow-md transition cursor-pointer"
                 >
                   Close
                 </button>
