@@ -170,14 +170,14 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
         if obj.prospect_contact and obj.prospect_contact.contact_name:
             return obj.prospect_contact.contact_name
         w_name = getattr(obj, "whatsapp_name", None)
-        if w_name and not self._is_lid(w_name) and "@" not in str(w_name):
+        if w_name and w_name.strip() and w_name.strip().lower() != "whatsapp contact" and not self._is_lid(w_name) and "@" not in str(w_name):
             return w_name
         phone = self.get_phone_number(obj)
         if phone:
             return phone
-        if w_name and not self._is_lid(w_name):
+        if w_name and not self._is_lid(w_name) and w_name.strip().lower() != "whatsapp contact":
             return w_name
-        return "WhatsApp Contact"
+        return phone or "WhatsApp Contact"
 
     def get_prospect_name(self, obj):
         if obj.prospect and obj.prospect.company_name:

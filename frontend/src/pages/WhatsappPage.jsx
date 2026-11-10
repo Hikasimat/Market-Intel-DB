@@ -2771,7 +2771,22 @@ export default function WhatsappPage() {
                   </div>
                   <div className="text-left">
                     <div className="text-sm font-bold flex items-center gap-2">
-                      <span>Incoming Call from {incomingCall.caller_name || incomingCall.caller_phone || 'WhatsApp Contact'}</span>
+                      <span>Incoming Call from {
+                        (() => {
+                          const isGeneric = (val) => !val || ['whatsapp contact', 'unknown', 'contact', 'none'].includes(String(val).trim().toLowerCase());
+                          const isLid = (val) => {
+                            const d = String(val || '').replace(/\D/g, '');
+                            return d.length >= 14 || d.startsWith('7658') || d.startsWith('2262') || d.startsWith('2167');
+                          };
+                          const extractPhone = (val) => {
+                            const d = String(val || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                            return (d.length >= 8 && d.length <= 13 && !isLid(d)) ? `+${d}` : '';
+                          };
+                          const phone = extractPhone(incomingCall.caller_phone) || extractPhone(incomingCall.chat_id) || '';
+                          const name = (!isGeneric(incomingCall.caller_name) && !isLid(incomingCall.caller_name) && !String(incomingCall.caller_name).includes('@')) ? incomingCall.caller_name : '';
+                          return name || phone || 'WhatsApp Contact';
+                        })()
+                      }</span>
                       <span className="w-2 h-2 rounded-full bg-emerald-300 animate-ping" />
                     </div>
                     <div className="text-xs text-emerald-100 font-mono">

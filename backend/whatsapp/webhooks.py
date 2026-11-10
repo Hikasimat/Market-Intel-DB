@@ -1234,7 +1234,7 @@ def _handle_call_event(
         initial_name = (
             "WhatsApp Group" if is_grp
             else (matched_contact.contact_name if matched_contact
-            else (push_name if push_name and not _is_lid(push_name) and "@" not in push_name
+            else (push_name if push_name and not _is_lid(push_name) and "@" not in push_name and push_name.strip().lower() != "whatsapp contact"
             else (phone_formatted or "WhatsApp Contact")))
         )
         conversation = WhatsAppConversation.objects.create(
@@ -1358,8 +1358,12 @@ def _handle_call_event(
         if (conversation and conversation.prospect_contact and conversation.prospect_contact.contact_name)
         else (
             conversation.whatsapp_name
-            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id and not _is_lid(conversation.whatsapp_name) and "@" not in conversation.whatsapp_name)
-            else (phone_display or (push_name if push_name and not _is_lid(push_name) else "WhatsApp Contact"))
+            if (conversation and conversation.whatsapp_name and conversation.whatsapp_name != target_chat_id and not _is_lid(conversation.whatsapp_name) and "@" not in conversation.whatsapp_name and conversation.whatsapp_name.strip().lower() != "whatsapp contact")
+            else (
+                push_name
+                if (push_name and not _is_lid(push_name) and push_name.strip().lower() != "whatsapp contact" and "@" not in push_name)
+                else (phone_display or "WhatsApp Contact")
+            )
         )
     )
 

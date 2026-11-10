@@ -283,7 +283,7 @@ export default function NotificationCenter() {
     } catch (_) {}
   };
 
-  const triggerWhatsappToast = (toastId, title, message) => {
+  const triggerWhatsappToast = (toastId, title, message, phone = '') => {
     playMessageSound();
     setWhatsappToasts((prev) => {
       if (prev.find((t) => t.id === toastId)) return prev;
@@ -292,6 +292,7 @@ export default function NotificationCenter() {
         {
           id: toastId,
           title,
+          phone,
           message,
           time: formatTimeForUser(new Date().toISOString(), user?.timezone),
         },
@@ -423,6 +424,105 @@ export default function NotificationCenter() {
     navigate('/whatsapp', { state: { autoAcceptCall: { ...call, ...(acceptData || {}), alreadyAccepted: true } } });
   };
 
+  const resolveSenderInfo = (conv) => {
+    if (!conv) return { name: '', phone: '', display: 'WhatsApp Contact' };
+
+    const isGroup = conv.is_group || conv.chat_id?.endsWith('@g.us');
+    if (isGroup) {
+      const gName = (conv.whatsapp_name && conv.whatsapp_name !== 'WhatsApp Group' && !conv.whatsapp_name.includes('@'))
+        ? conv.whatsapp_name
+        : (conv.contact_name && conv.contact_name !== 'WhatsApp Group' && !conv.contact_name.includes('@') ? conv.contact_name : 'WhatsApp Group');
+      return { name: gName, phone: '', display: gName, isGroup: true };
+    }
+
+    const isLid = (val) => {
+      if (!val) return false;
+      const d = String(val).replace(/\D/g, '');
+      return d.length >= 14 || d.startsWith('7658') || d.startsWith('2262') || d.startsWith('2167');
+    };
+
+    const isGeneric = (val) => {
+      if (!val) return true;
+      const s = String(val).trim().toLowerCase();
+      return s === 'whatsapp contact' || s === 'new contact' || s === 'unknown' || s === 'contact' || s === 'none';
+    };
+
+    const extractPhone = (val) => {
+      if (!val) return '';
+      const raw = String(val).split('@')[0].split(':')[0];
+      const d = raw.replace(/\D/g, '');
+      if (d.length >= 8 && d.length <= 13 && !isLid(d)) {
+        return `+${d}`;
+      }
+      return '';
+    };
+
+    // Extract phone number from all available fields
+    const phone = extractPhone(conv.phone_number)
+      || extractPhone(conv.chat_id)
+      || extractPhone(conv.prospect_phone)
+      || extractPhone(conv.prospect_contact?.phone_number)
+      || '';
+
+    // Extract real contact name (CRM contact name or WhatsApp push name)
+    let contactName = '';
+    if (conv.contact_name && !isGeneric(conv.contact_name) && !conv.contact_name.includes('@') && !isLid(conv.contact_name)) {
+      contactName = conv.contact_name;
+    } else if (conv.whatsapp_name && !isGeneric(conv.whatsapp_name) && !conv.whatsapp_name.includes('@') && !isLid(conv.whatsapp_name) && !conv.whatsapp_name.startsWith('+')) {
+      contactName = conv.whatsapp_name;
+    } else if (conv.prospect_contact?.contact_name && !isGeneric(conv.prospect_contact.contact_name)) {
+      contactName = conv.prospect_contact.contact_name;
+    } else if (conv.prospect_contact?.name && !isGeneric(conv.prospect_contact.name)) {
+      contactName = conv.prospect_contact.name;
+    }
+
+    // Determine display name:
+    // 1. Contact Name if available (e.g. "Mohan V")
+    // 2. Otherwise Phone Number (e.g. "+971545812643")
+    // 3. Fallback: "WhatsApp Contact"
+    const display = contactName || phone || 'WhatsApp Contact';
+
+    return { name: contactName, phone, display, isGroup: false };
+  };
+
+  const resolveCallerInfo = (call) => {
+    if (!call) return { title: 'WhatsApp Audio Call', subtitle: 'WhatsApp Voice Call' };
+
+    const isLid = (val) => {
+      if (!val) return false;
+      const d = String(val).replace(/\D/g, '');
+      return d.length >= 14 || d.startsWith('7658') || d.startsWith('2262') || d.startsWith('2167');
+    };
+
+    const isGeneric = (val) => {
+      if (!val) return true;
+      const s = String(val).trim().toLowerCase();
+      return s === 'whatsapp contact' || s === 'unknown' || s === 'contact' || s === 'none';
+    };
+
+    const extractPhone = (val) => {
+      if (!val) return '';
+      const raw = String(val).split('@')[0].split(':')[0];
+      const d = raw.replace(/\D/g, '');
+      if (d.length >= 8 && d.length <= 13 && !isLid(d)) {
+        return `+${d}`;
+      }
+      return '';
+    };
+
+    const phone = extractPhone(call.caller_phone) || extractPhone(call.chat_id) || '';
+
+    let name = '';
+    if (call.caller_name && !isGeneric(call.caller_name) && !call.caller_name.includes('@') && !isLid(call.caller_name)) {
+      name = call.caller_name;
+    }
+
+    const title = name || phone || 'WhatsApp Voice Call';
+    const subtitle = (name && phone) ? phone : (phone || 'WhatsApp Audio Call');
+
+    return { title, subtitle };
+  };
+
   const checkNewWhatsApp = useCallback(async () => {
     const currentUser = userRef.current;
     if (!currentUser?.id) return;
@@ -458,10 +558,10 @@ export default function NotificationCenter() {
         );
 
         if (hasNewUnread && !conv.last_message_from_me) {
-          const sender = conv.whatsapp_name || conv.prospect_contact?.name || conv.phone_number || 'New contact';
+          const senderInfo = resolveSenderInfo(conv);
           const snippet = conv.last_message_preview || 'New message received';
           const toastId = `wa-${conv.id}-${conv.last_message_at || Date.now()}`;
-          triggerWhatsappToast(toastId, `WhatsApp from ${sender}`, snippet);
+          triggerWhatsappToast(toastId, senderInfo.display, snippet, senderInfo.phone);
         }
 
         notifiedWhatsappRef.current.set(conv.id, {
@@ -614,17 +714,23 @@ export default function NotificationCenter() {
             className="pointer-events-auto bg-white border-l-4 border-emerald-500 rounded-xl shadow-2xl p-4 w-72 transform transition-all flex items-start gap-3 cursor-pointer"
             onClick={() => { navigate('/whatsapp'); removeWhatsappToast(toast.id); }}
           >
-            <div className="bg-emerald-100 text-emerald-700 rounded-full p-2 shrink-0">
+            <div className="bg-emerald-100 text-emerald-700 rounded-full p-2 shrink-0 mt-0.5">
               <MessageCircle className="w-4 h-4" />
             </div>
-            <div className="flex-1">
-              <h4 className="text-sm font-extrabold text-slate-900">{toast.title || 'New WhatsApp Message'}</h4>
-              <p className="text-xs text-slate-600 font-medium mt-0.5">{toast.message}</p>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-1 mb-0.5">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600">WhatsApp</span>
+                {toast.phone && toast.phone !== toast.title && (
+                  <span className="text-[10px] text-slate-400 font-mono truncate">{toast.phone}</span>
+                )}
+              </div>
+              <h4 className="text-sm font-extrabold text-slate-900 truncate">{toast.title || 'WhatsApp Message'}</h4>
+              <p className="text-xs text-slate-600 font-medium mt-0.5 line-clamp-2">{toast.message}</p>
               <div className="text-[10px] text-slate-400 mt-1">{toast.time}</div>
             </div>
             <button
               onClick={(e) => { e.stopPropagation(); removeWhatsappToast(toast.id); }}
-              className="text-slate-400 hover:text-slate-600"
+              className="text-slate-400 hover:text-slate-600 shrink-0"
             >
               <X className="w-4 h-4" />
             </button>
@@ -633,45 +739,48 @@ export default function NotificationCenter() {
       </div>
 
       {/* Global WhatsApp Incoming Call Modal (active when user is anywhere else in the application) */}
-      {incomingCall && location.pathname !== '/whatsapp' && (
-        <div className="fixed top-6 right-6 z-[9999] pointer-events-auto bg-slate-900/95 backdrop-blur-md text-white border-2 border-emerald-500 rounded-2xl shadow-2xl p-5 w-88 max-w-[calc(100vw-2rem)] animate-in fade-in zoom-in-95 duration-200">
-          <div className="flex items-center gap-3.5 mb-3.5">
-            <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-400 flex items-center justify-center shrink-0">
-              <PhoneCall className="w-6 h-6 text-emerald-400 animate-bounce" />
-            </div>
-            <div className="flex-1 min-w-0 text-left">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] uppercase tracking-wider font-extrabold text-emerald-400">Incoming WhatsApp Call</span>
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+      {incomingCall && location.pathname !== '/whatsapp' && (() => {
+        const callerInfo = resolveCallerInfo(incomingCall);
+        return (
+          <div className="fixed top-6 right-6 z-[9999] pointer-events-auto bg-slate-900/95 backdrop-blur-md text-white border-2 border-emerald-500 rounded-2xl shadow-2xl p-5 w-88 max-w-[calc(100vw-2rem)] animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3.5 mb-3.5">
+              <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-400 flex items-center justify-center shrink-0">
+                <PhoneCall className="w-6 h-6 text-emerald-400 animate-bounce" />
               </div>
-              <h4 className="text-sm font-bold text-white truncate mt-0.5">
-                {incomingCall.caller_name || incomingCall.caller_phone || 'WhatsApp Contact'}
-              </h4>
-              <p className="text-xs text-slate-300 font-mono truncate">
-                {incomingCall.caller_phone || 'WhatsApp Voice Call'}
-              </p>
+              <div className="flex-1 min-w-0 text-left">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] uppercase tracking-wider font-extrabold text-emerald-400">Incoming WhatsApp Call</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                </div>
+                <h4 className="text-sm font-bold text-white truncate mt-0.5">
+                  {callerInfo.title}
+                </h4>
+                <p className="text-xs text-slate-300 font-mono truncate">
+                  {callerInfo.subtitle}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5 pt-2.5 border-t border-slate-700/60">
+              <button
+                type="button"
+                onClick={() => handleDeclineCall(incomingCall)}
+                className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+              >
+                <PhoneOff className="w-4 h-4" />
+                <span>Decline</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAcceptCall(incomingCall)}
+                className="flex-1 py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/30 ring-2 ring-emerald-400/50 active:scale-95 cursor-pointer animate-pulse"
+              >
+                <PhoneCall className="w-4 h-4" />
+                <span>Accept</span>
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-2.5 pt-2.5 border-t border-slate-700/60">
-            <button
-              type="button"
-              onClick={() => handleDeclineCall(incomingCall)}
-              className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-            >
-              <PhoneOff className="w-4 h-4" />
-              <span>Decline</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleAcceptCall(incomingCall)}
-              className="flex-1 py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/30 ring-2 ring-emerald-400/50 active:scale-95 cursor-pointer animate-pulse"
-            >
-              <PhoneCall className="w-4 h-4" />
-              <span>Accept</span>
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
     </>
   );
 }

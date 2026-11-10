@@ -2910,6 +2910,34 @@ class WhatsAppCallStatusView(APIView):
             inc_sess = incoming_call.get("session_name") or resolved_session
             incoming_call["audio_ws_url"] = _build_audio_ws_url(request, inc_sess, incoming_call["call_id"])
 
+            # Resolve caller phone number if empty or lid
+            c_phone = incoming_call.get("caller_phone")
+            chat_id = incoming_call.get("chat_id")
+            if (not c_phone or _is_lid(c_phone)) and chat_id:
+                raw_d = re.sub(r"\D+", "", str(chat_id).split("@")[0].split(":")[0])
+                if len(raw_d) >= 8 and len(raw_d) <= 13 and not _is_lid(raw_d):
+                    c_phone = f"+{raw_d}"
+                    incoming_call["caller_phone"] = c_phone
+
+            # Resolve caller contact name from CRM or conversation
+            c_name = incoming_call.get("caller_name")
+            if (not c_name or c_name.strip().lower() in ("whatsapp contact", "unknown", "none")) and chat_id:
+                conv = WhatsAppConversation.objects.filter(session=session_obj, chat_id=chat_id, is_deleted=False).select_related("prospect_contact").first()
+                if not conv and session_obj.owner:
+                    conv = WhatsAppConversation.objects.filter(session__owner=session_obj.owner, chat_id=chat_id, is_deleted=False).select_related("prospect_contact").first()
+                if conv:
+                    resolved_name = (
+                        (conv.prospect_contact.contact_name if conv.prospect_contact else "")
+                        or (conv.whatsapp_name if (conv.whatsapp_name and conv.whatsapp_name.strip().lower() != "whatsapp contact" and not _is_lid(conv.whatsapp_name) and "@" not in conv.whatsapp_name) else "")
+                        or conv.phone_number
+                    )
+                    if resolved_name:
+                        incoming_call["caller_name"] = resolved_name
+
+            if not incoming_call.get("caller_name") or incoming_call.get("caller_name").strip().lower() in ("whatsapp contact", "unknown"):
+                if c_phone:
+                    incoming_call["caller_name"] = c_phone
+
         is_connected = (
             session_ready
             or bool(call_status.get("paired"))
