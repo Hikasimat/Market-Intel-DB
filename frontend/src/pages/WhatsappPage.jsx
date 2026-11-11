@@ -301,7 +301,7 @@ function int16LEToFloat32(buf) {
 
 const CAPTURE_WORKLET_CODE = `
 class CaptureProcessor extends AudioWorkletProcessor {
-  process(inputs) {
+  process(inputs, outputs) {
     const channel = inputs[0] && inputs[0][0];
     if (channel && channel.length) {
       this.port.postMessage(channel.slice(0));
@@ -930,6 +930,7 @@ export default function WhatsappPage() {
         },
       });
       callMediaRef.current.micStream = stream;
+      callMediaRef.current.isMuted = false;
       callMediaRef.current.remoteQueueEndAt = 0;
       callMediaRef.current.remotePlaybackEndAt = 0;
       callMediaRef.current.remoteAudioRms = 0;
@@ -1018,7 +1019,7 @@ export default function WhatsappPage() {
         playbackNode.port.postMessage(floats);
       };
 
-      // Connect mic to captureNode for real-time full-duplex two-way audio with Acoustic Echo Suppression
+      // Connect mic to captureNode for real-time full-duplex two-way audio
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
@@ -1031,38 +1032,7 @@ export default function WhatsappPage() {
           return;
         }
 
-        const now = performance.now();
-        const hasWorkletSamples = (callMediaRef.current.playbackAvailableSamples || 0) > 64;
-        const isRemotePlaying = hasWorkletSamples || (now < (callMediaRef.current.remotePlaybackEndAt || 0));
-        const inEchoHangover = now < (callMediaRef.current.echoHangoverUntil || 0);
-
-        // Calculate RMS of microphone input
-        let sumSquares = 0;
-        for (let i = 0; i < samples.length; i++) {
-          sumSquares += samples[i] * samples[i];
-        }
-        const micRms = Math.sqrt(sumSquares / samples.length);
-
-        // Acoustic Echo Suppression (AES):
-        // While remote audio is playing from speakers (or decaying during room reverb tail),
-        // the laptop mic picks up acoustic speaker bleed.
-        // Suppress this bleed (send silence) unless local user is actively talking (micRms >= 0.045).
-        // This eliminates the feedback loop where the caller's words repeat multiple times.
-        if (isRemotePlaying || inEchoHangover) {
-          const isDoubleTalk = micRms >= 0.045;
-          if (!isDoubleTalk) {
-            sendRawPcm(new Int16Array(samples.length).buffer);
-            return;
-          }
-        }
-
-        // Noise gate: if mic input is ambient room noise (fan, AC noise < 0.008), send silence
-        if (micRms < 0.008) {
-          sendRawPcm(new Int16Array(samples.length).buffer);
-          return;
-        }
-
-        // Transmit clear microphone audio directly to caller
+        // Transmit clear microphone audio directly to caller in real time
         sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);
@@ -1077,10 +1047,11 @@ export default function WhatsappPage() {
         console.warn('Could not initialize recording destination:', recErr);
       }
 
-      // Keep node alive without outputting mic audio back into local speakers
+      // Keep node alive by connecting to destination with gain=0 so browser actively pulls audio
       const silenceGain = ctx.createGain();
       silenceGain.gain.setValueAtTime(0, ctx.currentTime);
       captureNode.connect(silenceGain);
+      silenceGain.connect(ctx.destination);
 
       // 3. Connect primary WebSocket Audio Bridge (bypasses UDP NAT blocks and avoids Pion ICE timeout killing the call)
       let normalizedWsUrl = audioWsUrl || '';
