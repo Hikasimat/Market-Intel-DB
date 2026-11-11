@@ -2353,7 +2353,10 @@ export default function WhatsappPage() {
   // ===================================================================
   if (!isConnected) {
     return (
-      <div className="min-h-[calc(100vh-4.5rem)] bg-[#eae6df] flex flex-col justify-between relative overflow-hidden font-sans">
+      <div 
+        className="bg-[#eae6df] flex flex-col justify-between relative overflow-hidden font-sans"
+        style={{ minHeight: 'calc((100vh - 2rem) / 0.9)' }}
+      >
         {/* Top Emerald Header Banner */}
         <div className="bg-[#00a884] h-56 w-full px-8 py-6 text-white flex items-center justify-between shadow-sm">
           <div className="flex items-center gap-3 max-w-5xl mx-auto w-full">
@@ -2523,7 +2526,10 @@ export default function WhatsappPage() {
   const currentUserPhone = formatPhone(connectedMe.phone || selectedSession?.phone_number || '');
 
   return (
-    <div className="flex h-[calc(100vh-4.25rem)] bg-[#f0f2f5] overflow-hidden relative font-sans">
+    <div 
+      className="flex flex-1 bg-[#f0f2f5] overflow-hidden relative font-sans"
+      style={{ height: 'calc((100vh - 2rem) / 0.9)', minHeight: 'calc((100vh - 2rem) / 0.9)' }}
+    >
       
       {/* Toast Notification */}
       {toastMessage && (
