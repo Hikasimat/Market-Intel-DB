@@ -642,8 +642,17 @@ export default function WhatsappPage() {
         setIsCallingPaired(false);
       }
 
-      if (res.data?.active_call && res.data.active_call.status === 'ended' && callState.active) {
-        cleanupCallSession();
+      const activeCallData = res.data?.active_call;
+      if (activeCallData && callState.active) {
+        const endedCallId = String(activeCallData.call_id || '').replace(/^call_/, '').trim();
+        const currentCallId = String(callState.callId || '').replace(/^call_/, '').trim();
+        if (endedCallId && currentCallId && endedCallId === currentCallId) {
+          if (activeCallData.status === 'ended') {
+            cleanupCallSession();
+          } else if (activeCallData.status === 'active' && callState.status === 'calling') {
+            setCallState((prev) => ({ ...prev, status: 'connected' }));
+          }
+        }
       }
 
       const incoming = res.data?.incoming_call;
@@ -994,7 +1003,7 @@ export default function WhatsappPage() {
         playbackNode.port.postMessage(floats);
       };
 
-      // Connect mic to captureNode for real-time full-duplex two-way audio
+      // Connect mic to captureNode for real-time full-duplex two-way audio with Acoustic Echo Suppression
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
@@ -1007,7 +1016,38 @@ export default function WhatsappPage() {
           return;
         }
 
-        // Full-duplex direct PCM transmission to caller (browser AEC handles acoustic echo)
+        const now = performance.now();
+        const hasWorkletSamples = (callMediaRef.current.playbackAvailableSamples || 0) > 64;
+        const isRemotePlaying = hasWorkletSamples || (now < (callMediaRef.current.remotePlaybackEndAt || 0));
+        const inEchoHangover = now < (callMediaRef.current.echoHangoverUntil || 0);
+
+        // Calculate RMS of microphone input
+        let sumSquares = 0;
+        for (let i = 0; i < samples.length; i++) {
+          sumSquares += samples[i] * samples[i];
+        }
+        const micRms = Math.sqrt(sumSquares / samples.length);
+
+        // Acoustic Echo Suppression (AES):
+        // While remote audio is playing from speakers (or decaying during room reverb tail),
+        // the laptop mic picks up acoustic speaker bleed.
+        // Suppress this bleed (send silence) unless local user is actively talking (micRms >= 0.045).
+        // This eliminates the feedback loop where the caller's words repeat multiple times.
+        if (isRemotePlaying || inEchoHangover) {
+          const isDoubleTalk = micRms >= 0.045;
+          if (!isDoubleTalk) {
+            sendRawPcm(new Int16Array(samples.length).buffer);
+            return;
+          }
+        }
+
+        // Noise gate: if mic input is ambient room noise (fan, AC noise < 0.008), send silence
+        if (micRms < 0.008) {
+          sendRawPcm(new Int16Array(samples.length).buffer);
+          return;
+        }
+
+        // Transmit clear microphone audio directly to caller
         sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);
@@ -1082,19 +1122,17 @@ export default function WhatsappPage() {
                   finish(false);
                   return;
                 }
-                const isNormalClose = ev.code === 1000 || ev.code === 1001 || ev.code === 1005 || ev.reason === 'call ended';
-                if (isNormalClose || (callMediaRef.current.reconnectCount || 0) >= 2) {
+                const isServerEnded = ev.reason === 'call ended';
+                const reconnectCount = callMediaRef.current.reconnectCount || 0;
+                if (isServerEnded || reconnectCount >= 3) {
                   markCallIdHandled(callId);
                   setIncomingCall(null);
-                  api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/end/`, {
-                    session_name: callSessionName,
-                  }).catch(() => {});
                   setCallState((prev) => (prev.active ? { ...prev, status: 'ended', error: 'Call ended' } : prev));
                   setTimeout(() => cleanupCallSession(), 1000);
                   return;
                 }
-                callMediaRef.current.reconnectCount = (callMediaRef.current.reconnectCount || 0) + 1;
-                // Reconnect automatically at most twice if transient network drop
+                callMediaRef.current.reconnectCount = reconnectCount + 1;
+                // Reconnect automatically if transient network drop
                 if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
                   setTimeout(() => {
                     if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
@@ -1122,30 +1160,25 @@ export default function WhatsappPage() {
         });
         callMediaRef.current.peerConnection = pc;
 
-        const dc = pc.createDataChannel('pcm', { ordered: true });
-        dc.binaryType = 'arraybuffer';
-        callMediaRef.current.dataChannel = dc;
-
-        dc.onopen = () => {
-          if (ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-          }
-        };
-        dc.onmessage = (e) => {
-          playIncomingBuffer(e.data);
-        };
-
-        pc.ondatachannel = (event) => {
-          const remoteDc = event.channel;
-          remoteDc.binaryType = 'arraybuffer';
-          remoteDc.onopen = () => {
+        const bindDataChannel = (channel) => {
+          if (!channel) return;
+          callMediaRef.current.dataChannel = channel;
+          channel.binaryType = 'arraybuffer';
+          channel.onopen = () => {
             if (ctx.state === 'suspended') {
               ctx.resume().catch(() => {});
             }
           };
-          remoteDc.onmessage = (e) => {
+          channel.onmessage = (e) => {
             playIncomingBuffer(e.data);
           };
+        };
+
+        const dc = pc.createDataChannel('pcm', { ordered: true });
+        bindDataChannel(dc);
+
+        pc.ondatachannel = (event) => {
+          bindDataChannel(event.channel);
         };
 
         const offer = await pc.createOffer();

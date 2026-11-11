@@ -316,20 +316,37 @@ def mark_active_call_connected(session_name: str = "default", call_id: Optional[
     Mark an incoming call as handled/connected and remove it from active ringing cache
     so polling never re-surfaces the call banner after the user attends it.
     """
-    if call_id:
-        mark_call_handled(call_id)
+    clean_target = _normalize_call_id(call_id)
+    if clean_target:
+        mark_call_handled(clean_target)
     clear_active_call(session_name, call_id)
     if session_name:
         set_session_call_state(session_name, {
-            "call_id": call_id or "",
+            "call_id": clean_target or "",
             "status": "active",
             "session_name": session_name,
-            "updated_at": timezone.now().isoformat(),
+            "connected_at": timezone.now().isoformat(),
+        })
+
+
+def mark_call_ended(session_name: str = "default", call_id: Optional[str] = None, reason: str = "ended") -> None:
+    """Explicitly mark an active call as ended in session state."""
+    clean_target = _normalize_call_id(call_id)
+    if clean_target:
+        mark_call_handled(clean_target)
+    clear_active_call(session_name, call_id)
+    if session_name:
+        set_session_call_state(session_name, {
+            "call_id": clean_target or "",
+            "status": "ended",
+            "reason": reason,
+            "session_name": session_name,
+            "ended_at": timezone.now().isoformat(),
         })
 
 
 def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
-    """Clear active incoming call strictly for this session."""
+    """Clear active incoming ringing call strictly for this session."""
     clean_target = _normalize_call_id(call_id)
     if clean_target:
         mark_call_handled(clean_target)
@@ -354,15 +371,6 @@ def clear_active_call(session_name: str = "default", call_id: Optional[str] = No
                     os.remove(cache_path)
     except Exception:
         pass
-
-    # Also update session call state to ended
-    if session_name:
-        set_session_call_state(session_name, {
-            "call_id": clean_target or "",
-            "status": "ended",
-            "session_name": session_name,
-            "updated_at": timezone.now().isoformat(),
-        })
 
 
 CRM_GROUP_CACHE = {}
@@ -1401,9 +1409,8 @@ def _handle_call_event(
         "call.missed", "call.voice.missed",
         "call.ended", "call.voice.ended",
     ) or raw_status in ("reject", "declined", "rejected", "timeout", "missed", "terminate", "ended"):
-        mark_call_handled(call_id)
-        clear_active_call(session_name, call_id)
-        logger.info("Cleared and tombstoned WhatsApp call: %s (%s) for session %s", call_id, event_type, session_name)
+        mark_call_ended(session_name, call_id, reason=raw_status or event_type)
+        logger.info("Cleared and ended WhatsApp call: %s (%s) for session %s", call_id, event_type, session_name)
 
 
 def _handle_incoming_message(

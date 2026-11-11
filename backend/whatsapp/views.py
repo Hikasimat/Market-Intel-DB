@@ -3039,6 +3039,16 @@ class WhatsAppCallStartView(APIView):
             result = client.start_call(session_name, clean_phone)
             call_id = result.get("callId") or result.get("call_id") or ""
             session_used = result.get("session_name") or session_name
+            clean_call_id = str(call_id).replace("call_", "").strip()
+            from .webhooks import set_session_call_state
+            set_session_call_state(session_used, {
+                "call_id": clean_call_id,
+                "status": "active",
+                "direction": "outbound",
+                "phone": clean_phone,
+                "session_name": session_used,
+                "started_at": timezone.now().isoformat(),
+            })
             audio_ws_url = _build_audio_ws_url(request, session_used, call_id)
             return Response({
                 "status": "calling",
@@ -3168,9 +3178,9 @@ class WhatsAppCallRejectView(APIView):
             session_name = default_session
 
         from .client import get_waha_client
-        from .webhooks import clear_active_call, mark_call_handled
+        from .webhooks import mark_call_ended, mark_call_handled
         mark_call_handled(call_id)
-        clear_active_call(session_name, call_id)
+        mark_call_ended(session_name, call_id, reason="declined")
         _resolve_call_message_record(
             call_id,
             "Declined voice call",
@@ -3214,9 +3224,9 @@ class WhatsAppCallEndView(APIView):
         else:
             target_session = default_session
 
-        from .webhooks import clear_active_call, mark_call_handled
+        from .webhooks import mark_call_ended, mark_call_handled
         mark_call_handled(call_id)
-        clear_active_call(target_session, call_id)
+        mark_call_ended(target_session, call_id, reason="ended")
         _resolve_call_message_record(
             call_id,
             "Voice call",
