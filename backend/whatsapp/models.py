@@ -807,3 +807,142 @@ class WhatsAppEvent(models.Model):
 
     def __str__(self):
         return f"Event: {self.event_type} [{self.processing_status}] at {self.received_at}"
+
+
+# ---------------------------------------------------------------------------
+# WhatsAppCallRecording
+# ---------------------------------------------------------------------------
+
+class WhatsAppCallRecording(models.Model):
+    """
+    Secure call recording for incoming and outgoing WhatsApp VoIP calls.
+
+    Captures both audio streams (local microphone + remote caller voice)
+    with mandatory participant consent confirmation and user-isolated storage.
+    """
+
+    class Direction(models.TextChoices):
+        INBOUND = "INBOUND", "Inbound"
+        OUTBOUND = "OUTBOUND", "Outbound"
+
+    class Status(models.TextChoices):
+        COMPLETED = "COMPLETED", "Completed"
+        PROCESSING = "PROCESSING", "Processing"
+        FAILED = "FAILED", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Ownership: strictly bound to the authenticated user who operated the call
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="whatsapp_call_recordings",
+        help_text="The Market Intel user who owns this call recording.",
+    )
+
+    # Associated WhatsApp session
+    session = models.ForeignKey(
+        WhatsAppSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="call_recordings",
+        help_text="The WhatsApp session under which this call took place.",
+    )
+
+    # Unique call ID from VoIP engine
+    call_id = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="WhatsApp / WaCalls VoIP Call ID.",
+    )
+
+    # Participant details
+    participant_phone = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Phone number of the counterparty.",
+    )
+    participant_name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Display or contact name of the counterparty.",
+    )
+
+    direction = models.CharField(
+        max_length=10,
+        choices=Direction.choices,
+        default=Direction.OUTBOUND,
+    )
+
+    # Storage: Dual-channel synchronized recording file (local mic + remote speaker)
+    recording_file = models.FileField(
+        upload_to="whatsapp_recordings/%Y/%m/",
+        help_text="Dual-channel audio recording file (both participants).",
+    )
+
+    duration_seconds = models.IntegerField(
+        default=0,
+        help_text="Total call recording duration in seconds.",
+    )
+
+    file_format = models.CharField(
+        max_length=30,
+        default="audio/webm",
+        help_text="MIME type / format of the audio file.",
+    )
+
+    file_size_bytes = models.BigIntegerField(
+        default=0,
+        help_text="File size in bytes.",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.COMPLETED,
+    )
+
+    # Consent workflow audit fields (mandatory for legal compliance)
+    consent_confirmed = models.BooleanField(
+        default=False,
+        help_text="Explicit confirmation that participant consent was obtained before recording.",
+    )
+    consent_confirmed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="confirmed_whatsapp_call_recordings",
+        help_text="User who confirmed that all required participants gave consent.",
+    )
+    consent_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when participant consent was confirmed.",
+    )
+    consent_notes = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Optional consent or compliance audit notes.",
+    )
+
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "WhatsApp Call Recording"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["call_id"]),
+            models.Index(fields=["session"]),
+        ]
+
+    def __str__(self):
+        return f"Recording [{self.direction}] {self.participant_phone or self.participant_name} ({self.duration_seconds}s)"
+

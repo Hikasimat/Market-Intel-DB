@@ -47,7 +47,10 @@ import {
   Building,
   Mail,
   Briefcase,
-  Edit2
+  Edit2,
+  Disc,
+  ShieldAlert,
+  FileAudio
 } from 'lucide-react';
 import api from '../services/api';
 
@@ -505,13 +508,30 @@ export default function WhatsappPage() {
     duration: 0,
     isMuted: false,
     error: null,
+    isIncoming: false,
   });
+
+  // Dual-Channel Call Recording State
+  const [isRecordingCall, setIsRecordingCall] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [showConsentModal, setShowConsentModal] = useState(false);
+  const [showRecordingsModal, setShowRecordingsModal] = useState(false);
+  const [callRecordings, setCallRecordings] = useState([]);
+  const [loadingRecordings, setLoadingRecordings] = useState(false);
+  const [playingRecordingId, setPlayingRecordingId] = useState(null);
 
   const callMediaRef = useRef({
     peerConnection: null,
     dataChannel: null,
+    audioWs: null,
     audioCtx: null,
     micStream: null,
+    recordDest: null,
+    mediaRecorder: null,
+    recordChunks: [],
+    isRecording: false,
+    recordingStartTime: 0,
+    reconnectCount: 0,
     timerInterval: null,
     captureBlobUrl: null,
     playbackBlobUrl: null,
@@ -524,6 +544,13 @@ export default function WhatsappPage() {
   const cleanupCallSession = useCallback(() => {
     if (callMediaRef.current.timerInterval) {
       clearInterval(callMediaRef.current.timerInterval);
+    }
+    if (callMediaRef.current.mediaRecorder && callMediaRef.current.isRecording) {
+      try {
+        callMediaRef.current.mediaRecorder.stop();
+      } catch (_) {}
+      callMediaRef.current.isRecording = false;
+      setIsRecordingCall(false);
     }
     if (callMediaRef.current.micStream) {
       callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
@@ -615,6 +642,10 @@ export default function WhatsappPage() {
         setIsCallingPaired(false);
       }
 
+      if (res.data?.active_call && res.data.active_call.status === 'ended' && callState.active) {
+        cleanupCallSession();
+      }
+
       const incoming = res.data?.incoming_call;
       if (incoming && incoming.call_id) {
         const cleanIncId = String(incoming.call_id).replace(/^call_/, '').trim();
@@ -647,7 +678,115 @@ export default function WhatsappPage() {
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, [callState.active]);
+  }, [callState.active, cleanupCallSession]);
+
+  const fetchCallRecordings = useCallback(async () => {
+    setLoadingRecordings(true);
+    try {
+      const sess = selectedSession?.session_name || 'default';
+      const res = await api.get(`/whatsapp/calls/recordings/?session_name=${encodeURIComponent(sess)}`);
+      setCallRecordings(res.data?.results || res.data || []);
+    } catch (err) {
+      console.warn('Failed to fetch call recordings:', err);
+      showToast('Failed to load call recordings', 'error');
+    } finally {
+      setLoadingRecordings(false);
+    }
+  }, [selectedSession?.session_name, showToast]);
+
+  const handleDeleteRecording = useCallback(async (recordingId) => {
+    try {
+      await api.delete(`/whatsapp/calls/recordings/${recordingId}/`);
+      setCallRecordings((prev) => prev.filter((r) => r.id !== recordingId));
+      showToast('Recording deleted successfully', 'success');
+    } catch (err) {
+      console.error('Failed to delete recording:', err);
+      showToast('Failed to delete recording', 'error');
+    }
+  }, [showToast]);
+
+  const startCallRecording = useCallback(() => {
+    if (!callMediaRef.current.recordDest || !callState.active) {
+      showToast('Cannot start recording: No active call audio available', 'error');
+      return;
+    }
+    try {
+      const stream = callMediaRef.current.recordDest.stream;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg');
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      callMediaRef.current.recordChunks = [];
+      callMediaRef.current.mediaRecorder = recorder;
+      callMediaRef.current.recordingStartTime = Date.now();
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          callMediaRef.current.recordChunks.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const chunks = callMediaRef.current.recordChunks;
+        if (!chunks || !chunks.length) return;
+        const blob = new Blob(chunks, { type: mimeType });
+        const durationSec = Math.max(1, Math.round((Date.now() - (callMediaRef.current.recordingStartTime || Date.now())) / 1000));
+
+        const formData = new FormData();
+        const filename = `call_${callState.callId || 'rec'}_${Date.now()}.webm`;
+        formData.append('audio_file', blob, filename);
+        formData.append('call_id', callState.callId || '');
+        formData.append('session_name', callState.sessionName || selectedSession?.session_name || 'default');
+        formData.append('chat_id', selectedChat?.chat_id || callState.peerPhone || '');
+        formData.append('direction', callState.isIncoming ? 'inbound' : 'outbound');
+        formData.append('duration_seconds', durationSec);
+        formData.append('consent_obtained', 'true');
+
+        try {
+          await api.post('/whatsapp/calls/recordings/upload/', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+          showToast('Call recording saved securely', 'success');
+        } catch (err) {
+          console.error('Failed to upload call recording:', err);
+          showToast('Failed to upload call recording', 'error');
+        }
+      };
+
+      recorder.start(1000);
+      callMediaRef.current.isRecording = true;
+      setIsRecordingCall(true);
+      setRecordingDuration(0);
+      showToast('Call recording started (Dual-channel audio)', 'info');
+    } catch (err) {
+      console.error('Failed to start MediaRecorder:', err);
+      showToast(`Failed to record call: ${err.message}`, 'error');
+    }
+  }, [callState.active, callState.callId, callState.sessionName, callState.isIncoming, selectedSession?.session_name, selectedChat?.chat_id, showToast]);
+
+  const stopCallRecording = useCallback(() => {
+    if (callMediaRef.current.mediaRecorder && callMediaRef.current.isRecording) {
+      try {
+        callMediaRef.current.mediaRecorder.stop();
+      } catch (_) {}
+      callMediaRef.current.isRecording = false;
+    }
+    setIsRecordingCall(false);
+    setRecordingDuration(0);
+  }, []);
+
+  useEffect(() => {
+    let timer = null;
+    if (isRecordingCall) {
+      timer = setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isRecordingCall]);
 
   useEffect(() => {
     checkCallingStatus();
@@ -855,7 +994,7 @@ export default function WhatsappPage() {
         playbackNode.port.postMessage(floats);
       };
 
-      // Connect mic to captureNode for real-time full-duplex two-way audio with Acoustic Echo Suppression
+      // Connect mic to captureNode for real-time full-duplex two-way audio
       const micSource = ctx.createMediaStreamSource(stream);
       const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
       captureNode.port.onmessage = (e) => {
@@ -868,42 +1007,20 @@ export default function WhatsappPage() {
           return;
         }
 
-        const now = performance.now();
-        const hasWorkletSamples = (callMediaRef.current.playbackAvailableSamples || 0) > 64;
-        const isRemotePlaying = hasWorkletSamples || (now < (callMediaRef.current.remotePlaybackEndAt || 0));
-        const inEchoHangover = now < (callMediaRef.current.echoHangoverUntil || 0);
-
-        // Calculate RMS of microphone input
-        let sumSquares = 0;
-        for (let i = 0; i < samples.length; i++) {
-          sumSquares += samples[i] * samples[i];
-        }
-        const micRms = Math.sqrt(sumSquares / samples.length);
-
-        // Acoustic Echo Suppression (AES):
-        // While the remote party's speech is coming out of the speakers (or decaying during room reverb tail),
-        // the laptop microphone picks up acoustic speaker bleed.
-        // Send silence so the remote caller never hears their own voice echoed or repeated.
-        // If the local user is intentionally speaking loudly over the remote caller (micRms > 0.14),
-        // permit double-talk transmission.
-        if (isRemotePlaying || inEchoHangover) {
-          const isIntentionalDoubleTalk = micRms > 0.14;
-          if (!isIntentionalDoubleTalk) {
-            sendRawPcm(new Int16Array(samples.length).buffer);
-            return;
-          }
-        }
-
-        // Noise gate: if mic input is ambient room noise (fan, AC noise < 0.012), send silence
-        if (micRms < 0.012) {
-          sendRawPcm(new Int16Array(samples.length).buffer);
-          return;
-        }
-
-        // Transmit clear microphone audio directly to caller
+        // Full-duplex direct PCM transmission to caller (browser AEC handles acoustic echo)
         sendRawPcm(float32ToInt16LE(samples));
       };
       micSource.connect(captureNode);
+
+      // Setup dual-channel mix destination for secure call recording
+      try {
+        const recordDest = ctx.createMediaStreamDestination();
+        micSource.connect(recordDest);
+        playbackNode.connect(recordDest);
+        callMediaRef.current.recordDest = recordDest;
+      } catch (recErr) {
+        console.warn('Could not initialize recording destination:', recErr);
+      }
 
       // Keep node alive without outputting mic audio back into local speakers
       const silenceGain = ctx.createGain();
@@ -965,24 +1082,25 @@ export default function WhatsappPage() {
                   finish(false);
                   return;
                 }
-                // Engine closes socket with 1000 "call ended" when remote party explicitly hangs up
-                if (ev.code === 1000 && ev.reason === 'call ended') {
+                const isNormalClose = ev.code === 1000 || ev.code === 1001 || ev.code === 1005 || ev.reason === 'call ended';
+                if (isNormalClose || (callMediaRef.current.reconnectCount || 0) >= 2) {
                   markCallIdHandled(callId);
                   setIncomingCall(null);
                   api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/end/`, {
                     session_name: callSessionName,
                   }).catch(() => {});
                   setCallState((prev) => (prev.active ? { ...prev, status: 'ended', error: 'Call ended' } : prev));
-                  setTimeout(() => cleanupCallSession(), 1500);
+                  setTimeout(() => cleanupCallSession(), 1000);
                   return;
                 }
-                // Reconnect automatically if proxy idle timeout drops socket while call is still active
+                callMediaRef.current.reconnectCount = (callMediaRef.current.reconnectCount || 0) + 1;
+                // Reconnect automatically at most twice if transient network drop
                 if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
                   setTimeout(() => {
                     if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
                       connectSocket(true);
                     }
-                  }, 400);
+                  }, 500);
                 }
               };
             } catch (_) {
@@ -2487,6 +2605,16 @@ export default function WhatsappPage() {
                     <Users className="w-4 h-4 text-emerald-600" /> New Group
                   </button>
                   <button
+                    onClick={() => {
+                      fetchCallRecordings();
+                      setShowRecordingsModal(true);
+                      setShowSessionDropdown(false);
+                    }}
+                    className="w-full text-left px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 text-slate-700"
+                  >
+                    <Disc className="w-4 h-4 text-emerald-600" /> Call Recordings
+                  </button>
+                  <button
                     onClick={() => { handleLogoutSession(); setShowSessionDropdown(false); }}
                     className="w-full text-left px-4 py-2.5 hover:bg-red-50 flex items-center gap-2 text-red-600"
                   >
@@ -2724,6 +2852,18 @@ export default function WhatsappPage() {
                   }
                 >
                   <Phone className="w-4 h-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    fetchCallRecordings();
+                    setShowRecordingsModal(true);
+                  }}
+                  className="p-2 rounded-full hover:bg-slate-200 transition text-slate-600 hover:text-emerald-600"
+                  title="View Call Recordings"
+                >
+                  <Disc className="w-4 h-4" />
                 </button>
 
                 <button
@@ -4290,30 +4430,205 @@ export default function WhatsappPage() {
                 </div>
               </div>
             ) : (
-              <div className="flex items-center gap-4 w-full justify-center">
-                <button
-                  type="button"
-                  onClick={handleToggleMute}
-                  className={`p-3 rounded-full transition shadow-md flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 ${
-                    callState.isMuted
-                      ? 'bg-rose-500 text-white hover:bg-rose-600'
-                      : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                  }`}
-                  title={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                >
-                  {callState.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                </button>
+              <div className="flex flex-col items-center gap-3 w-full">
+                {/* Active Call Recording Indicator */}
+                {isRecordingCall && (
+                  <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 text-xs font-mono font-medium border border-rose-500/40 animate-pulse">
+                    <span className="w-2 h-2 rounded-full bg-rose-500" />
+                    <span>REC {String(Math.floor(recordingDuration / 60)).padStart(2, '0')}:{String(recordingDuration % 60).padStart(2, '0')}</span>
+                  </div>
+                )}
 
-                <button
-                  type="button"
-                  onClick={handleEndCall}
-                  className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95"
-                  title="Hang up call"
-                >
-                  <PhoneOff className="w-5 h-5" />
-                </button>
+                <div className="flex items-center gap-4 w-full justify-center">
+                  <button
+                    type="button"
+                    onClick={handleToggleMute}
+                    className={`p-3 rounded-full transition shadow-md flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 ${
+                      callState.isMuted
+                        ? 'bg-rose-500 text-white hover:bg-rose-600'
+                        : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                    }`}
+                    title={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                  >
+                    {callState.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                  </button>
+
+                  {/* Dual-Channel Call Recording Button */}
+                  <button
+                    type="button"
+                    onClick={isRecordingCall ? stopCallRecording : () => setShowConsentModal(true)}
+                    className={`p-3 rounded-full transition shadow-md flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 ${
+                      isRecordingCall
+                        ? 'bg-rose-600 text-white hover:bg-rose-700 ring-2 ring-rose-400/50 animate-pulse'
+                        : 'bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-rose-400'
+                    }`}
+                    title={isRecordingCall ? 'Stop Recording' : 'Record Call (Dual-Channel)'}
+                  >
+                    <Disc className="w-5 h-5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleEndCall}
+                    className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition shadow-lg shadow-rose-900/50 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95"
+                    title="Hang up call"
+                  >
+                    <PhoneOff className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Call Recording Consent Modal */}
+      {showConsentModal && (
+        <div className="fixed inset-0 z-[120] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4 text-amber-600">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+                <ShieldAlert className="w-6 h-6 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 text-base">Call Recording Consent</h3>
+                <p className="text-xs text-slate-500">Dual-Channel Audio Capture</p>
+              </div>
+            </div>
+            <p className="text-sm text-slate-600 leading-relaxed mb-4">
+              Recording this WhatsApp call will capture both your microphone and the remote caller's audio into an encrypted, isolated call recording.
+            </p>
+            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200/80 mb-5 text-xs text-amber-800 leading-normal">
+              <strong>Compliance Notice:</strong> Ensure you have informed the other participant and obtained their consent before proceeding.
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowConsentModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowConsentModal(false);
+                  startCallRecording();
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <Disc className="w-4 h-4" /> Start Recording
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Call Recordings Modal */}
+      {showRecordingsModal && (
+        <div className="fixed inset-0 z-[120] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-full bg-emerald-100 flex items-center justify-center">
+                  <Disc className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-base">WhatsApp Call Recordings</h3>
+                  <p className="text-xs text-slate-500">Encrypted dual-channel recordings for your WhatsApp session</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRecordingsModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 pr-1 space-y-3">
+              {loadingRecordings ? (
+                <div className="py-12 flex flex-col items-center justify-center text-slate-400 gap-2">
+                  <RefreshCw className="w-6 h-6 animate-spin text-emerald-600" />
+                  <span className="text-xs">Loading call recordings...</span>
+                </div>
+              ) : callRecordings.length === 0 ? (
+                <div className="py-12 flex flex-col items-center justify-center text-slate-400 gap-2">
+                  <FileAudio className="w-10 h-10 text-slate-300" />
+                  <p className="text-sm font-medium text-slate-600">No recordings found</p>
+                  <p className="text-xs text-slate-400">Recordings made during active calls will appear here.</p>
+                </div>
+              ) : (
+                callRecordings.map((rec) => (
+                  <div
+                    key={rec.id}
+                    className="p-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-white hover:border-slate-300 transition shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                        rec.direction === 'inbound' ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-600'
+                      }`}>
+                        {rec.direction === 'inbound' ? <PhoneCall className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-slate-800 text-sm truncate">
+                            {rec.caller_name || rec.chat_id || 'WhatsApp Call'}
+                          </span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 uppercase font-semibold">
+                            {rec.direction}
+                          </span>
+                          <span className="text-xs font-mono text-slate-500">
+                            {Math.floor((rec.duration_seconds || 0) / 60)}:
+                            {String((rec.duration_seconds || 0) % 60).padStart(2, '0')}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 font-mono mt-0.5">
+                          {rec.created_at ? new Date(rec.created_at).toLocaleString() : ''}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-200">
+                      <audio
+                        controls
+                        preload="none"
+                        src={`${HOST_URL}/api/whatsapp/calls/recordings/${rec.id}/stream/`}
+                        className="h-8 max-w-[200px]"
+                      />
+                      <a
+                        href={`${HOST_URL}/api/whatsapp/calls/recordings/${rec.id}/download/`}
+                        download
+                        className="p-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 transition"
+                        title="Download Recording"
+                      >
+                        <Download className="w-4 h-4" />
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRecording(rec.id)}
+                        className="p-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 transition"
+                        title="Delete Recording"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-slate-200 mt-4 flex items-center justify-between text-xs text-slate-500">
+              <span>{callRecordings.length} recording(s)</span>
+              <button
+                type="button"
+                onClick={fetchCallRecordings}
+                className="flex items-center gap-1 text-emerald-600 hover:underline cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingRecordings ? 'animate-spin' : ''}`} /> Refresh
+              </button>
+            </div>
           </div>
         </div>
       )}

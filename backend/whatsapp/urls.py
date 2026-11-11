@@ -22,6 +22,11 @@ from .views import (
     WhatsAppCallStartView,
     WhatsAppCallStatusView,
     WhatsAppCallWebRTCView,
+    WhatsAppCallRecordingUploadView,
+    WhatsAppCallRecordingListView,
+    WhatsAppCallRecordingStreamView,
+    WhatsAppCallRecordingDownloadView,
+    WhatsAppCallRecordingDeleteView,
     WhatsAppConfigView,
     WhatsAppContactInfoView,
     WhatsAppCRMContactsView,
@@ -160,4 +165,12 @@ urlpatterns = [
     path("calls/<str:call_id>/reject/", WhatsAppCallRejectView.as_view(), name="whatsapp-call-reject"),
     path("calls/<str:call_id>/end/", WhatsAppCallEndView.as_view(), name="whatsapp-call-end"),
     path("calls/<str:call_id>/webrtc/", WhatsAppCallWebRTCView.as_view(), name="whatsapp-call-webrtc"),
+
+    # -- Call Recordings ----------------------------------------------------
+    path("calls/recordings/upload/", WhatsAppCallRecordingUploadView.as_view(), name="whatsapp-call-recording-upload"),
+    path("calls/recordings/", WhatsAppCallRecordingListView.as_view(), name="whatsapp-call-recordings-list"),
+    path("calls/recordings/<uuid:recording_id>/stream/", WhatsAppCallRecordingStreamView.as_view(), name="whatsapp-call-recording-stream"),
+    path("calls/recordings/<uuid:recording_id>/download/", WhatsAppCallRecordingDownloadView.as_view(), name="whatsapp-call-recording-download"),
+    path("calls/recordings/<uuid:recording_id>/", WhatsAppCallRecordingDeleteView.as_view(), name="whatsapp-call-recording-delete"),
+    path("calls/recordings/<uuid:recording_id>/delete/", WhatsAppCallRecordingDeleteView.as_view(), name="whatsapp-call-recording-delete-alias"),
 ]

@@ -56,6 +56,8 @@ from rest_framework.views import APIView
 
 from prospects.models import ProspectContact
 
+from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
 from .client import WAHAServiceError
 from .models import (
     WhatsAppAuditLog,
@@ -64,6 +66,7 @@ from .models import (
     WhatsAppOptOut,
     WhatsAppSafetyEvent,
     WhatsAppSession,
+    WhatsAppCallRecording,
 )
 from .permissions import (
     CanManageWhatsAppConfig,
@@ -93,6 +96,7 @@ from .serializers import (
     WhatsAppSafetyEventSerializer,
     WhatsAppSessionSerializer,
     WhatsAppSessionListSerializer,
+    WhatsAppCallRecordingSerializer,
 )
 from .services import (
     WhatsAppAuthorizationError,
@@ -168,6 +172,7 @@ def _get_user_session(user, create=True) -> WhatsAppSession:
     """
     Resolve the isolated active WhatsApp session for this specific user.
     Each user has their own distinct WAHA session (e.g. 'user_1', 'user_2').
+    Session ownership is strictly immutable: no session can ever be reassigned.
     """
     if not user or not user.is_authenticated:
         return None
@@ -180,8 +185,21 @@ def _get_user_session(user, create=True) -> WhatsAppSession:
     if not create:
         return None
 
-    # 2. Automatically create an isolated per-user session
-    session_name = f"user_{user.id}"
+    # 2. Check for an inactive session owned by them to reactivate
+    existing_inactive = WhatsAppSession.objects.filter(owner=user).first()
+    if existing_inactive:
+        existing_inactive.is_active = True
+        existing_inactive.save(update_fields=["is_active"])
+        return existing_inactive
+
+    # 3. Create a collision-resistant per-user session
+    base_session_name = f"user_{user.id}"
+    conflict = WhatsAppSession.objects.filter(session_name=base_session_name).first()
+    if conflict and conflict.owner != user:
+        session_name = f"user_{user.id}_{uuid.uuid4().hex[:8]}"
+    else:
+        session_name = base_session_name
+
     session, _ = WhatsAppSession.objects.get_or_create(
         session_name=session_name,
         defaults={
@@ -190,9 +208,18 @@ def _get_user_session(user, create=True) -> WhatsAppSession:
             "is_active": True,
         }
     )
-    if session.owner != user:
+    # Strictly preserve ownership: never overwrite another user's session
+    if session.owner is None:
         session.owner = user
         session.save(update_fields=["owner"])
+    elif session.owner != user:
+        unique_name = f"user_{user.id}_{uuid.uuid4().hex[:8]}"
+        session = WhatsAppSession.objects.create(
+            session_name=unique_name,
+            owner=user,
+            status=WhatsAppSession.Status.DISCONNECTED,
+            is_active=True,
+        )
     return session
 
 
@@ -200,16 +227,16 @@ def _get_owned_session(request, session_id=None, session_name=None):
     """
     Retrieve an active WhatsAppSession for the requesting user.
     Strictly enforces session ownership: users only access their own session.
+    Returns None if a requested session is not owned by the user.
     """
+    if not request.user or not request.user.is_authenticated:
+        return None
+
     qs = WhatsAppSession.objects.filter(is_active=True, owner=request.user)
     if session_id:
-        sess = qs.filter(pk=session_id).first()
-        if sess:
-            return sess
+        return qs.filter(pk=session_id).first()
     if session_name:
-        sess = qs.filter(session_name=session_name).first()
-        if sess:
-            return sess
+        return qs.filter(session_name=session_name).first()
 
     return _get_user_session(request.user, create=True)
 
@@ -228,12 +255,7 @@ def _get_owned_conversation(request, conversation_id):
             {"detail": "Conversation not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
-    user_sess = _get_user_session(request.user, create=True)
-    is_owner = (
-        (conv.session and conv.session.owner == request.user)
-        or (conv.session and user_sess and conv.session_id == user_sess.id)
-    )
-    if not is_owner:
+    if not conv.session or conv.session.owner != request.user:
         return None, Response(
             {"detail": "Conversation not found or not owned by you."},
             status=status.HTTP_404_NOT_FOUND,
@@ -1101,18 +1123,9 @@ class WhatsAppConversationsView(APIView):
                 except Exception as e:
                     logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
-        # Adopt any orphaned group conversations into the active user session
-        if user_session:
-            WhatsAppConversation.objects.filter(
-                chat_id__endswith="@g.us",
-                is_deleted=False
-            ).filter(
-                Q(session__isnull=True) | Q(session__session_name="default")
-            ).update(session=user_session, account_phone=user_session.phone_number or None)
-
         # Strictly scoped to current user's session and account phone number
         clean_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
-        qs = qs.filter(session=user_session)
+        qs = qs.filter(session=user_session, session__owner=user)
         if clean_user_phone:
             qs = qs.exclude(
                 ~Q(account_phone=clean_user_phone) &
@@ -2813,17 +2826,42 @@ def _resolve_target_webhook_url(request) -> str:
         return ""
 
 
+def _generate_audio_ws_token(user_id: int, session_name: str, call_id: str) -> str:
+    """
+    Generate a short-lived HMAC-SHA256 signed authorization token for WebSocket audio.
+    Scoped to the authenticated user, session name, and VoIP call ID.
+    Valid for 300 seconds (5 minutes).
+    Never exposes internal WAHA API keys to frontend clients.
+    """
+    import base64
+    import hashlib
+    import hmac
+    import time
+
+    expires_at = int(time.time()) + 300
+    secret = (
+        os.environ.get("WHATSAPP_WEBHOOK_SECRET")
+        or os.environ.get("WHATSAPP_SERVICE_API_KEY")
+        or "waha_super_secret_hmac_key_2026"
+    ).strip()
+
+    clean_call = str(call_id or "").replace("call_", "").strip()
+    raw_data = f"{user_id}:{session_name}:{clean_call}:{expires_at}"
+    sig = hmac.new(secret.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
+    raw_token = f"{user_id}:{session_name}:{clean_call}:{expires_at}:{sig}"
+    return base64.urlsafe_b64encode(raw_token.encode("utf-8")).decode("utf-8")
+
+
 def _build_audio_ws_url(request, session_name: str, call_id: str) -> str:
     """
     Construct the authenticated WebSocket URL for WAHA-NoWeb-Light's AudioSocketGateway
-    (/api/calling/sessions/<session>/calls/<callId>/socket?x-api-key=<key>) so browser
-    voice audio bypasses AWS EC2 / Docker UDP NAT restrictions in production.
+    (/api/calling/sessions/<session>/calls/<callId>/socket?token=<signed_token>).
+    Protected with short-lived, signed authorization tokens scoped to user and call ID.
     """
     if not call_id or call_id == "undefined":
         return ""
     from urllib.parse import quote
     waha_url = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:3000").strip().rstrip("/")
-    api_key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "").strip()
     host = ""
     origin = ""
     try:
@@ -2849,22 +2887,11 @@ def _build_audio_ws_url(request, session_name: str, call_id: str) -> str:
         ws_base = waha_url
 
     resolved_sess = str(session_name or "default").strip() or "default"
-    if resolved_sess == "default":
-        try:
-            from .client import _CALLING_STATUS_CACHE
-            for cached_key, cached_val in list(_CALLING_STATUS_CACHE.items()):
-                if isinstance(cached_val, dict) and cached_val.get("paired"):
-                    cand = cached_val.get("resolved_session") or cached_key
-                    if cand and cand != "default":
-                        resolved_sess = str(cand)
-                        break
-        except Exception:
-            pass
-
     clean_sess = quote(resolved_sess, safe="")
     clean_call = quote(str(call_id).replace("call_", ""), safe="")
-    query = f"?x-api-key={quote(api_key, safe='')}" if api_key else ""
-    return f"{ws_base}/api/calling/sessions/{clean_sess}/calls/{clean_call}/socket{query}"
+    uid = request.user.id if (request and getattr(request, "user", None) and request.user.is_authenticated) else 0
+    token = _generate_audio_ws_token(uid, resolved_sess, clean_call)
+    return f"{ws_base}/api/calling/sessions/{clean_sess}/calls/{clean_call}/socket?token={quote(token, safe='')}"
 
 
 class WhatsAppCallStatusView(APIView):
@@ -2880,7 +2907,7 @@ class WhatsAppCallStatusView(APIView):
         session_name = session_obj.session_name
 
         from .client import _CALLING_STATUS_CACHE, get_waha_client
-        from .webhooks import get_active_incoming_call, sync_recent_waha_messages
+        from .webhooks import get_active_incoming_call, get_active_call_state, sync_recent_waha_messages
         import time
 
         now = time.time()
@@ -2963,19 +2990,22 @@ class WhatsAppCallStatusView(APIView):
             or call_status.get("state") in ("open", "connected")
         )
 
+        active_call = get_active_call_state(session_name)
+
         return Response({
             "session_name": resolved_session,
             "connected": is_connected,
             "paired": is_connected,
             "calling": call_status,
             "incoming_call": incoming_call,
+            "active_call": active_call,
         })
 
 
 class WhatsAppCallStartView(APIView):
     """
     Initiate outgoing voice call to a WhatsApp contact.
-    Dynamically routes to paired WhatsApp calling session.
+    Dynamically routes to paired WhatsApp calling session owned by request.user.
     """
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
 
@@ -2983,7 +3013,13 @@ class WhatsAppCallStartView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or "").strip()
-        session_name = default_session if (not req_session or req_session == "default") else req_session
+        if req_session and req_session != "default" and req_session != default_session:
+            owned = WhatsAppSession.objects.filter(session_name=req_session, owner=request.user, is_active=True).first()
+            if not owned and not request.user.is_superuser:
+                return Response({"error": "Unauthorized session"}, status=status.HTTP_403_FORBIDDEN)
+            session_name = owned.session_name if owned else default_session
+        else:
+            session_name = default_session
 
         phone = request.data.get("phone") or ""
         chat_id = request.data.get("chat_id") or ""
@@ -3064,14 +3100,19 @@ class WhatsAppCallAcceptView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
-        session_name = default_session if (not req_session or req_session == "default") else req_session
+        if req_session and req_session != "default" and req_session != default_session:
+            owned = WhatsAppSession.objects.filter(session_name=req_session, owner=request.user, is_active=True).first()
+            if not owned and not request.user.is_superuser:
+                return Response({"error": "Unauthorized session"}, status=status.HTTP_403_FORBIDDEN)
+            session_name = owned.session_name if owned else default_session
+        else:
+            session_name = default_session
 
         from .client import get_waha_client
         from .webhooks import clear_active_call, mark_active_call_connected, mark_call_handled
         mark_call_handled(call_id)
         mark_active_call_connected(session_name, call_id)
         clear_active_call(session_name, call_id)
-        clear_active_call("default", call_id)
         _resolve_call_message_record(
             call_id,
             "Answered voice call",
@@ -3118,13 +3159,18 @@ class WhatsAppCallRejectView(APIView):
         session_obj = _get_user_session(request.user, create=True)
         default_session = session_obj.session_name
         req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
-        session_name = default_session if (not req_session or req_session == "default") else req_session
+        if req_session and req_session != "default" and req_session != default_session:
+            owned = WhatsAppSession.objects.filter(session_name=req_session, owner=request.user, is_active=True).first()
+            if not owned and not request.user.is_superuser:
+                return Response({"error": "Unauthorized session"}, status=status.HTTP_403_FORBIDDEN)
+            session_name = owned.session_name if owned else default_session
+        else:
+            session_name = default_session
 
         from .client import get_waha_client
         from .webhooks import clear_active_call, mark_call_handled
         mark_call_handled(call_id)
         clear_active_call(session_name, call_id)
-        clear_active_call("default", call_id)
         _resolve_call_message_record(
             call_id,
             "Declined voice call",
@@ -3158,15 +3204,19 @@ class WhatsAppCallEndView(APIView):
         if not call_id or call_id == "undefined":
             return Response({"status": "ended"}, status=status.HTTP_200_OK)
         session_obj = _get_user_session(request.user, create=True)
-        session_name = session_obj.session_name
-        client_session = request.data.get("session_name") or request.query_params.get("session_name")
-        target_session = client_session or session_name
+        default_session = session_obj.session_name
+        req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
+        if req_session and req_session != "default" and req_session != default_session:
+            owned = WhatsAppSession.objects.filter(session_name=req_session, owner=request.user, is_active=True).first()
+            if not owned and not request.user.is_superuser:
+                return Response({"error": "Unauthorized session"}, status=status.HTTP_403_FORBIDDEN)
+            target_session = owned.session_name if owned else default_session
+        else:
+            target_session = default_session
 
         from .webhooks import clear_active_call, mark_call_handled
         mark_call_handled(call_id)
         clear_active_call(target_session, call_id)
-        clear_active_call(session_name, call_id)
-        clear_active_call("default", call_id)
         _resolve_call_message_record(
             call_id,
             "Voice call",
@@ -3196,9 +3246,15 @@ class WhatsAppCallWebRTCView(APIView):
 
     def post(self, request, call_id):
         session_obj = _get_user_session(request.user, create=True)
-        session_name = session_obj.session_name
-        client_session = request.data.get("session_name") or request.query_params.get("session_name")
-        target_session = client_session or session_name
+        default_session = session_obj.session_name
+        req_session = (request.data.get("session_name") or request.query_params.get("session_name") or "").strip()
+        if req_session and req_session != "default" and req_session != default_session:
+            owned = WhatsAppSession.objects.filter(session_name=req_session, owner=request.user, is_active=True).first()
+            if not owned and not request.user.is_superuser:
+                return Response({"error": "Unauthorized session"}, status=status.HTTP_403_FORBIDDEN)
+            target_session = owned.session_name if owned else default_session
+        else:
+            target_session = default_session
 
         sdp_offer = request.data.get("sdp_offer") or request.data.get("sdpOffer") or ""
         if not sdp_offer:
@@ -3271,3 +3327,169 @@ class WhatsAppCallPairView(APIView):
             "qr": qr_res.get("raw") or qr_res.get("qr") or qr_res.get("base64"),
             "qrBase64": qr_res.get("base64") or qr_res.get("qrBase64") or qr_res.get("qr"),
         }, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Call Recording Views (Isolated by User, Consent Enforced)
+# ---------------------------------------------------------------------------
+
+class WhatsAppCallRecordingUploadView(APIView):
+    """
+    Upload and save a dual-channel WhatsApp call recording.
+    Requires participant consent confirmation before persisting.
+    Strictly owned by request.user.
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request):
+        file_obj = request.FILES.get("file")
+        if not file_obj:
+            return Response({"error": "Recording file is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Enforce consent confirmation
+        consent_raw = request.data.get("consent_confirmed")
+        consent_confirmed = str(consent_raw).lower() in ("true", "1", "yes")
+        if not consent_confirmed:
+            return Response(
+                {"error": "Call recording requires participant consent confirmation."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        call_id = str(request.data.get("call_id") or "").strip()
+        if not call_id:
+            return Response({"error": "call_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        req_session = (request.data.get("session_name") or "").strip()
+        session_obj = _get_owned_session(request, session_name=req_session) if req_session else _get_user_session(request.user)
+
+        direction_raw = str(request.data.get("direction") or "OUTBOUND").upper()
+        direction = WhatsAppCallRecording.Direction.INBOUND if direction_raw == "INBOUND" else WhatsAppCallRecording.Direction.OUTBOUND
+
+        try:
+            duration_seconds = max(0, int(float(request.data.get("duration_seconds") or 0)))
+        except (ValueError, TypeError):
+            duration_seconds = 0
+
+        participant_phone = str(request.data.get("participant_phone") or "").strip() or None
+        participant_name = str(request.data.get("participant_name") or "").strip() or None
+        consent_notes = str(request.data.get("consent_notes") or "").strip() or None
+
+        recording = WhatsAppCallRecording.objects.create(
+            user=request.user,
+            session=session_obj,
+            call_id=call_id,
+            participant_phone=participant_phone,
+            participant_name=participant_name,
+            direction=direction,
+            recording_file=file_obj,
+            duration_seconds=duration_seconds,
+            file_format=file_obj.content_type or "audio/webm",
+            file_size_bytes=file_obj.size,
+            status=WhatsAppCallRecording.Status.COMPLETED,
+            consent_confirmed=True,
+            consent_confirmed_by=request.user,
+            consent_confirmed_at=timezone.now(),
+            consent_notes=consent_notes,
+            started_at=timezone.now() - timezone.timedelta(seconds=duration_seconds) if duration_seconds else timezone.now(),
+            ended_at=timezone.now(),
+        )
+
+        serializer = WhatsAppCallRecordingSerializer(recording)
+        logger.info("Saved call recording %s for user %s (duration: %ss)", recording.id, request.user.username, duration_seconds)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class WhatsAppCallRecordingListView(APIView):
+    """
+    List WhatsApp call recordings.
+    Strictly isolated: users only see recordings of their own calls.
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def get(self, request):
+        qs = WhatsAppCallRecording.objects.filter(user=request.user).order_by("-created_at")
+
+        participant = request.query_params.get("participant")
+        if participant:
+            qs = qs.filter(
+                Q(participant_phone__icontains=participant) |
+                Q(participant_name__icontains=participant)
+            )
+
+        limit = min(int(request.query_params.get("limit") or 50), 100)
+        recordings = list(qs[:limit])
+        serializer = WhatsAppCallRecordingSerializer(recordings, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class WhatsAppCallRecordingStreamView(APIView):
+    """
+    Stream a call recording audio file.
+    Validates ownership: only the owner or superuser may stream the file.
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def get(self, request, recording_id):
+        rec = get_object_or_404(WhatsAppCallRecording, id=recording_id)
+        if not request.user.is_superuser and rec.user != request.user:
+            return Response({"detail": "Not authorized to access this recording."}, status=status.HTTP_403_FORBIDDEN)
+
+        if not rec.recording_file:
+            return Response({"detail": "Recording file not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            return FileResponse(rec.recording_file.open("rb"), content_type=rec.file_format or "audio/webm")
+        except Exception as e:
+            logger.error("Failed to stream recording %s: %s", recording_id, e)
+            return Response({"detail": "Could not read recording file."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class WhatsAppCallRecordingDownloadView(APIView):
+    """
+    Download a call recording file with Content-Disposition attachment.
+    Validates ownership: only the owner or superuser may download the recording.
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def get(self, request, recording_id):
+        rec = get_object_or_404(WhatsAppCallRecording, id=recording_id)
+        if not request.user.is_superuser and rec.user != request.user:
+            return Response({"detail": "Not authorized to access this recording."}, status=status.HTTP_403_FORBIDDEN)
+
+        if not rec.recording_file:
+            return Response({"detail": "Recording file not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        filename = f"whatsapp_call_{rec.participant_phone or 'recording'}_{str(rec.id)[:8]}.webm"
+        try:
+            return FileResponse(
+                rec.recording_file.open("rb"),
+                as_attachment=True,
+                filename=filename,
+                content_type=rec.file_format or "audio/webm",
+            )
+        except Exception as e:
+            logger.error("Failed to download recording %s: %s", recording_id, e)
+            return Response({"detail": "Could not read recording file."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class WhatsAppCallRecordingDeleteView(APIView):
+    """
+    Delete a call recording and its underlying storage file.
+    Validates ownership: only the owner or superuser may delete.
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def delete(self, request, recording_id):
+        rec = get_object_or_404(WhatsAppCallRecording, id=recording_id)
+        if not request.user.is_superuser and rec.user != request.user:
+            return Response({"detail": "Not authorized to delete this recording."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            if rec.recording_file:
+                rec.recording_file.delete(save=False)
+        except Exception as e:
+            logger.warning("Could not delete physical recording file: %s", e)
+
+        rec.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+

@@ -21,6 +21,7 @@ from .models import (
     WhatsAppOptOut,
     WhatsAppSafetyEvent,
     WhatsAppSession,
+    WhatsAppCallRecording,
 )
 
 
@@ -413,4 +414,44 @@ class SetOutboundEnabledSerializer(serializers.Serializer):
     """Input for enabling/disabling the global outbound kill switch."""
     enabled = serializers.BooleanField()
     reason = serializers.CharField(max_length=500, required=False, default="")
+
+
+class WhatsAppCallRecordingSerializer(serializers.ModelSerializer):
+    """
+    Serializer for WhatsApp VoIP call recordings.
+    Exposes safe metadata and authorized streaming/download endpoints.
+    """
+    stream_url = serializers.SerializerMethodField()
+    download_url = serializers.SerializerMethodField()
+    owner_username = serializers.CharField(source="user.username", read_only=True)
+
+    class Meta:
+        model = WhatsAppCallRecording
+        fields = [
+            "id",
+            "call_id",
+            "participant_phone",
+            "participant_name",
+            "direction",
+            "duration_seconds",
+            "file_format",
+            "file_size_bytes",
+            "status",
+            "consent_confirmed",
+            "consent_confirmed_at",
+            "started_at",
+            "ended_at",
+            "created_at",
+            "stream_url",
+            "download_url",
+            "owner_username",
+        ]
+        read_only_fields = fields
+
+    def get_stream_url(self, obj):
+        return f"/api/whatsapp/calls/recordings/{obj.id}/stream/"
+
+    def get_download_url(self, obj):
+        return f"/api/whatsapp/calls/recordings/{obj.id}/download/"
+
 

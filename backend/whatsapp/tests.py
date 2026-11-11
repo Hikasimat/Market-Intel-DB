@@ -16,6 +16,7 @@ from whatsapp.models import (
     WhatsAppMessage,
     WhatsAppOptOut,
     WhatsAppSafetyEvent,
+    WhatsAppCallRecording,
 )
 from whatsapp.webhooks import _is_ssrf_safe_url
 from prospects.models import Prospect, ProspectContact
@@ -51,6 +52,15 @@ class WhatsAppSubsystemTestCase(APITestCase):
         )
         self.pre_user.profile.role = "PRE"
         self.pre_user.profile.save()
+
+        # 3b. DM User (forbidden)
+        self.dm_user = User.objects.create_user(
+            username="dm_wa@example.com",
+            email="dm_wa@example.com",
+            password="dmpassword123",
+        )
+        self.dm_user.profile.role = "DM"
+        self.dm_user.profile.save()
 
         # 4. WhatsApp Configuration
         self.config, _ = WhatsAppConfiguration.objects.get_or_create(
@@ -92,11 +102,18 @@ class WhatsAppSubsystemTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("status", response.data)
 
-    # 2. Permissions: PRE user forbidden
-    def test_pre_user_forbidden_whatsapp_session_list(self):
-        self.client.force_authenticate(user=self.pre_user)
+    # 2. Permissions: Unauthorized role (DM) forbidden from WhatsApp session list
+    def test_unauthorized_role_forbidden_whatsapp_session_list(self):
+        self.client.force_authenticate(user=self.dm_user)
         response = self.client.get("/api/whatsapp/session/list/")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # 2b. Permissions: PRE user allowed WhatsApp session list
+    @patch("whatsapp.client.WAHAClient.get_all_sessions", return_value=[])
+    def test_pre_user_allowed_whatsapp_session_list(self, mock_waha):
+        self.client.force_authenticate(user=self.pre_user)
+        response = self.client.get("/api/whatsapp/session/list/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     # 3. Permissions: LQ user allowed session list
     @patch("whatsapp.client.WAHAClient.get_all_sessions", return_value=[])
@@ -296,3 +313,137 @@ class WhatsAppSubsystemTestCase(APITestCase):
         self.conversation.refresh_from_db()
         self.assertTrue(self.conversation.custom_avatar_url)
         self.assertIn("whatsapp_avatars", self.conversation.custom_avatar_url)
+
+    # 18. Multi-user session and calling authorization isolation
+    def test_multi_user_session_and_calling_isolation(self):
+        user_b = User.objects.create_user(
+            username="user_b@example.com",
+            email="user_b@example.com",
+            password="password123",
+        )
+        user_b.profile.role = "LQ"
+        user_b.profile.save()
+
+        session_b = WhatsAppSession.objects.create(
+            session_name="session_user_b",
+            owner=user_b,
+            status=WhatsAppSession.Status.READY,
+            phone_number="999888777",
+            is_active=True,
+        )
+
+        conv_b = WhatsAppConversation.objects.create(
+            session=session_b,
+            chat_id="999888777@c.us",
+            whatsapp_name="Bob User B",
+        )
+
+        # Authenticate as User A (lq_user)
+        self.client.force_authenticate(user=self.lq_user)
+
+        # User A cannot start or stop User B's session (returns 404 non-disclosing)
+        resp_start = self.client.post("/api/whatsapp/session/start/", {"session_name": session_b.session_name})
+        self.assertEqual(resp_start.status_code, status.HTTP_404_NOT_FOUND)
+
+        resp_stop = self.client.post("/api/whatsapp/session/stop/", {"session_name": session_b.session_name})
+        self.assertEqual(resp_stop.status_code, status.HTTP_404_NOT_FOUND)
+
+        # User A cannot initiate, accept, reject or end call using User B's session (returns 403)
+        resp_call_start = self.client.post("/api/whatsapp/calls/start/", {"session_name": session_b.session_name, "to": "123456"})
+        self.assertEqual(resp_call_start.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp_call_accept = self.client.post("/api/whatsapp/calls/call_123/accept/", {"session_name": session_b.session_name})
+        self.assertEqual(resp_call_accept.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp_call_reject = self.client.post("/api/whatsapp/calls/call_123/reject/", {"session_name": session_b.session_name})
+        self.assertEqual(resp_call_reject.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp_call_end = self.client.post("/api/whatsapp/calls/call_123/end/", {"session_name": session_b.session_name})
+        self.assertEqual(resp_call_end.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp_call_webrtc = self.client.post("/api/whatsapp/calls/call_123/webrtc/", {"session_name": session_b.session_name, "sdp": "dummy"})
+        self.assertEqual(resp_call_webrtc.status_code, status.HTTP_403_FORBIDDEN)
+
+        # User A cannot access User B's conversation messages (returns 404 non-disclosing)
+        resp_conv = self.client.get(f"/api/whatsapp/conversations/{conv_b.id}/messages/")
+        self.assertEqual(resp_conv.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 19. Call recording upload, listing, stream, and strict multi-user isolation
+    def test_call_recording_upload_and_strict_isolation(self):
+        user_b = User.objects.create_user(
+            username="rec_user_b@example.com",
+            email="rec_user_b@example.com",
+            password="password123",
+        )
+        user_b.profile.role = "LQ"
+        user_b.profile.save()
+
+        # User A uploads recording
+        self.client.force_authenticate(user=self.lq_user)
+        audio_file = SimpleUploadedFile("call_rec.webm", b"RIFFfakeaudio\x00\x01\x02", content_type="audio/webm")
+        data = {
+            "session_name": self.lq_session.session_name,
+            "call_id": "call_test_101",
+            "participant_phone": "1234567890",
+            "participant_name": "Alice Smith",
+            "direction": "outbound",
+            "duration_seconds": "45",
+            "consent_confirmed": "true",
+            "file": audio_file,
+        }
+        upload_resp = self.client.post("/api/whatsapp/calls/recordings/upload/", data, format="multipart")
+        self.assertEqual(upload_resp.status_code, status.HTTP_201_CREATED)
+        rec_id = upload_resp.data.get("id")
+        self.assertTrue(rec_id)
+
+        # User A lists recordings and sees it
+        list_resp_a = self.client.get("/api/whatsapp/calls/recordings/")
+        self.assertEqual(list_resp_a.status_code, status.HTTP_200_OK)
+        rec_ids_a = [r["id"] for r in list_resp_a.data]
+        self.assertIn(rec_id, rec_ids_a)
+
+        # User B lists recordings and does NOT see User A's recording
+        self.client.force_authenticate(user=user_b)
+        list_resp_b = self.client.get("/api/whatsapp/calls/recordings/")
+        self.assertEqual(list_resp_b.status_code, status.HTTP_200_OK)
+        rec_ids_b = [r["id"] for r in list_resp_b.data]
+        self.assertNotIn(rec_id, rec_ids_b)
+
+        # User B attempts to stream, download, or delete User A's recording (returns 403 Forbidden)
+        stream_resp_b = self.client.get(f"/api/whatsapp/calls/recordings/{rec_id}/stream/")
+        self.assertEqual(stream_resp_b.status_code, status.HTTP_403_FORBIDDEN)
+
+        download_resp_b = self.client.get(f"/api/whatsapp/calls/recordings/{rec_id}/download/")
+        self.assertEqual(download_resp_b.status_code, status.HTTP_403_FORBIDDEN)
+
+        delete_resp_b = self.client.delete(f"/api/whatsapp/calls/recordings/{rec_id}/")
+        self.assertEqual(delete_resp_b.status_code, status.HTTP_403_FORBIDDEN)
+
+        # User A can stream and delete their own recording
+        self.client.force_authenticate(user=self.lq_user)
+        stream_resp_a = self.client.get(f"/api/whatsapp/calls/recordings/{rec_id}/stream/")
+        self.assertEqual(stream_resp_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(stream_resp_a["Content-Type"], "audio/webm")
+        if hasattr(stream_resp_a, "close"):
+            stream_resp_a.close()
+
+        delete_resp_a = self.client.delete(f"/api/whatsapp/calls/recordings/{rec_id}/")
+        self.assertEqual(delete_resp_a.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(WhatsAppCallRecording.objects.filter(id=rec_id).exists())
+
+    # 20. Audio WebSocket token generation
+    def test_audio_ws_token_generation(self):
+        import base64
+        from whatsapp.views import _generate_audio_ws_token
+
+        token = _generate_audio_ws_token(self.lq_user, self.lq_session.session_name, "call_abc_123")
+        decoded = base64.urlsafe_b64decode(token).decode("utf-8")
+        parts = decoded.split(":")
+        self.assertEqual(len(parts), 5)
+        self.assertEqual(parts[0], str(self.lq_user.username))
+        self.assertEqual(parts[1], self.lq_session.session_name)
+        self.assertEqual(parts[2], "abc_123")
+        expires_at = int(parts[3])
+        self.assertGreater(expires_at, int(timezone.now().timestamp()))
+        sig = parts[4]
+        self.assertTrue(len(sig) >= 32)

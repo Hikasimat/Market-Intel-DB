@@ -203,15 +203,19 @@ def is_call_handled(call_id: Optional[str]) -> bool:
 
 
 def _call_cache_file(session_name: str) -> str:
-    clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_name)
+    clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_name or "default")
     return os.path.join(tempfile.gettempdir(), f"waha_active_call_{clean}.json")
+
+
+def _call_state_file(session_name: str) -> str:
+    clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_name or "default")
+    return os.path.join(tempfile.gettempdir(), f"waha_call_state_{clean}.json")
 
 
 def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
     """
-    Retrieve currently ringing incoming voice call for the user's session.
-    Checks user session first, then falls back to 'default' session to ensure
-    unknown callers without an existing conversation ring immediately.
+    Retrieve currently ringing incoming voice call strictly for the specified session.
+    Never cross-pollutes calls across different user sessions.
     """
     import time
     now = time.time()
@@ -233,44 +237,23 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
         ref_time = data.get("received_at") or mtime
         return (now - ref_time) <= max_age
 
-    sessions_to_check = [session_name]
-    if session_name and session_name != "default":
-        sessions_to_check.append("default")
-
-    for s in sessions_to_check:
-        cache_path = _call_cache_file(s)
-        try:
-            if os.path.exists(cache_path):
-                mtime = os.path.getmtime(cache_path)
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if _is_valid_call(data, mtime):
-                    LATEST_CALL_CACHE[s] = data
-                    return data
-                else:
-                    LATEST_CALL_CACHE.pop(s, None)
-                    try:
-                        os.remove(cache_path)
-                    except OSError:
-                        pass
-            else:
-                LATEST_CALL_CACHE.pop(s, None)
-        except Exception:
-            pass
-
-    # Fallback: scan any active ringing calls across all session files
+    cache_path = _call_cache_file(session_name)
     try:
-        import glob
-        temp_dir = tempfile.gettempdir()
-        for cfile in glob.glob(os.path.join(temp_dir, "waha_active_call_*.json")):
-            try:
-                mtime = os.path.getmtime(cfile)
-                with open(cfile, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if _is_valid_call(data, mtime):
-                    return data
-            except Exception:
-                pass
+        if os.path.exists(cache_path):
+            mtime = os.path.getmtime(cache_path)
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if _is_valid_call(data, mtime):
+                LATEST_CALL_CACHE[session_name] = data
+                return data
+            else:
+                LATEST_CALL_CACHE.pop(session_name, None)
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+        else:
+            LATEST_CALL_CACHE.pop(session_name, None)
     except Exception:
         pass
 
@@ -278,9 +261,9 @@ def get_active_incoming_call(session_name: str = "default") -> Optional[dict]:
 
 
 def set_active_incoming_call(session_name: str, call_data: dict) -> None:
-    """Persist active incoming call to memory and temp cache file."""
+    """Persist active incoming call to memory and temp cache file strictly for this session."""
     import time
-    if not isinstance(call_data, dict):
+    if not isinstance(call_data, dict) or not session_name:
         return
     clean_id = _normalize_call_id(call_data.get("call_id"))
     if clean_id and is_call_handled(clean_id):
@@ -290,14 +273,42 @@ def set_active_incoming_call(session_name: str, call_data: dict) -> None:
     if clean_id:
         call_data["call_id"] = clean_id
     call_data["received_at"] = time.time()
-    s = session_name or "default"
-    LATEST_CALL_CACHE[s] = call_data
+    call_data["session_name"] = session_name
+    LATEST_CALL_CACHE[session_name] = call_data
     try:
-        cache_path = _call_cache_file(s)
+        cache_path = _call_cache_file(session_name)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(call_data, f)
     except Exception as e:
         logger.debug("Failed to write call cache file: %s", e)
+
+
+def get_active_call_state(session_name: str) -> Optional[dict]:
+    """Retrieve active call state (connected, ended, etc.) strictly for session."""
+    if not session_name:
+        return None
+    state_file = _call_state_file(session_name)
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def set_session_call_state(session_name: str, state_data: dict) -> None:
+    """Record active call state strictly for session."""
+    if not session_name or not isinstance(state_data, dict):
+        return
+    state_file = _call_state_file(session_name)
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f)
+    except Exception as e:
+        logger.debug("Failed to persist call state: %s", e)
 
 
 def mark_active_call_connected(session_name: str = "default", call_id: Optional[str] = None) -> None:
@@ -308,37 +319,50 @@ def mark_active_call_connected(session_name: str = "default", call_id: Optional[
     if call_id:
         mark_call_handled(call_id)
     clear_active_call(session_name, call_id)
+    if session_name:
+        set_session_call_state(session_name, {
+            "call_id": call_id or "",
+            "status": "active",
+            "session_name": session_name,
+            "updated_at": timezone.now().isoformat(),
+        })
 
 
 def clear_active_call(session_name: str = "default", call_id: Optional[str] = None) -> None:
-    """Clear active incoming call once answered, rejected, or ended, and tombstone its call_id."""
-    import glob
+    """Clear active incoming call strictly for this session."""
     clean_target = _normalize_call_id(call_id)
     if clean_target:
         mark_call_handled(clean_target)
 
-    for s in list(LATEST_CALL_CACHE.keys()):
-        cached = LATEST_CALL_CACHE.get(s)
+    # Only affect the requested session
+    if session_name in LATEST_CALL_CACHE:
+        cached = LATEST_CALL_CACHE.get(session_name)
         cached_id = _normalize_call_id(cached.get("call_id")) if isinstance(cached, dict) else ""
         if not clean_target or cached_id == clean_target:
-            LATEST_CALL_CACHE.pop(s, None)
+            LATEST_CALL_CACHE.pop(session_name, None)
 
     try:
-        pattern = os.path.join(tempfile.gettempdir(), "waha_active_call_*.json")
-        for fpath in glob.glob(pattern):
-            try:
-                if not clean_target:
-                    os.remove(fpath)
-                else:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    file_cid = _normalize_call_id(data.get("call_id")) if isinstance(data, dict) else ""
-                    if file_cid == clean_target or is_call_handled(file_cid):
-                        os.remove(fpath)
-            except Exception:
-                pass
+        cache_path = _call_cache_file(session_name)
+        if os.path.exists(cache_path):
+            if not clean_target:
+                os.remove(cache_path)
+            else:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                file_cid = _normalize_call_id(data.get("call_id")) if isinstance(data, dict) else ""
+                if file_cid == clean_target or is_call_handled(file_cid):
+                    os.remove(cache_path)
     except Exception:
         pass
+
+    # Also update session call state to ended
+    if session_name:
+        set_session_call_state(session_name, {
+            "call_id": clean_target or "",
+            "status": "ended",
+            "session_name": session_name,
+            "updated_at": timezone.now().isoformat(),
+        })
 
 
 CRM_GROUP_CACHE = {}
@@ -1112,41 +1136,26 @@ def _handle_call_event(
         msg_status = WhatsAppMessage.Status.DELIVERED
         unread_inc = 0
 
-    # Find or resolve session
+    # Find or resolve session strictly by session_name
     session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
-    if not session_obj or session_name == "default":
-        existing_any = WhatsAppConversation.objects.filter(
-            chat_id=target_chat_id,
-            is_deleted=False,
-        ).select_related("session").first()
-        if existing_any and existing_any.session:
-            session_obj = existing_any.session
-            session_name = session_obj.session_name
-        else:
-            active_sess = WhatsAppSession.objects.filter(
-                status=WhatsAppSession.Status.READY,
-                is_active=True,
-            ).first()
-            if active_sess:
-                session_obj = active_sess
-                session_name = active_sess.session_name
+    if not session_obj:
+        if session_name and session_name.startswith("user_"):
+            try:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                u_id = int(session_name.split("_")[1])
+                u = User.objects.filter(id=u_id, is_active=True).first()
+                if u:
+                    session_obj, _ = WhatsAppSession.objects.get_or_create(
+                        session_name=session_name,
+                        defaults={"owner": u, "status": WhatsAppSession.Status.STARTING}
+                    )
+            except Exception:
+                pass
 
     if not session_obj:
-        session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-    if session_obj.owner is None:
-        try:
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
-            if session_name.startswith("user_"):
-                u_id = int(session_name.split("_")[1])
-                u = User.objects.filter(id=u_id).first()
-            else:
-                u = User.objects.filter(is_active=True).first()
-            if u:
-                session_obj.owner = u
-                session_obj.save(update_fields=["owner"])
-        except Exception:
-            pass
+        logger.warning("Call event received for unmapped session %r — rejected to protect multi-user isolation.", session_name)
+        return
 
     # 1. Resolve phone digits if available (from @c.us or @s.whatsapp.net)
     phone_digits = _extract_phone_digits(target_chat_id)
@@ -1383,19 +1392,18 @@ def _handle_call_event(
             "status": "ringing",
         }
         set_active_incoming_call(session_name, incoming_payload)
-        if session_name != "default":
-            set_active_incoming_call("default", incoming_payload)
-        logger.info("Registered active incoming WhatsApp call: %s from %s", call_id, display_name)
-    elif is_accepted or is_missed or is_rejected or is_ended or event_type in (
-        "call.accepted", "call.voice.active",
+        logger.info("Registered active incoming WhatsApp call: %s from %s for session %s", call_id, display_name, session_name)
+    elif is_accepted:
+        mark_active_call_connected(session_name, call_id)
+        logger.info("Marked active connected WhatsApp call: %s for session %s", call_id, session_name)
+    elif is_missed or is_rejected or is_ended or event_type in (
         "call.rejected", "call.voice.rejected",
         "call.missed", "call.voice.missed",
         "call.ended", "call.voice.ended",
-    ) or raw_status in ("accept", "active", "answered", "reject", "declined", "rejected", "timeout", "missed", "terminate", "ended"):
+    ) or raw_status in ("reject", "declined", "rejected", "timeout", "missed", "terminate", "ended"):
         mark_call_handled(call_id)
         clear_active_call(session_name, call_id)
-        clear_active_call("default", call_id)
-        logger.info("Cleared and tombstoned WhatsApp call: %s (%s)", call_id, event_type)
+        logger.info("Cleared and tombstoned WhatsApp call: %s (%s) for session %s", call_id, event_type, session_name)
 
 
 def _handle_incoming_message(
@@ -1606,44 +1614,35 @@ def _handle_incoming_message(
 
     from django.db.models import Q
 
-    # Resolve active session object
+    # Resolve active session object strictly by session_name
     session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
-    ready_session = WhatsAppSession.objects.filter(
-        status=WhatsAppSession.Status.READY,
-        is_active=True
-    ).order_by("-updated_at").first()
+    if not session_obj:
+        if session_name and session_name.startswith("user_"):
+            try:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                u_id = int(session_name.split("_")[1])
+                u = User.objects.filter(id=u_id, is_active=True).first()
+                if u:
+                    session_obj, _ = WhatsAppSession.objects.get_or_create(
+                        session_name=session_name,
+                        defaults={"owner": u, "status": WhatsAppSession.Status.STARTING}
+                    )
+            except Exception:
+                pass
 
-    if ready_session:
-        if not session_obj or session_name == "default" or session_obj.status != WhatsAppSession.Status.READY or not session_obj.owner:
-            session_obj = ready_session
-    elif not session_obj:
-        session_obj, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
+    if not session_obj:
+        logger.warning("Incoming message received for unmapped session %r — rejected to protect multi-user isolation.", session_name)
+        return False
 
-    if session_obj.owner is None and session_obj.session_name.startswith("user_"):
-        try:
-            u_id = int(session_obj.session_name.split("_")[1])
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
-            u = User.objects.filter(id=u_id).first()
-            if u:
-                session_obj.owner = u
-                session_obj.save(update_fields=["owner"])
-        except Exception:
-            pass
-
-    # For group messages, search for existing group conversation across sessions
+    # For group messages, search for existing group conversation strictly within this session
     conversation = None
     if is_group:
         conversation = WhatsAppConversation.objects.filter(
             chat_id=target_chat_id,
+            session=session_obj,
             is_deleted=False,
         ).order_by("-last_message_at", "-updated_at").first()
-
-        if conversation and session_obj and conversation.session != session_obj:
-            conversation.session = session_obj
-            if session_obj.phone_number and not conversation.account_phone:
-                conversation.account_phone = session_obj.phone_number
-            conversation.save(update_fields=["session", "account_phone"])
 
     if not conversation:
         # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
