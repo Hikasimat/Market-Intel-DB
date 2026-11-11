@@ -704,7 +704,15 @@ def _validate_event_schema(payload: dict) -> tuple[str, str, dict]:
             f"Allowed: {sorted(ALLOWED_EVENT_TYPES)}"
         )
 
-    session_name = payload.get("session", "default")
+    raw_session = payload.get("session")
+    # Message / acknowledgement events must explicitly identify their originating session.
+    # Never silently substitute "default" — ambiguous events are rejected.
+    if event_type in ("message", "message.any", "message.ack", "message.reaction", "message.waiting"):
+        if not isinstance(raw_session, str) or not raw_session.strip():
+            raise WebhookVerificationError(
+                f"Event {event_type!r} is missing its originating 'session' — rejected."
+            )
+    session_name = raw_session if raw_session is not None else "default"
     if not isinstance(session_name, str):
         session_name = "default"
     session_name = session_name.strip()[:100]
@@ -745,6 +753,42 @@ def _extract_phone_digits(chat_id: str) -> Optional[str]:
         return None
 
     return digits
+
+
+def _resolve_originating_session(session_name: str) -> Optional[WhatsAppSession]:
+    """
+    Resolve the originating WhatsAppSession strictly by the exact WAHA session name.
+    Returns None when the session cannot be resolved reliably (caller must reject the event).
+    Only a registered `user_<id>` session whose owner exists may be lazily registered.
+    """
+    session_name = (session_name or "").strip()
+    if not session_name:
+        return None
+    session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
+    if session_obj:
+        return session_obj
+    if session_name.startswith("user_"):
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            u_id = int(session_name.split("_")[1])
+            u = User.objects.filter(id=u_id, is_active=True).first()
+            if u:
+                session_obj, _ = WhatsAppSession.objects.get_or_create(
+                    session_name=session_name,
+                    defaults={"owner": u, "status": WhatsAppSession.Status.STARTING},
+                )
+                return session_obj
+        except Exception:
+            return None
+    return None
+
+
+def _normalize_chat_jid(jid: str) -> str:
+    """Normalize equivalent JID formats (device suffix, @s.whatsapp.net -> @c.us). Session-agnostic string
+    normalization only; callers must always combine it with a session for identity."""
+    jid = re.sub(r":[0-9]+@", "@", str(jid or "").strip())
+    return jid.replace("@s.whatsapp.net", "@c.us")
 
 
 def process_webhook_event(
@@ -1554,6 +1598,15 @@ def _handle_incoming_message(
         logger.warning("Incoming message with invalid chat ID: %r — ignored.", target_chat_id)
         return
 
+    # Resolve the originating WhatsApp session strictly by the exact WAHA webhook session name
+    # BEFORE any contact / LID / conversation lookup. A conversation's identity is always
+    # (WhatsAppSession, normalized remote chat id) — never the remote phone number alone.
+    session_obj = _resolve_originating_session(session_name)
+    if not session_obj:
+        logger.warning("Incoming message received for unmapped session %r — rejected to protect multi-user isolation.", session_name)
+        return False
+    conversation = None
+
     phone_digits = _extract_phone_digits(target_chat_id)
     is_group = target_chat_id.endswith("@g.us")
 
@@ -1587,9 +1640,11 @@ def _handle_incoming_message(
         except Exception:
             pass
 
-        # 2. Check if any existing conversation already has this @lid saved
+        # 2. Check if a conversation of THIS session already has this @lid saved
+        # (LID mappings must never be borrowed from another WhatsApp account)
         if not resolved_phone:
             existing_saved = WhatsAppConversation.objects.filter(
+                session=session_obj,
                 chat_id=target_chat_id,
                 phone_number__isnull=False
             ).exclude(phone_number="").first()
@@ -1653,29 +1708,8 @@ def _handle_incoming_message(
 
     from django.db.models import Q
 
-    # Resolve active session object strictly by session_name
-    session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
-    if not session_obj:
-        if session_name and session_name.startswith("user_"):
-            try:
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-                u_id = int(session_name.split("_")[1])
-                u = User.objects.filter(id=u_id, is_active=True).first()
-                if u:
-                    session_obj, _ = WhatsAppSession.objects.get_or_create(
-                        session_name=session_name,
-                        defaults={"owner": u, "status": WhatsAppSession.Status.STARTING}
-                    )
-            except Exception:
-                pass
-
-    if not session_obj:
-        logger.warning("Incoming message received for unmapped session %r — rejected to protect multi-user isolation.", session_name)
-        return False
-
     # For group messages, search for existing group conversation strictly within this session
-    conversation = None
+    # (session_obj and conversation were resolved/initialised above)
     if is_group:
         conversation = WhatsAppConversation.objects.filter(
             chat_id=target_chat_id,
@@ -1684,19 +1718,12 @@ def _handle_incoming_message(
         ).order_by("-last_message_at", "-updated_at").first()
 
     if not conversation:
-        # Find existing conversation for this session (checking both @c.us and @s.whatsapp.net)
+        # Find existing conversation for THIS session only (checking both @c.us and @s.whatsapp.net)
         conversation = WhatsAppConversation.objects.filter(
             chat_id__in=candidate_ids,
             session=session_obj,
             is_deleted=False,
         ).first()
-
-        if not conversation and session_obj.owner:
-            conversation = WhatsAppConversation.objects.filter(
-                chat_id__in=candidate_ids,
-                session__owner=session_obj.owner,
-                is_deleted=False,
-            ).first()
 
     # If not found by chat_id and not a group, match by phone digits within this session
     if not conversation and not is_group and phone_digits and len(phone_digits) >= 8:
@@ -1707,13 +1734,6 @@ def _handle_incoming_message(
         ).filter(
             Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
         ).first()
-        if not conversation and session_obj.owner:
-            conversation = WhatsAppConversation.objects.filter(
-                session__owner=session_obj.owner,
-                is_deleted=False,
-            ).filter(
-                Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
-            ).first()
 
     if not is_from_me:
         opt_out_registered = check_incoming_for_opt_out(
@@ -1894,12 +1914,6 @@ def _handle_incoming_message(
                 prospect_contact=matched_contact,
                 is_deleted=False,
             ).first()
-            if not existing_c and session_obj.owner:
-                existing_c = WhatsAppConversation.objects.filter(
-                    session__owner=session_obj.owner,
-                    prospect_contact=matched_contact,
-                    is_deleted=False,
-                ).first()
             if existing_c:
                 conversation = existing_c
 
@@ -1913,9 +1927,7 @@ def _handle_incoming_message(
             if not conversation.whatsapp_name and matched_contact:
                 conversation.whatsapp_name = matched_contact.contact_name
                 conv_updates.append("whatsapp_name")
-            if conversation.session != session_obj and session_obj.owner and session_obj.owner == conversation.session.owner:
-                conversation.session = session_obj
-                conv_updates.append("session")
+            # NOTE: a conversation is never moved/reassigned between WhatsApp sessions.
             if conv_updates:
                 conversation.save(update_fields=list(set(conv_updates)))
         else:
@@ -1955,14 +1967,16 @@ def _handle_incoming_message(
     # -----------------------------------------------------------------------
     msg_dt = _parse_waha_timestamp(event_data)
 
-    # Generate an idempotency key for this message.
+    # Generate an idempotency key for this message. It is scoped to the originating WhatsApp
+    # session so identical message IDs/content in two different accounts can never collide.
     body_hash = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
     msg_idempotency = hashlib.sha256(
-        f"{'outbound' if is_from_me else 'inbound'}:{target_chat_id}:{waha_message_id}:{body_hash}".encode()
+        f"s{session_obj.pk}:{'outbound' if is_from_me else 'inbound'}:{target_chat_id}:{waha_message_id}:{body_hash}".encode()
     ).hexdigest()
 
     existing_message = WhatsAppMessage.objects.filter(
-        idempotency_key=msg_idempotency
+        idempotency_key=msg_idempotency,
+        conversation__session=session_obj,
     ).first()
     if not existing_message and waha_message_id:
         existing_message = WhatsAppMessage.objects.filter(
@@ -2101,73 +2115,130 @@ def _handle_incoming_message(
     return True
 
 
+# Baileys / WAHA acknowledgement levels (proto WebMessageInfo.Status):
+#   0=ERROR 1=PENDING 2=SERVER_ACK(sent) 3=DEVICE(delivered) 4=READ 5=PLAYED
+ACK_STATUS_MAP = {
+    0: WhatsAppMessage.Status.FAILED,
+    1: WhatsAppMessage.Status.PENDING,
+    2: WhatsAppMessage.Status.SENT,
+    3: WhatsAppMessage.Status.DELIVERED,
+    4: WhatsAppMessage.Status.READ,
+    5: WhatsAppMessage.Status.READ,  # PLAYED: final "read" tick state for the existing status model
+}
+
+# Monotonic ordering used so a delayed ack can never move a message backwards.
+_STATUS_RANK = {
+    WhatsAppMessage.Status.FAILED: -1,
+    WhatsAppMessage.Status.BLOCKED: -1,
+    WhatsAppMessage.Status.PENDING: 0,
+    WhatsAppMessage.Status.SENT: 1,
+    WhatsAppMessage.Status.DELIVERED: 2,
+    WhatsAppMessage.Status.READ: 3,
+}
+
+
+def _ack_message_id_candidates(event_data: dict) -> list:
+    """All identifiers a stored outbound message may carry for this ack (composite + raw)."""
+    composite = str(event_data.get("id") or "").strip()
+    raw_id = str(event_data.get("rawId") or "").strip()
+    remote = _normalize_chat_jid(event_data.get("remoteJid") or event_data.get("chatId") or event_data.get("from") or "")
+    if not raw_id and composite.count("_") >= 2 and composite.split("_", 1)[0] in ("true", "false"):
+        raw_id = composite.split("_", 2)[2]
+    candidates = []
+    for c in (composite, raw_id, f"true_{remote}_{raw_id}" if (remote and raw_id) else ""):
+        if c and c not in candidates:
+            candidates.append(c)
+    return candidates
+
+
+def apply_message_ack(session_obj, candidate_ids: list, ack_value, remote_jid: str = "") -> int:
+    """
+    Advance OUTBOUND messages of `session_obj` matching `candidate_ids` to the status implied by
+    `ack_value`. Never touches another session, never moves a status backwards.
+    Returns the number of messages updated.
+    """
+    try:
+        ack_int = int(ack_value)
+    except (TypeError, ValueError):
+        return 0
+    new_status = ACK_STATUS_MAP.get(ack_int)
+    if not new_status or new_status == WhatsAppMessage.Status.PENDING or not candidate_ids:
+        return 0
+
+    qs = WhatsAppMessage.objects.filter(
+        conversation__session=session_obj,
+        direction=WhatsAppMessage.Direction.OUTBOUND,
+        waha_message_id__in=candidate_ids,
+    )
+    remote_norm = _normalize_chat_jid(remote_jid)
+    if remote_norm and not remote_norm.endswith("@lid"):
+        narrowed = qs.filter(conversation__chat_id__in=[remote_norm, remote_norm.replace("@c.us", "@s.whatsapp.net")])
+        if narrowed.exists():
+            qs = narrowed
+
+    now = timezone.now()
+    updated = 0
+    for msg in qs:
+        cur = msg.status
+        if new_status == WhatsAppMessage.Status.FAILED:
+            # An error ack only applies to a message that was never confirmed by the server.
+            if cur != WhatsAppMessage.Status.PENDING:
+                continue
+        elif _STATUS_RANK.get(new_status, 0) <= _STATUS_RANK.get(cur, 0):
+            continue  # same or older level — idempotent / out-of-order ack
+        fields = ["status"]
+        msg.status = new_status
+        rank = _STATUS_RANK[new_status]
+        if rank >= 1 and not msg.sent_at:
+            msg.sent_at = now
+            fields.append("sent_at")
+        if rank >= 2 and not msg.delivered_at:
+            msg.delivered_at = now
+            fields.append("delivered_at")
+        if rank >= 3 and not msg.read_at:
+            msg.read_at = now
+            fields.append("read_at")
+        msg.save(update_fields=fields)
+        updated += 1
+    return updated
+
+
 def _handle_message_ack(
     event_data: dict,
     session_name: str,
     event_record: WhatsAppEvent,
 ) -> None:
     """
-    Handle a message acknowledgement event (delivered/read status update).
+    Handle a message acknowledgement event (sent / delivered / read status update).
+    Strictly scoped to the originating WhatsApp session.
     """
-    waha_message_id = str(event_data.get("id") or "")
-    ack_value = event_data.get("ack")
-
-    if not waha_message_id:
+    session_obj = WhatsAppSession.objects.filter(session_name=(session_name or "").strip()).first()
+    if not session_obj:
+        logger.warning("Message ack for unmapped session %r ignored.", session_name)
         return
 
-    # Map WAHA ACK values to our status enum.
-    # WAHA ACK: 0=PENDING, 1=SENT, 2=DELIVERED, 3=READ, -1=FAILED
-    ACK_STATUS_MAP = {
-        -1: WhatsAppMessage.Status.FAILED,
-        0: WhatsAppMessage.Status.PENDING,
-        1: WhatsAppMessage.Status.SENT,
-        2: WhatsAppMessage.Status.DELIVERED,
-        3: WhatsAppMessage.Status.READ,
-    }
-
-    new_status = ACK_STATUS_MAP.get(int(ack_value or 0))
-    if not new_status:
+    # Acks only drive the tick state of OUTBOUND messages.
+    direction = str(event_data.get("direction") or "").lower()
+    if direction == "inbound" or event_data.get("fromMe") is False:
         return
 
-    # Build update kwargs: only set timestamps when transitioning TO that state.
-    # Use conditional expressions to avoid clobbering existing timestamps with None.
-    update_kwargs = {"status": new_status}
-    now = timezone.now()
-
-    # Only advance timestamps — never regress them.
-    # WAHA ack events can arrive out of order; treat them as idempotent advances.
-    if new_status == WhatsAppMessage.Status.DELIVERED:
-        # Set delivered_at only if not already set.
-        WhatsAppMessage.objects.filter(
-            waha_message_id=waha_message_id,
-            status__in=[WhatsAppMessage.Status.PENDING, WhatsAppMessage.Status.SENT],
-        ).update(status=new_status, delivered_at=now)
-        return
-    elif new_status == WhatsAppMessage.Status.READ:
-        # Advance to READ; set both delivered_at and read_at if not already set.
-        from django.db.models import Q
-        WhatsAppMessage.objects.filter(
-            waha_message_id=waha_message_id,
-        ).exclude(status=WhatsAppMessage.Status.READ).update(
-            status=new_status,
-            delivered_at=now,
-            read_at=now,
-        )
-        return
-    elif new_status == WhatsAppMessage.Status.FAILED:
-        WhatsAppMessage.objects.filter(
-            waha_message_id=waha_message_id,
-            status__in=[WhatsAppMessage.Status.PENDING, WhatsAppMessage.Status.SENT],
-        ).update(status=new_status)
+    candidates = _ack_message_id_candidates(event_data)
+    if not candidates:
         return
 
-    with transaction.atomic():
-        updated = WhatsAppMessage.objects.filter(
-            waha_message_id=waha_message_id,
-        ).update(**update_kwargs)
-
+    updated = apply_message_ack(
+        session_obj,
+        candidates,
+        event_data.get("ack"),
+        remote_jid=str(event_data.get("remoteJid") or event_data.get("chatId") or event_data.get("from") or ""),
+    )
     if updated:
-        logger.debug("Message ACK updated: waha_id=%s new_status=%s", waha_message_id, new_status)
+        logger.debug("Message ACK applied: session=%s ids=%s ack=%s", session_name, candidates, event_data.get("ack"))
+    else:
+        logger.debug(
+            "Message ACK matched nothing to advance in session %s (ids=%s ack=%s) — no other session touched.",
+            session_name, candidates, event_data.get("ack"),
+        )
 
 
 def _handle_session_status(
@@ -2322,20 +2393,36 @@ def sync_recent_waha_messages(
         return 0
 
     cutoff_dt = timezone.now() - timedelta(days=max(int(days or 2), 1))
+    target_session = (default_session_name or "").strip()
+    if not target_session or _resolve_originating_session(target_session) is None:
+        logger.warning("sync_recent_waha_messages: unresolved target session %r — nothing imported.", target_session)
+        return 0
+
     candidates = []
     seen_ids = set()
 
     for item in messages_list:
         if not isinstance(item, dict):
             continue
+        # Every synchronized message must carry an explicit originating session that matches
+        # the authorized target session exactly. Missing / mismatched identity is rejected
+        # (a message from "default" is only accepted when "default" IS the target session).
+        item_sess = str(item.get("session") or "").strip()
+        if not item_sess or item_sess != target_session:
+            continue
         m_id = str(item.get("id") or "")
-        if m_id and m_id in seen_ids:
+        chat_norm = _normalize_chat_jid(
+            item.get("chatId") or ((item.get("_data") or {}).get("key") or {}).get("remoteJid")
+            or item.get("to") or item.get("from") or ""
+        )
+        dedupe_key = (item_sess, chat_norm, m_id)
+        if m_id and dedupe_key in seen_ids:
             continue
         msg_dt = _parse_waha_timestamp(item)
         if msg_dt < cutoff_dt:
             continue
         if m_id:
-            seen_ids.add(m_id)
+            seen_ids.add(dedupe_key)
         candidates.append((msg_dt, item))
 
     # Sort strictly oldest -> newest so conversation history and previews are ordered chronologically
@@ -2343,11 +2430,7 @@ def sync_recent_waha_messages(
 
     synced = 0
     for _msg_dt, item in candidates:
-        item_sess = str(item.get("session") or "").strip()
-        if default_session_name and item_sess and item_sess != "default" and item_sess != default_session_name:
-            # Skip messages belonging to a different user session
-            continue
-        sess = default_session_name if (item_sess in ("", "default")) else item_sess
+        sess = str(item.get("session") or "").strip()
         try:
             created = _handle_incoming_message(item, sess, event_record=None, is_history_sync=True)
             if created:
@@ -2377,23 +2460,35 @@ def sync_two_day_whatsapp_history(
     collected = []
     seen_ids = set()
 
-    def _add_msg(m: dict, fallback_chat_id: str = ""):
+    def _add_msg(m: dict, fallback_chat_id: str = "", trusted_session: bool = False):
+        """
+        `trusted_session=True` is used ONLY for messages fetched through this session's own
+        per-chat WAHA API (the session is implied by the request). Messages coming from the
+        shared stats buffer must carry an explicit session equal to this session.
+        """
         if not isinstance(m, dict):
             return
         m_sess = str(m.get("session") or "").strip()
-        if m_sess and m_sess != "default" and session_name and m_sess != session_name:
-            # Strictly ignore messages from other user sessions
+        if m_sess and m_sess != session_name:
+            # Strictly ignore messages from any other session (including legacy "default")
+            return
+        if not m_sess and not trusted_session:
+            # Ambiguous origin — never attribute to the current session
             return
         msg_copy = dict(m)
         if fallback_chat_id and not msg_copy.get("chatId"):
             msg_copy["chatId"] = fallback_chat_id
-        if not msg_copy.get("session"):
-            msg_copy["session"] = session_name
+        msg_copy["session"] = session_name
         m_id = str(msg_copy.get("id") or "")
-        if m_id and m_id in seen_ids:
+        dedupe_key = (
+            session_name,
+            _normalize_chat_jid(msg_copy.get("chatId") or msg_copy.get("to") or msg_copy.get("from") or ""),
+            m_id,
+        )
+        if m_id and dedupe_key in seen_ids:
             return
         if m_id:
-            seen_ids.add(m_id)
+            seen_ids.add(dedupe_key)
         collected.append(msg_copy)
 
     # 1. Pull buffered messages and webhook logs from WAHA-NoWeb-Light stats
@@ -2431,7 +2526,7 @@ def sync_two_day_whatsapp_history(
             chat_msgs = client.get_messages(session_name, cid, limit=200)
             if isinstance(chat_msgs, list):
                 for cm in chat_msgs:
-                    _add_msg(cm, fallback_chat_id=cid)
+                    _add_msg(cm, fallback_chat_id=cid, trusted_session=True)
         except Exception:
             pass
 

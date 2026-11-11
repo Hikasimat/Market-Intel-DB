@@ -939,7 +939,10 @@ class WhatsAppSendMessageView(APIView):
                     ).first()
 
                 if not target_conv:
-                    existing_any = WhatsAppConversation.objects.filter(chat_id__in=candidate_ids).first()
+                    # Session-scoped only: never read metadata from another session's conversation.
+                    existing_any = WhatsAppConversation.objects.filter(
+                        session=user_session, chat_id__in=candidate_ids
+                    ).first()
                     matched_contact = existing_any.prospect_contact if existing_any else None
                     if not matched_contact and digits and len(digits) >= 8:
                         suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
@@ -1058,11 +1061,8 @@ class WhatsAppSendMessageView(APIView):
             conv = WhatsAppConversation.objects.filter(
                 chat_id=chat_id,
                 is_deleted=False,
+                session__owner=user,
             ).select_related("session").first()
-            if conv and conv.session:
-                return conv.session.session_name
-
-        return "default"
 
 
 # ---------------------------------------------------------------------------
@@ -1308,8 +1308,10 @@ class WhatsAppConversationMessagesView(APIView):
 
         limit = min(int(request.query_params.get("limit", 2000)), 5000)
 
+        # Strict isolation: messages come ONLY from this exact (session-owned) conversation.
+        # Never include other conversations that merely share the same remote chat_id.
         base_qs = WhatsAppMessage.objects.filter(
-            Q(conversation=conv) | Q(conversation__chat_id=conv.chat_id),
+            conversation=conv,
             is_deleted=False,
         )
 
@@ -1323,7 +1325,7 @@ class WhatsAppConversationMessagesView(APIView):
                     days=7,
                 )
                 base_qs = WhatsAppMessage.objects.filter(
-                    Q(conversation=conv) | Q(conversation__chat_id=conv.chat_id),
+                    conversation=conv,
                     is_deleted=False,
                 )
             except Exception:

@@ -447,3 +447,330 @@ class WhatsAppSubsystemTestCase(APITestCase):
         self.assertGreater(expires_at, int(timezone.now().timestamp()))
         sig = parts[4]
         self.assertTrue(len(sig) >= 32)
+
+
+class WhatsAppMultiAccountIsolationTestCase(APITestCase):
+    """
+    Automated verification of WhatsApp chat history isolation, session bounding,
+    and message delivery status (single-tick, double-tick, blue double-tick).
+    """
+    def setUp(self):
+        self.secret = "test_webhook_secret_key"
+
+        # Patch background avatar fetching to prevent SQLite thread locking
+        self.patcher_avatar = patch("whatsapp.webhooks._fetch_contact_profile_picture_bg")
+        self.mock_avatar = self.patcher_avatar.start()
+
+        # User A (PRE role)
+        self.user_a = User.objects.create_user(
+            username="user_a_pre@example.com",
+            email="user_a_pre@example.com",
+            password="passwordA123",
+        )
+        self.user_a.profile.role = "PRE"
+        self.user_a.profile.save()
+
+        # User B (PRE role)
+        self.user_b = User.objects.create_user(
+            username="user_b_pre@example.com",
+            email="user_b_pre@example.com",
+            password="passwordB123",
+        )
+        self.user_b.profile.role = "PRE"
+        self.user_b.profile.save()
+
+        # Session for User A (phone +919003619221)
+        self.session_a = WhatsAppSession.objects.create(
+            session_name="user_a_session_9003619221",
+            owner=self.user_a,
+            status=WhatsAppSession.Status.READY,
+            phone_number="919003619221",
+            is_active=True,
+        )
+
+        # Session for User B (phone +919876543210)
+        self.session_b = WhatsAppSession.objects.create(
+            session_name="user_b_session_9876543210",
+            owner=self.user_b,
+            status=WhatsAppSession.Status.READY,
+            phone_number="919876543210",
+            is_active=True,
+        )
+
+        # Common remote contact communicating with both User A and User B
+        self.remote_chat_id = "9360239398@c.us"
+
+        # Conversation for User A with remote contact
+        self.conv_a = WhatsAppConversation.objects.create(
+            session=self.session_a,
+            chat_id=self.remote_chat_id,
+            whatsapp_name="Common Remote Contact",
+        )
+
+        # Conversation for User B with the SAME remote contact
+        self.conv_b = WhatsAppConversation.objects.create(
+            session=self.session_b,
+            chat_id=self.remote_chat_id,
+            whatsapp_name="Common Remote Contact",
+        )
+
+    def tearDown(self):
+        super().tearDown()
+        self.patcher_avatar.stop()
+
+    def _post_signed_webhook(self, payload):
+        raw_body = json.dumps(payload).encode("utf-8")
+        computed_sig = hmac.new(self.secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        with patch.dict("os.environ", {"WHATSAPP_WEBHOOK_SECRET": self.secret}):
+            return self.client.post(
+                "/api/whatsapp/webhook/",
+                data=raw_body,
+                content_type="application/json",
+                HTTP_X_WEBHOOK_HMAC=f"sha256={computed_sig}",
+            )
+
+    # Test A: Conversation message isolation between sessions with the same remote contact
+    def test_conversation_messages_isolated_between_sessions(self):
+        # Create messages in User A's conversation
+        msg_a_out = WhatsAppMessage.objects.create(
+            conversation=self.conv_a,
+            waha_message_id="msg_a_out_1",
+            idempotency_key="idemp_a_out_1",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            full_body="Hello from User A to 9360239398",
+            body_preview="Hello from User A to 9360239398",
+        )
+        msg_a_in = WhatsAppMessage.objects.create(
+            conversation=self.conv_a,
+            waha_message_id="msg_a_in_1",
+            idempotency_key="idemp_a_in_1",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            full_body="Reply from 9360239398 to User A",
+            body_preview="Reply from 9360239398 to User A",
+        )
+
+        # Create messages in User B's conversation (same remote contact!)
+        msg_b_out = WhatsAppMessage.objects.create(
+            conversation=self.conv_b,
+            waha_message_id="msg_b_out_1",
+            idempotency_key="idemp_b_out_1",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            full_body="Hello from User B to 9360239398",
+            body_preview="Hello from User B to 9360239398",
+        )
+        msg_b_in = WhatsAppMessage.objects.create(
+            conversation=self.conv_b,
+            waha_message_id="msg_b_in_1",
+            idempotency_key="idemp_b_in_1",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            full_body="Reply from 9360239398 to User B",
+            body_preview="Reply from 9360239398 to User B",
+        )
+
+        # 1. User A retrieves messages from conv_a -> must see ONLY User A's messages
+        self.client.force_authenticate(user=self.user_a)
+        resp_a = self.client.get(f"/api/whatsapp/conversations/{self.conv_a.id}/messages/")
+        self.assertEqual(resp_a.status_code, status.HTTP_200_OK)
+        returned_bodies_a = [m["full_body"] for m in resp_a.data.get("messages", [])]
+        self.assertIn("Hello from User A to 9360239398", returned_bodies_a)
+        self.assertIn("Reply from 9360239398 to User A", returned_bodies_a)
+        self.assertNotIn("Hello from User B to 9360239398", returned_bodies_a)
+        self.assertNotIn("Reply from 9360239398 to User B", returned_bodies_a)
+
+        # 2. User A attempts to retrieve messages from conv_b -> 404 Forbidden/Not Found
+        resp_a_forbidden = self.client.get(f"/api/whatsapp/conversations/{self.conv_b.id}/messages/")
+        self.assertEqual(resp_a_forbidden.status_code, status.HTTP_404_NOT_FOUND)
+
+        # 3. User B retrieves messages from conv_b -> must see ONLY User B's messages
+        self.client.force_authenticate(user=self.user_b)
+        resp_b = self.client.get(f"/api/whatsapp/conversations/{self.conv_b.id}/messages/")
+        self.assertEqual(resp_b.status_code, status.HTTP_200_OK)
+        returned_bodies_b = [m["full_body"] for m in resp_b.data.get("messages", [])]
+        self.assertIn("Hello from User B to 9360239398", returned_bodies_b)
+        self.assertIn("Reply from 9360239398 to User B", returned_bodies_b)
+        self.assertNotIn("Hello from User A to 9360239398", returned_bodies_b)
+        self.assertNotIn("Reply from 9360239398 to User A", returned_bodies_b)
+
+        # 4. User B attempts to retrieve messages from conv_a -> 404 Forbidden/Not Found
+        resp_b_forbidden = self.client.get(f"/api/whatsapp/conversations/{self.conv_a.id}/messages/")
+        self.assertEqual(resp_b_forbidden.status_code, status.HTTP_404_NOT_FOUND)
+
+    # Test B: Inbound webhook message routing strictly isolated by session
+    def test_webhook_inbound_message_isolated_to_target_session(self):
+        payload_a = {
+            "event": "message",
+            "session": self.session_a.session_name,
+            "payload": {
+                "id": "false_9360239398@c.us_inbound_msg_a",
+                "from": self.remote_chat_id,
+                "to": "919003619221@c.us",
+                "body": "Confidential message for User A only",
+                "fromMe": False,
+                "timestamp": 1700000100,
+            },
+        }
+        resp_a = self._post_signed_webhook(payload_a)
+        self.assertEqual(resp_a.status_code, status.HTTP_200_OK)
+
+        payload_b = {
+            "event": "message",
+            "session": self.session_b.session_name,
+            "payload": {
+                "id": "false_9360239398@c.us_inbound_msg_b",
+                "from": self.remote_chat_id,
+                "to": "919876543210@c.us",
+                "body": "Confidential message for User B only",
+                "fromMe": False,
+                "timestamp": 1700000200,
+            },
+        }
+        resp_b = self._post_signed_webhook(payload_b)
+        self.assertEqual(resp_b.status_code, status.HTTP_200_OK)
+
+        # Messages in User A's conversation must have ONLY User A's message
+        messages_a = list(self.conv_a.messages.values_list("full_body", flat=True))
+        self.assertIn("Confidential message for User A only", messages_a)
+        self.assertNotIn("Confidential message for User B only", messages_a)
+
+        # Messages in User B's conversation must have ONLY User B's message
+        messages_b = list(self.conv_b.messages.values_list("full_body", flat=True))
+        self.assertIn("Confidential message for User B only", messages_b)
+        self.assertNotIn("Confidential message for User A only", messages_b)
+
+    # Test C: Message ACK routing isolated to originating session
+    def test_message_ack_isolated_to_originating_session(self):
+        # Both conversations have an outbound message with identical raw ID
+        msg_a = WhatsAppMessage.objects.create(
+            conversation=self.conv_a,
+            waha_message_id="ack_test_id_100",
+            idempotency_key="idemp_ack_a_100",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            full_body="User A outbound message",
+        )
+        msg_b = WhatsAppMessage.objects.create(
+            conversation=self.conv_b,
+            waha_message_id="ack_test_id_100",
+            idempotency_key="idemp_ack_b_100",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            full_body="User B outbound message",
+        )
+
+        # ACK arrives for User A's session: ack=3 (DELIVERED)
+        ack_payload = {
+            "event": "message.ack",
+            "session": self.session_a.session_name,
+            "payload": {
+                "id": f"true_{self.remote_chat_id}_ack_test_id_100",
+                "rawId": "ack_test_id_100",
+                "ack": 3,
+                "ackName": "DEVICE",
+                "fromMe": True,
+                "to": self.remote_chat_id,
+            },
+        }
+        resp = self._post_signed_webhook(ack_payload)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # User A's message must be updated to DELIVERED
+        msg_a.refresh_from_db()
+        self.assertEqual(msg_a.status, WhatsAppMessage.Status.DELIVERED)
+
+        # User B's message must REMAIN SENT (untouched)
+        msg_b.refresh_from_db()
+        self.assertEqual(msg_b.status, WhatsAppMessage.Status.SENT)
+
+    # Test D: Monotonic delivery status transitions (Ticks: SENT -> DELIVERED -> READ)
+    def test_monotonic_message_status_ticks(self):
+        msg = WhatsAppMessage.objects.create(
+            conversation=self.conv_a,
+            waha_message_id="monotonic_msg_200",
+            idempotency_key="idemp_monotonic_200",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.PENDING,
+            full_body="Tick transition test message",
+        )
+
+        def send_ack(ack_code, ack_name):
+            return self._post_signed_webhook({
+                "event": "message.ack",
+                "session": self.session_a.session_name,
+                "payload": {
+                    "id": f"true_{self.remote_chat_id}_monotonic_msg_200",
+                    "rawId": "monotonic_msg_200",
+                    "ack": ack_code,
+                    "ackName": ack_name,
+                    "fromMe": True,
+                    "to": self.remote_chat_id,
+                },
+            })
+
+        # 1. PENDING -> SENT (ack=2, SERVER)
+        resp = send_ack(2, "SERVER")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, WhatsAppMessage.Status.SENT)
+
+        # 2. SENT -> DELIVERED (ack=3, DEVICE)
+        resp = send_ack(3, "DEVICE")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, WhatsAppMessage.Status.DELIVERED)
+
+        # 3. DELIVERED -> READ (ack=4, READ)
+        resp = send_ack(4, "READ")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, WhatsAppMessage.Status.READ)
+
+        # 4. Out-of-order delayed ack 2 (SENT) arrives -> status must NOT regress!
+        resp = send_ack(2, "SERVER")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, WhatsAppMessage.Status.READ)
+
+        # 5. Out-of-order delayed ack 3 (DELIVERED) arrives -> status must NOT regress!
+        resp = send_ack(3, "DEVICE")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, WhatsAppMessage.Status.READ)
+
+    # Test E: Webhook strictly rejects payload missing session
+    def test_webhook_rejects_missing_session(self):
+        payload_no_session = {
+            "event": "message",
+            "payload": {
+                "id": "false_9360239398@c.us_no_session",
+                "from": self.remote_chat_id,
+                "to": "919003619221@c.us",
+                "body": "Should fail",
+                "fromMe": False,
+            },
+        }
+        resp = self._post_signed_webhook(payload_no_session)
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # Test F: Webhook strictly rejects unknown session name without affecting DB
+    def test_webhook_rejects_unknown_session(self):
+        payload_unknown_session = {
+            "event": "message",
+            "session": "non_existent_rogue_session",
+            "payload": {
+                "id": "false_9360239398@c.us_unknown_session",
+                "from": self.remote_chat_id,
+                "to": "919003619221@c.us",
+                "body": "Should be rejected cleanly",
+                "fromMe": False,
+            },
+        }
+        resp = self._post_signed_webhook(payload_unknown_session)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # Verify no message was created for unknown session
+        self.assertFalse(WhatsAppMessage.objects.filter(full_body="Should be rejected cleanly").exists())
+
+

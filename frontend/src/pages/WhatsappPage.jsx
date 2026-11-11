@@ -3174,6 +3174,10 @@ export default function WhatsappPage() {
                                   <CheckCheck className="w-3.5 h-3.5 text-slate-400" />
                                 ) : msg.status === 'SENT' ? (
                                   <Check className="w-3.5 h-3.5 text-slate-400" />
+                                ) : msg.status === 'FAILED' ? (
+                                  <AlertCircle className="w-3.5 h-3.5 text-red-500" title="Message failed to send" />
+                                ) : msg.status === 'BLOCKED' ? (
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-500" title="Message blocked" />
                                 ) : (
                                   <Clock className="w-3 h-3 text-slate-400" />
                                 )}
