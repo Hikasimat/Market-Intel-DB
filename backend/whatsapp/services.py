@@ -465,34 +465,43 @@ def send_whatsapp_message(
     # ------------------------------------------------------------------
     opt_out = WhatsAppOptOut.objects.filter(phone_digits=phone, is_active=True).first()
     if opt_out:
-        session = _get_or_create_session(session_name)
-        session.opt_out_count = models_f("opt_out_count") + 1 if hasattr(session, "_counter") else session.opt_out_count + 1
-        session.save(update_fields=["opt_out_count"])
+        if intent_tag in ("manual", "direct") and opt_out.reason == WhatsAppOptOut.Reason.INCOMING_KEYWORD:
+            # Auto-reverse false positive keyword opt-out for manual agent conversation
+            opt_out.is_active = False
+            opt_out.reversed_by = performed_by
+            opt_out.reversed_at = timezone.now()
+            opt_out.reversal_reason = "Manual agent outreach override"
+            opt_out.save(update_fields=["is_active", "reversed_by", "reversed_at", "reversal_reason"])
+            opt_out = None
+        else:
+            session = _get_or_create_session(session_name)
+            session.opt_out_count = models_f("opt_out_count") + 1 if hasattr(session, "_counter") else session.opt_out_count + 1
+            session.save(update_fields=["opt_out_count"])
 
-        WhatsAppSafetyEvent.objects.create(
-            event_type=WhatsAppSafetyEvent.EventType.OPT_OUT_BLOCKED,
-            triggered_by=performed_by,
-            prospect_contact=prospect_contact,
-            details=f"Recipient {phone} has opted out.",
-        )
+            WhatsAppSafetyEvent.objects.create(
+                event_type=WhatsAppSafetyEvent.EventType.OPT_OUT_BLOCKED,
+                triggered_by=performed_by,
+                prospect_contact=prospect_contact,
+                details=f"Recipient {phone} has opted out.",
+            )
 
-        _write_audit_log(
-            action=WhatsAppAuditLog.Action.SEND_BLOCKED,
-            performed_by=performed_by,
-            prospect_contact=prospect_contact,
-            session_name=session_name,
-            chat_id=chat_id,
-            success=False,
-            result_code="WA_OPT_OUT",
-            result_detail="Recipient has opted out.",
-            request_id=request_id,
-            ip_address=ip_address,
-        )
+            _write_audit_log(
+                action=WhatsAppAuditLog.Action.SEND_BLOCKED,
+                performed_by=performed_by,
+                prospect_contact=prospect_contact,
+                session_name=session_name,
+                chat_id=chat_id,
+                success=False,
+                result_code="WA_OPT_OUT",
+                result_detail="Recipient has opted out.",
+                request_id=request_id,
+                ip_address=ip_address,
+            )
 
-        raise WhatsAppBlockedError(
-            "This recipient has opted out of WhatsApp messages.",
-            code="WA_OPT_OUT",
-        )
+            raise WhatsAppBlockedError(
+                "This recipient has opted out of WhatsApp messages.",
+                code="WA_OPT_OUT",
+            )
 
     # ------------------------------------------------------------------
     # GUARD 7: Recipient cooldown (only for automated/bulk sends, not manual 1-on-1 chat)
@@ -988,27 +997,36 @@ def register_opt_out(
     return opt_out
 
 
+OPT_OUT_STANDALONE_PATTERN = re.compile(
+    r"^\s*(stop|unsubscribe|cancel|quit|remove\s+me|dont\s+contact|do\s+not\s+contact|optout|opt\s+out|no\s+more)\s*[\.!\?]*\s*$",
+    re.IGNORECASE,
+)
+
+
 def check_incoming_for_opt_out(message_body: str, phone_digits: str, prospect_contact=None) -> bool:
     """
-    Check if an incoming message contains an opt-out keyword.
-
-    Returns True if opt-out was registered, False otherwise.
+    Check if an incoming message contains an opt-out command.
+    Strictly matches standalone commands only (e.g. 'stop', 'unsubscribe') so normal
+    conversational text containing words like 'stop' is never falsely marked as opted out.
     """
-    body_lower = message_body.strip().lower()
+    if not message_body or not phone_digits:
+        return False
+    if len(phone_digits) < 7:
+        return False
 
-    for keyword in OPT_OUT_KEYWORDS:
-        if keyword in body_lower or body_lower == keyword:
-            register_opt_out(
-                phone_digits=phone_digits,
-                reason=WhatsAppOptOut.Reason.INCOMING_KEYWORD,
-                prospect_contact=prospect_contact,
-                trigger_message=message_body[:500],
-            )
-            logger.info(
-                "Opt-out keyword detected from %s. Keyword match: %r",
-                phone_digits,
-                keyword,
-            )
-            return True
+    body_trimmed = message_body.strip()
+    if OPT_OUT_STANDALONE_PATTERN.match(body_trimmed):
+        register_opt_out(
+            phone_digits=phone_digits,
+            reason=WhatsAppOptOut.Reason.INCOMING_KEYWORD,
+            prospect_contact=prospect_contact,
+            trigger_message=message_body[:500],
+        )
+        logger.info(
+            "Opt-out keyword detected from %s. Keyword match: %r",
+            phone_digits,
+            body_trimmed,
+        )
+        return True
 
     return False

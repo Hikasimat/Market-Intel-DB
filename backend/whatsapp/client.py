@@ -723,6 +723,39 @@ class WAHAClient:
         )
         return body
 
+    def edit_message(
+        self,
+        session_name: str,
+        chat_id: str,
+        message_id: str,
+        new_text: str,
+    ) -> dict:
+        """Edit a previously sent message via WAHA."""
+        endpoints = [
+            f"/api/{session_name}/editText",
+            "/api/editText",
+            "/api/editMessage",
+        ]
+        payload = {
+            "session": session_name,
+            "chatId": chat_id,
+            "messageId": message_id,
+            "text": new_text,
+        }
+        for ep in endpoints:
+            try:
+                _status, body = self._request(
+                    "POST",
+                    ep,
+                    payload=payload,
+                    timeout=8.0,
+                )
+                if _status in (200, 201) and isinstance(body, dict):
+                    return body
+            except Exception:
+                continue
+        return {}
+
     # -- Groups --------------------------------------------------------------
 
     def create_group(self, session_name: str, name: str, participants: list) -> dict:

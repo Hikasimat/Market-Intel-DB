@@ -557,6 +557,8 @@ export default function WhatsappPage() {
   const [showMentionPopup, setShowMentionPopup] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [selectedMentions, setSelectedMentions] = useState([]);
+  const [editingMessage, setEditingMessage] = useState(null);
+  const [editingText, setEditingText] = useState('');
 
   const mentionCandidates = (wahaContact?.members || []).filter(m => {
     if (!mentionQuery) return true;
@@ -944,8 +946,61 @@ export default function WhatsappPage() {
       }
     } catch (error) {
       console.error('Failed to send message:', error);
-      showToast(error.response?.data?.detail || 'Failed to send message.', 'error');
+      const errDetail = error.response?.data?.detail || '';
+      const errCode = error.response?.data?.code || '';
+      if (errCode === 'WA_OPT_OUT' || errDetail.includes('opted out')) {
+        try {
+          await api.post('/whatsapp/opt-outs/clear/', {
+            chat_id: selectedChat.chat_id,
+            phone: selectedChat.phone_number,
+          });
+          const retryRes = await api.post('/whatsapp/send/', {
+            prospect_contact_id: selectedChat.prospect_contact || null,
+            chat_id: selectedChat.chat_id,
+            message_body: body,
+            reply_to: replyId,
+            mentions: mentionsToSend,
+          });
+          setMessages(prev => [...prev, retryRes.data]);
+          setTimeout(scrollToBottom, 100);
+          showToast('Recipient unblocked & message delivered.', 'success');
+          return;
+        } catch (_) {}
+      }
+      showToast(errDetail || 'Failed to send message.', 'error');
     }
+  };
+
+  const handleStartEdit = (msg) => {
+    setEditingMessage(msg);
+    setEditingText(msg.full_body || msg.body_preview || '');
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingMessage || !editingText.trim()) return;
+    try {
+      const res = await api.post(`/whatsapp/messages/${editingMessage.id}/edit/`, {
+        text: editingText.trim(),
+      });
+      const updated = res.data;
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === editingMessage.id
+            ? { ...m, full_body: updated.full_body, body_preview: updated.body_preview, is_edited: true }
+            : m
+        )
+      );
+      showToast('Message edited successfully.', 'success');
+      setEditingMessage(null);
+      setEditingText('');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to edit message', 'error');
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessage(null);
+    setEditingText('');
   };
 
   const handleForwardToChat = async (targetChat) => {
@@ -2295,6 +2350,18 @@ export default function WhatsappPage() {
                     return text.includes(msgSearchQuery.toLowerCase());
                   })
                   .map(msg => {
+                    if (msg.message_type === 'notification') {
+                      return (
+                        <div key={msg.id} className="flex justify-center my-2 select-none">
+                          <div className="bg-white/80 backdrop-blur-sm border border-slate-200/60 shadow-xs rounded-lg px-3 py-1 text-center max-w-[85%]">
+                            <span className="text-[11px] font-medium text-slate-500">
+                              {msg.full_body || msg.body_preview}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    }
+
                     const isMe = msg.direction === 'OUTBOUND';
                     const proxySrc = buildMediaSrc(msg);
                     const mime = msg.media_mime_type || '';
@@ -2441,6 +2508,11 @@ export default function WhatsappPage() {
 
                           {/* Footer with Timestamp and Status Ticks */}
                           <div className="flex items-center justify-end gap-1 mt-1 select-none">
+                            {msg.is_edited && (
+                              <span className="text-[10px] text-slate-400 italic mr-0.5">
+                                (edited)
+                              </span>
+                            )}
                             <span className="text-[10px] text-slate-500 font-medium">
                               {formatMessageTime(msg.waha_timestamp || msg.sent_at || msg.created_at)}
                             </span>
@@ -2464,16 +2536,56 @@ export default function WhatsappPage() {
                             )}
                           </div>
 
-                          {/* Delete on hover for own messages */}
-                          {isMe && (
-                            <button
-                              onClick={() => handleDeleteMessage(msg.id)}
-                              className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-red-500 flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow"
-                              title="Delete message"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          )}
+                          {/* Action Bar on hover */}
+                          <div className={`absolute -top-3.5 ${isMe ? 'right-2' : 'left-2'} z-10 flex items-center gap-0.5 bg-white border border-slate-200/80 rounded-full px-1.5 py-0.5 shadow-md opacity-0 group-hover:opacity-100 transition-opacity duration-150`}>
+                            {/* Reply button */}
+                            {msg.message_type !== 'call' && (
+                              <button
+                                type="button"
+                                onClick={() => setReplyingToMessage(msg)}
+                                className="p-1 rounded-full text-slate-400 hover:text-emerald-600 hover:bg-slate-100 transition"
+                                title="Reply"
+                              >
+                                <Reply className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {/* Forward button */}
+                            {msg.message_type !== 'call' && (
+                              <button
+                                type="button"
+                                onClick={() => { setForwardingMessage(msg); setShowForwardModal(true); }}
+                                className="p-1 rounded-full text-slate-400 hover:text-blue-600 hover:bg-slate-100 transition"
+                                title="Forward"
+                              >
+                                <Share2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {/* Edit button (only for own text messages) */}
+                            {isMe && msg.message_type !== 'call' && !msg.has_media && (
+                              <button
+                                type="button"
+                                onClick={() => handleStartEdit(msg)}
+                                className="p-1 rounded-full text-slate-400 hover:text-emerald-600 hover:bg-slate-100 transition"
+                                title="Edit message"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {/* Delete button (only for own messages) */}
+                            {isMe && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteMessage(msg.id)}
+                                className="p-1 rounded-full text-slate-400 hover:text-red-500 hover:bg-slate-100 transition"
+                                title="Delete message"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     );
@@ -2606,6 +2718,47 @@ export default function WhatsappPage() {
                 </div>
               )}
 
+              {/* Replying Preview Banner */}
+              {replyingToMessage && (
+                <div className="mb-2 p-2.5 bg-white border-l-4 border-emerald-500 rounded-xl shadow-sm flex items-center justify-between animate-in fade-in duration-150">
+                  <div className="flex-1 min-w-0 pr-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600">
+                      <Reply className="w-3.5 h-3.5" />
+                      <span>Replying to {replyingToMessage.direction === 'OUTBOUND' ? 'You' : (replyingToMessage.performed_by_name || selectedChat?.whatsapp_name || 'Contact')}</span>
+                    </div>
+                    <p className="text-xs text-slate-600 truncate mt-0.5">
+                      {replyingToMessage.full_body || replyingToMessage.body_preview || (replyingToMessage.has_media ? '[Media]' : '')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setReplyingToMessage(null)}
+                    className="p-1 text-slate-400 hover:text-red-500 transition"
+                    title="Cancel reply"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {/* @Mentions Dropdown Popup */}
+              {showMentionPopup && mentionCandidates.length > 0 && (
+                <div className="absolute bottom-16 left-12 z-50 bg-white border border-slate-200 rounded-xl shadow-xl w-64 max-h-48 overflow-y-auto p-1 animate-in fade-in duration-150">
+                  <div className="px-2 py-1 text-[11px] font-bold text-slate-400 uppercase">Mention Member</div>
+                  {mentionCandidates.map(m => (
+                    <button
+                      key={m.id || m.phoneNumber}
+                      type="button"
+                      onClick={() => handleSelectMention(m)}
+                      className="w-full text-left px-2.5 py-1.5 hover:bg-emerald-50 rounded-lg flex items-center justify-between text-xs transition"
+                    >
+                      <span className="font-semibold text-slate-800">{m.name || m.phoneNumber}</span>
+                      {m.phoneNumber && <span className="text-[10px] text-slate-400 font-mono">{m.phoneNumber}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {/* Main Input Row */}
               <div className="flex items-center gap-2">
                 
@@ -2657,7 +2810,23 @@ export default function WhatsappPage() {
                       type="text"
                       placeholder="Type a message"
                       value={message}
-                      onChange={e => setMessage(e.target.value)}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setMessage(val);
+                        const isGrp = selectedChat?.is_group || selectedChat?.chat_id?.endsWith('@g.us');
+                        if (isGrp) {
+                          const atIdx = val.lastIndexOf('@');
+                          if (atIdx !== -1 && (atIdx === 0 || val[atIdx - 1] === ' ')) {
+                            const query = val.slice(atIdx + 1);
+                            if (!query.includes(' ')) {
+                              setShowMentionPopup(true);
+                              setMentionQuery(query.toLowerCase());
+                              return;
+                            }
+                          }
+                          setShowMentionPopup(false);
+                        }
+                      }}
                       onKeyDown={e => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
@@ -3930,6 +4099,132 @@ export default function WhatsappPage() {
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${loadingRecordings ? 'animate-spin' : ''}`} /> Refresh
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Message Modal */}
+      {editingMessage && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200 animate-in zoom-in-95 duration-150">
+            <div className="h-14 px-5 bg-[#00a884] text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Edit2 className="w-5 h-5" />
+                <h3 className="font-bold text-base">Edit Message</h3>
+              </div>
+              <button onClick={handleCancelEdit} className="text-white/80 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
+                  Message Content
+                </label>
+                <textarea
+                  value={editingText}
+                  onChange={(e) => setEditingText(e.target.value)}
+                  rows={4}
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00a884] resize-none"
+                  placeholder="Enter new message text..."
+                  autoFocus
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveEdit}
+                  disabled={!editingText.trim()}
+                  className="px-4 py-2 bg-[#00a884] hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow transition disabled:opacity-50"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Forward Message Modal */}
+      {showForwardModal && forwardingMessage && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200 animate-in zoom-in-95 duration-150 flex flex-col max-h-[80vh]">
+            <div className="h-14 px-5 bg-[#00a884] text-white flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Share2 className="w-5 h-5" />
+                <h3 className="font-bold text-base">Forward Message</h3>
+              </div>
+              <button
+                onClick={() => { setShowForwardModal(false); setForwardingMessage(null); }}
+                className="text-white/80 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 border-b border-slate-100 flex-shrink-0">
+              <div className="p-2.5 bg-slate-50 border-l-4 border-emerald-500 rounded-lg text-xs text-slate-700 truncate">
+                <span className="font-bold text-emerald-700">Forwarding: </span>
+                {forwardingMessage.full_body || forwardingMessage.body_preview || (forwardingMessage.has_media ? '[Media]' : '')}
+              </div>
+              <div className="mt-3 relative">
+                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search chats to forward to..."
+                  value={forwardSearchQuery}
+                  onChange={(e) => setForwardSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 bg-slate-100 border-none rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1 divide-y divide-slate-100 p-2">
+              {chats
+                .filter(c => (c.whatsapp_name || c.chat_id || c.phone_number || '').toLowerCase().includes(forwardSearchQuery.toLowerCase()))
+                .map(c => (
+                  <div
+                    key={c.id}
+                    onClick={async () => {
+                      await handleForwardToChat(c);
+                      setShowForwardModal(false);
+                      setForwardingMessage(null);
+                    }}
+                    className="flex items-center justify-between p-2.5 hover:bg-slate-50 rounded-xl cursor-pointer transition"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                        {c.is_group || c.chat_id?.endsWith('@g.us') ? (
+                          <Users className="w-5 h-5 text-emerald-600" />
+                        ) : (
+                          (c.whatsapp_name || c.phone_number || 'U').slice(0, 2).toUpperCase()
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-slate-800 truncate">
+                          {c.whatsapp_name || c.phone_number || c.chat_id}
+                        </p>
+                        <p className="text-[10px] text-slate-400 truncate">
+                          {c.is_group || c.chat_id?.endsWith('@g.us') ? 'WhatsApp Group' : (c.phone_number || c.chat_id)}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="px-3 py-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-lg text-xs font-semibold transition"
+                    >
+                      Send
+                    </button>
+                  </div>
+                ))}
             </div>
           </div>
         </div>

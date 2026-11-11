@@ -44,6 +44,8 @@ from .views import (
     WhatsAppMarkReadView,
     WhatsAppMediaProxyView,
     WhatsAppMessageDeleteView,
+    WhatsAppMessageEditView,
+    WhatsAppClearOptOutView,
     WhatsAppOptOutsView,
     WhatsAppPairingCodeView,
     WhatsAppProfilePicView,
@@ -138,6 +140,11 @@ urlpatterns = [
 
     # -- Message management ------------------------------------------------
     path(
+        "messages/<uuid:message_id>/edit/",
+        WhatsAppMessageEditView.as_view(),
+        name="whatsapp-message-edit",
+    ),
+    path(
         "messages/<uuid:message_id>/",
         WhatsAppMessageDeleteView.as_view(),
         name="whatsapp-message-delete",
@@ -155,6 +162,7 @@ urlpatterns = [
     # -- Monitoring / Audit (Manager / Super Admin) ---------------------------
     path("safety-events/", WhatsAppSafetyEventsView.as_view(), name="whatsapp-safety-events"),
     path("audit-log/", WhatsAppAuditLogView.as_view(), name="whatsapp-audit-log"),
+    path("opt-outs/clear/", WhatsAppClearOptOutView.as_view(), name="whatsapp-opt-outs-clear"),
     path("opt-outs/", WhatsAppOptOutsView.as_view(), name="whatsapp-opt-outs"),
 
     # -- Voice Calling (WAHA / WaCalls WebRTC VoIP) ---------------------------

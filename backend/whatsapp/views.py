@@ -1325,8 +1325,8 @@ class WhatsAppConversationMessagesView(APIView):
             is_deleted=False,
         )
 
-        # If opening a group conversation with 0 messages, trigger an opportunistic quick history sync from WAHA
-        if conv.chat_id.endswith("@g.us") and not base_qs.exists() and conv.session and conv.session.session_name:
+        # Opportunistic quick history sync from WAHA for groups or empty conversations
+        if conv.session and conv.session.session_name and (conv.chat_id.endswith("@g.us") or not base_qs.exists()):
             try:
                 from .webhooks import sync_two_day_whatsapp_history
                 sync_two_day_whatsapp_history(
@@ -1562,6 +1562,102 @@ class WhatsAppMessageDeleteView(APIView):
         )
 
         return Response({"detail": "Message deleted."}, status=status.HTTP_200_OK)
+
+
+class WhatsAppMessageEditView(APIView):
+    """
+    Edit a previously sent WhatsApp message.
+    Only the message sender (performed_by) or session owner may edit it.
+    POST /api/whatsapp/messages/<uuid:message_id>/edit/
+    Body: {"text": "new message text"}
+    """
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def post(self, request, message_id):
+        new_text = str(request.data.get("text") or "").strip()
+        if not new_text:
+            return Response({"detail": "Message text cannot be empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            msg = WhatsAppMessage.objects.select_related(
+                "conversation", "conversation__session"
+            ).get(pk=message_id)
+        except WhatsAppMessage.DoesNotExist:
+            return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if msg.is_deleted:
+            return Response({"detail": "Cannot edit a deleted message."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if msg.direction != WhatsAppMessage.Direction.OUTBOUND:
+            return Response({"detail": "Can only edit messages sent by you."}, status=status.HTTP_400_BAD_REQUEST)
+
+        conv = msg.conversation
+        if not conv or not conv.session:
+            return Response({"detail": "Conversation session not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if conv.session.owner != request.user and msg.performed_by != request.user:
+            return Response({"detail": "You do not have permission to edit this message."}, status=status.HTTP_403_FORBIDDEN)
+
+        session_name = conv.session.session_name
+        chat_id = conv.chat_id
+
+        # Update in WAHA / Baileys socket if waha_message_id is known
+        if msg.waha_message_id:
+            try:
+                from .client import get_waha_client
+                client = get_waha_client()
+                client.edit_message(session_name, chat_id, msg.waha_message_id, new_text)
+            except Exception as e:
+                logger.warning("Failed to propagate edit to WAHA: %s", e)
+
+        # Update message in DB
+        msg.full_body = new_text
+        msg.body_preview = new_text[:200]
+        msg.body_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+        msg.save(update_fields=["full_body", "body_preview", "body_hash"])
+
+        # Update conversation preview if this was the latest message
+        if conv.last_message_at and (not msg.waha_timestamp or conv.last_message_at <= (msg.waha_timestamp or msg.sent_at or msg.created_at)):
+            conv.last_message_preview = new_text[:200]
+            conv.save(update_fields=["last_message_preview"])
+
+        _write_audit_log(
+            action=WhatsAppAuditLog.Action.MESSAGE_SENT,
+            performed_by=request.user,
+            session_name=session_name,
+            chat_id=chat_id,
+            message_id=msg.pk,
+            success=True,
+            result_detail="Message edited.",
+        )
+
+        return Response(WhatsAppMessageSerializer(msg).data, status=status.HTTP_200_OK)
+
+
+class WhatsAppClearOptOutView(APIView):
+    """
+    Clear/deactivate opt-out status for a specific phone number or contact so sending is restored.
+    POST /api/whatsapp/opt-outs/clear/
+    Body: {"phone": "+919360239398"} or {"chat_id": "9360239398@c.us"}
+    """
+    permission_classes = [IsAuthenticated, CanSendWhatsApp]
+
+    def post(self, request):
+        phone = (request.data.get("phone") or request.data.get("chat_id") or "").strip()
+        digits = re.sub(r"\D+", "", phone)
+        if len(digits) >= 8:
+            suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+            deactivated = WhatsAppOptOut.objects.filter(
+                Q(phone_digits__endswith=suffix) | Q(phone_digits=digits),
+                is_active=True,
+            ).update(
+                is_active=False,
+                reversed_by=request.user,
+                reversed_at=timezone.now(),
+                reversal_reason="Manual agent unblock",
+            )
+            return Response({"detail": f"Opt-out cleared for {phone}.", "count": deactivated})
+        return Response({"detail": "Invalid phone number."}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class WhatsAppMarkReadView(APIView):
@@ -2116,319 +2212,339 @@ class WhatsAppContactInfoView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request, chat_id):
-        user_session = _get_user_session(request.user, create=True)
-        # Strictly scope conversation lookup to current user's session
-        conv = WhatsAppConversation.objects.filter(
-            chat_id=chat_id,
-            session=user_session,
-        ).select_related("prospect_contact", "prospect").first()
-        if not conv and user_session and user_session.owner:
-            conv = WhatsAppConversation.objects.filter(
-                chat_id=chat_id,
-                session__owner=user_session.owner,
-            ).select_related("prospect_contact", "prospect").first()
+        try:
+            user_session = _get_user_session(request.user, create=True)
+            # Strictly scope conversation lookup to current user's session
+            conv = None
+            if user_session:
+                conv = WhatsAppConversation.objects.filter(
+                    chat_id=chat_id,
+                    session=user_session,
+                ).select_related("prospect_contact", "prospect").first()
+            if not conv and user_session and user_session.owner:
+                conv = WhatsAppConversation.objects.filter(
+                    chat_id=chat_id,
+                    session__owner=user_session.owner,
+                ).select_related("prospect_contact", "prospect").first()
 
-        clean_phone = chat_id.split("@")[0].split(":")[0]
-        contact = conv.prospect_contact if conv else None
-        prospect = (conv.prospect or (contact.prospect if contact else None)) if conv else None
-        is_group = chat_id.endswith("@g.us") or (conv and conv.chat_id.endswith("@g.us"))
+            clean_phone = chat_id.split("@")[0].split(":")[0]
+            contact = conv.prospect_contact if conv else None
+            prospect = (conv.prospect or (contact.prospect if contact else None)) if conv else None
+            is_group = chat_id.endswith("@g.us") or (conv and conv.chat_id.endswith("@g.us"))
 
-        if not contact and not is_group:
-            # Fallback: search ProspectContact by indexed phone digits
-            digits = re.sub(r"\D+", "", clean_phone)
-            if len(digits) >= 8:
-                suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-                contact = (
-                    ProspectContact.objects.filter(phone_digits__endswith=suffix)
-                    .select_related("prospect")
-                    .first()
-                )
-                if not contact:
-                    for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                        stored = re.sub(r"\D+", "", pc.phone_number or "")
-                        if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
-                            contact = pc
-                            break
-                if contact and not prospect:
-                    prospect = contact.prospect
+            if not contact and not is_group:
+                # Fallback: search ProspectContact by indexed phone digits
+                digits = re.sub(r"\D+", "", clean_phone)
+                if len(digits) >= 8 and not _is_lid(digits):
+                    suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+                    contact = (
+                        ProspectContact.objects.filter(phone_digits__endswith=suffix)
+                        .select_related("prospect")
+                        .first()
+                    )
+                    if not contact:
+                        for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                            stored = re.sub(r"\D+", "", pc.phone_number or "")
+                            if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
+                                contact = pc
+                                break
+                    if contact and not prospect:
+                        prospect = contact.prospect
 
-        # -------------------------------------------------------------------
-        # Build Associated Members List
-        # -------------------------------------------------------------------
-        members = []
-        seen_member_phones = set()
+            # -------------------------------------------------------------------
+            # Build Associated Members List
+            # -------------------------------------------------------------------
+            members = []
+            seen_member_phones = set()
 
-        if is_group:
-            # 1. Fetch group participants from WAHA
-            from .client import get_waha_client
-            client = get_waha_client()
-            group_info = {}
-            try:
-                group_info = client.get_group_info(user_session.session_name, chat_id)
-            except Exception as e:
-                logger.debug("Failed to get group info from WAHA for %s: %s", chat_id, e)
-
-            # Known phone numbers & profiles for resolution
-            current_user_phone = re.sub(r"\D+", "", user_session.phone_number or "")
+            sess_name = user_session.session_name if user_session else "default"
+            current_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
             current_user_name = (
                 request.user.get_full_name()
                 or request.user.first_name
-                or user_session.whatsapp_name
+                or (user_session.whatsapp_name if user_session else "")
                 or "You"
             )
 
-            # Metadata from conversation (stored participants & lid_map)
-            conv_meta = (conv.metadata if (conv and isinstance(conv.metadata, dict)) else {}) or {}
-            lid_map = conv_meta.get("lid_map") or {}
-            stored_participants = [
-                re.sub(r"\D+", "", str(p))
-                for p in (conv_meta.get("participants") or [])
-                if re.sub(r"\D+", "", str(p))
-            ]
+            if is_group:
+                # 1. Fetch group participants from WAHA
+                from .client import get_waha_client
+                client = get_waha_client()
+                group_info = {}
+                try:
+                    group_info = client.get_group_info(sess_name, chat_id)
+                except Exception as e:
+                    logger.debug("Failed to get group info from WAHA for %s: %s", chat_id, e)
 
-            # Conversation direct contact or prospect phone
-            conv_phone_digits = ""
-            if conv and conv.phone_number:
-                cp_d = re.sub(r"\D+", "", str(conv.phone_number))
-                if 8 <= len(cp_d) <= 13:
-                    conv_phone_digits = cp_d
+                # Metadata from conversation (stored participants & lid_map)
+                conv_meta = (conv.metadata if (conv and isinstance(conv.metadata, dict)) else {}) or {}
+                lid_map = conv_meta.get("lid_map") or {}
+                stored_participants = [
+                    re.sub(r"\D+", "", str(p))
+                    for p in (conv_meta.get("participants") or [])
+                    if re.sub(r"\D+", "", str(p))
+                ]
 
-            # CRM contacts associated with the group/prospect
-            crm_contacts = []
-            if contact:
-                crm_contacts.append(contact)
-            if prospect:
-                for pc in ProspectContact.objects.filter(prospect=prospect).select_related("prospect"):
-                    if pc not in crm_contacts:
-                        crm_contacts.append(pc)
+                # Conversation direct contact or prospect phone
+                conv_phone_digits = ""
+                if conv and conv.phone_number:
+                    cp_d = re.sub(r"\D+", "", str(conv.phone_number))
+                    if 8 <= len(cp_d) <= 13:
+                        conv_phone_digits = cp_d
 
-            raw_participants = group_info.get("participants") if isinstance(group_info, dict) else []
-            group_owner = str(group_info.get("owner") or "").strip()
-            group_owner_digits = re.sub(r"\D+", "", group_owner.split("@")[0].split(":")[0])
+                # CRM contacts associated with the group/prospect
+                crm_contacts = []
+                if contact:
+                    crm_contacts.append(contact)
+                if prospect:
+                    for pc in ProspectContact.objects.filter(prospect=prospect).select_related("prospect"):
+                        if pc not in crm_contacts:
+                            crm_contacts.append(pc)
 
-            # Prepare pool of candidate phone numbers for any LID participants
-            candidate_phones = []
-            if conv_phone_digits and conv_phone_digits != current_user_phone:
-                candidate_phones.append(conv_phone_digits)
-            for sp in stored_participants:
-                if sp != current_user_phone and sp not in candidate_phones:
-                    candidate_phones.append(sp)
-            for c in crm_contacts:
-                c_d = re.sub(r"\D+", "", c.phone_number or "")
-                if 8 <= len(c_d) <= 13 and c_d != current_user_phone and c_d not in candidate_phones:
-                    candidate_phones.append(c_d)
+                raw_participants = group_info.get("participants") if isinstance(group_info, dict) else []
+                group_owner = str(group_info.get("owner") or "").strip()
+                group_owner_digits = re.sub(r"\D+", "", group_owner.split("@")[0].split(":")[0])
 
-            # Process participants from WAHA
-            for p in (raw_participants or []):
-                if not isinstance(p, dict):
-                    continue
-                p_id = str(p.get("id") or p.get("jid") or "").strip()
-                raw_digits = re.sub(r"\D+", "", p_id.split("@")[0].split(":")[0])
-                if not raw_digits or raw_digits in seen_member_phones:
-                    continue
+                # Prepare pool of candidate phone numbers for any LID participants
+                candidate_phones = []
+                if conv_phone_digits and conv_phone_digits != current_user_phone:
+                    candidate_phones.append(conv_phone_digits)
+                for sp in stored_participants:
+                    if sp != current_user_phone and sp not in candidate_phones:
+                        candidate_phones.append(sp)
+                for c in crm_contacts:
+                    c_d = re.sub(r"\D+", "", c.phone_number or "")
+                    if 8 <= len(c_d) <= 13 and c_d != current_user_phone and c_d not in candidate_phones:
+                        candidate_phones.append(c_d)
 
-                is_admin = p.get("admin") in ("admin", "superadmin")
-                is_lid = (len(raw_digits) > 13) or raw_digits.startswith(("2262", "2167", "7658")) or p_id.endswith("@lid")
+                # Process participants from WAHA
+                for p in (raw_participants or []):
+                    if not isinstance(p, dict):
+                        continue
+                    p_id = str(p.get("id") or p.get("jid") or "").strip()
+                    raw_digits = re.sub(r"\D+", "", p_id.split("@")[0].split(":")[0])
+                    if not raw_digits or raw_digits in seen_member_phones:
+                        continue
 
-                # 1. Check direct phone fields on p (if provided by WAHA or Baileys)
-                resolved_phone = None
-                for phone_field in ("phoneNumber", "phone", "jid", "user", "number", "participantPn", "senderPn"):
-                    cand = p.get(phone_field)
-                    if cand and not str(cand).endswith("@lid"):
-                        cand_d = re.sub(r"\D+", "", str(cand).split("@")[0].split(":")[0])
-                        if 8 <= len(cand_d) <= 13:
-                            resolved_phone = cand_d
-                            break
+                    is_admin = p.get("admin") in ("admin", "superadmin")
+                    is_lid = (len(raw_digits) > 13) or raw_digits.startswith(("2262", "2167", "7658")) or p_id.endswith("@lid")
 
-                # 2. If raw_digits is already a standard phone number (8-13 digits, not an LID)
-                if not resolved_phone and not is_lid and 8 <= len(raw_digits) <= 13:
-                    resolved_phone = raw_digits
-
-                # 3. Check lid_map saved on conversation
-                if not resolved_phone and raw_digits in lid_map:
-                    resolved_phone = re.sub(r"\D+", "", str(lid_map[raw_digits]))
-
-                # 4. Check if this participant is the current user's session
-                is_current_user = False
-                if (
-                    (group_owner_digits and (raw_digits == group_owner_digits or raw_digits == current_user_phone))
-                    or (current_user_phone and (resolved_phone == current_user_phone or raw_digits == current_user_phone))
-                    or (is_admin and current_user_phone and len(raw_participants) <= 2 and not any(m.get("is_current") for m in members))
-                ):
-                    is_current_user = True
-                    if current_user_phone:
-                        resolved_phone = current_user_phone
-
-                # 5. For non-current user LID participant, draw from candidate phones
-                if not resolved_phone and is_lid and not is_current_user:
-                    for cand_p in candidate_phones:
-                        if cand_p not in seen_member_phones:
-                            resolved_phone = cand_p
-                            break
-
-                # 6. If still unresolved and is_lid, check 1-on-1 chats in this session
-                if not resolved_phone and is_lid and not is_current_user:
-                    for other_c in WhatsAppConversation.objects.filter(session=user_session, is_deleted=False).exclude(chat_id__endswith="@g.us").order_by("-last_message_at")[:5]:
-                        oc_d = re.sub(r"\D+", "", other_c.phone_number or other_c.chat_id or "")
-                        if 8 <= len(oc_d) <= 13 and oc_d != current_user_phone and oc_d not in seen_member_phones:
-                            resolved_phone = oc_d
-                            break
-
-                # Match against CRM contact using resolved_phone
-                matched_crm = None
-                if resolved_phone and len(resolved_phone) >= 8:
-                    suffix = resolved_phone[-10:] if len(resolved_phone) >= 10 else resolved_phone[-8:]
-                    matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
-                    if not matched_crm:
-                        for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                            stored = re.sub(r"\D+", "", pc.phone_number or "")
-                            if stored and (stored == resolved_phone or stored.endswith(suffix)):
-                                matched_crm = pc
+                    # 1. Check direct phone fields on p (if provided by WAHA or Baileys)
+                    resolved_phone = None
+                    for phone_field in ("phoneNumber", "phone", "jid", "user", "number", "participantPn", "senderPn"):
+                        cand = p.get(phone_field)
+                        if cand and not str(cand).endswith("@lid"):
+                            cand_d = re.sub(r"\D+", "", str(cand).split("@")[0].split(":")[0])
+                            if 8 <= len(cand_d) <= 13:
+                                resolved_phone = cand_d
                                 break
 
-                # Also match against existing conversations in this session
-                matched_conv = None
-                if resolved_phone:
-                    matched_conv = WhatsAppConversation.objects.filter(
-                        session=user_session,
-                        phone_number__icontains=resolved_phone[-10:],
-                        is_deleted=False,
-                    ).exclude(chat_id__endswith="@g.us").first()
+                    # 2. If raw_digits is already a standard phone number (8-13 digits, not an LID)
+                    if not resolved_phone and not is_lid and 8 <= len(raw_digits) <= 13:
+                        resolved_phone = raw_digits
 
-                # Determine display name
-                display_name = ""
-                if is_current_user:
-                    display_name = current_user_name
-                elif matched_crm:
-                    display_name = matched_crm.contact_name
-                elif matched_conv and matched_conv.whatsapp_name:
-                    display_name = matched_conv.whatsapp_name
-                elif p.get("name") or p.get("notifyName"):
-                    display_name = p.get("name") or p.get("notifyName")
+                    # 3. Check lid_map saved on conversation
+                    if not resolved_phone and raw_digits in lid_map:
+                        resolved_phone = re.sub(r"\D+", "", str(lid_map[raw_digits]))
 
-                # Contact number formatting: NEVER use raw 14+ digit LID string
-                phone_formatted = f"+{resolved_phone}" if resolved_phone else ""
-                if not display_name:
-                    display_name = phone_formatted or (f"Member {len(members) + 1}")
+                    # 4. Check if this participant is the current user's session
+                    is_current_user = False
+                    if (
+                        (group_owner_digits and (raw_digits == group_owner_digits or raw_digits == current_user_phone))
+                        or (current_user_phone and (resolved_phone == current_user_phone or raw_digits == current_user_phone))
+                        or (is_admin and current_user_phone and len(raw_participants) <= 2 and not any(m.get("is_current") for m in members))
+                    ):
+                        is_current_user = True
+                        if current_user_phone:
+                            resolved_phone = current_user_phone
 
-                chat_jid = f"{resolved_phone}@c.us" if resolved_phone else (p_id if "@" in p_id else f"{raw_digits}@c.us")
-                phone_key = resolved_phone or raw_digits
-                seen_member_phones.add(phone_key)
+                    # 5. For non-current user LID participant, draw from candidate phones
+                    if not resolved_phone and is_lid and not is_current_user:
+                        for cand_p in candidate_phones:
+                            if cand_p not in seen_member_phones:
+                                resolved_phone = cand_p
+                                break
 
-                members.append({
-                    "id": str(matched_crm.id) if matched_crm else (phone_formatted or p_id),
-                    "chatId": chat_jid,
-                    "phoneNumber": phone_formatted,
-                    "name": display_name,
-                    "designation": matched_crm.designation if matched_crm else ("Group Admin" if is_admin else "Participant"),
-                    "official_email": matched_crm.official_email if matched_crm else "",
-                    "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else (conv.prospect.company_name if conv and conv.prospect else ""),
-                    "is_admin": is_admin,
-                    "is_current": is_current_user,
-                })
+                    # 6. If still unresolved and is_lid, check 1-on-1 chats in this session
+                    if not resolved_phone and is_lid and not is_current_user and user_session:
+                        for other_c in WhatsAppConversation.objects.filter(session=user_session, is_deleted=False).exclude(chat_id__endswith="@g.us").order_by("-last_message_at")[:5]:
+                            oc_d = re.sub(r"\D+", "", other_c.phone_number or other_c.chat_id or "")
+                            if 8 <= len(oc_d) <= 13 and oc_d != current_user_phone and oc_d not in seen_member_phones:
+                                resolved_phone = oc_d
+                                break
 
-            # If WAHA returned no participants (or offline), fallback to stored candidates and CRM
-            if not members and conv:
-                if current_user_phone:
+                    # Match against CRM contact using resolved_phone
+                    matched_crm = None
+                    if resolved_phone and len(resolved_phone) >= 8:
+                        suffix = resolved_phone[-10:] if len(resolved_phone) >= 10 else resolved_phone[-8:]
+                        matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
+                        if not matched_crm:
+                            for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
+                                stored = re.sub(r"\D+", "", pc.phone_number or "")
+                                if stored and (stored == resolved_phone or stored.endswith(suffix)):
+                                    matched_crm = pc
+                                    break
+
+                    # Also match against existing conversations in this session
+                    matched_conv = None
+                    if resolved_phone and user_session:
+                        matched_conv = WhatsAppConversation.objects.filter(
+                            session=user_session,
+                            phone_number__icontains=resolved_phone[-10:],
+                            is_deleted=False,
+                        ).exclude(chat_id__endswith="@g.us").first()
+
+                    # Determine display name
+                    display_name = ""
+                    if is_current_user:
+                        display_name = current_user_name
+                    elif matched_crm:
+                        display_name = matched_crm.contact_name
+                    elif matched_conv and matched_conv.whatsapp_name:
+                        display_name = matched_conv.whatsapp_name
+                    elif p.get("name") or p.get("notifyName"):
+                        display_name = p.get("name") or p.get("notifyName")
+
+                    # Contact number formatting: NEVER use raw 14+ digit LID string
+                    phone_formatted = f"+{resolved_phone}" if resolved_phone else ""
+                    if not display_name:
+                        display_name = phone_formatted or (f"Member {len(members) + 1}")
+
+                    chat_jid = f"{resolved_phone}@c.us" if resolved_phone else (p_id if "@" in p_id else f"{raw_digits}@c.us")
+                    phone_key = resolved_phone or raw_digits
+                    seen_member_phones.add(phone_key)
+
                     members.append({
-                        "id": current_user_phone,
-                        "chatId": f"{current_user_phone}@c.us",
-                        "phoneNumber": f"+{current_user_phone}",
-                        "name": current_user_name,
-                        "designation": "Group Admin",
-                        "official_email": "",
+                        "id": str(matched_crm.id) if matched_crm else (phone_formatted or p_id),
+                        "chatId": chat_jid,
+                        "phoneNumber": phone_formatted,
+                        "name": display_name,
+                        "designation": matched_crm.designation if matched_crm else ("Group Admin" if is_admin else "Participant"),
+                        "official_email": matched_crm.official_email if matched_crm else "",
+                        "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else (conv.prospect.company_name if conv and conv.prospect else ""),
+                        "is_admin": is_admin,
+                        "is_current": is_current_user,
+                    })
+
+                # If WAHA returned no participants (or offline), fallback to stored candidates and CRM
+                if not members and conv:
+                    if current_user_phone:
+                        members.append({
+                            "id": current_user_phone,
+                            "chatId": f"{current_user_phone}@c.us",
+                            "phoneNumber": f"+{current_user_phone}",
+                            "name": current_user_name,
+                            "designation": "Group Admin",
+                            "official_email": "",
+                            "company": "",
+                            "is_admin": True,
+                            "is_current": True,
+                        })
+                    for cand_p in candidate_phones:
+                        if cand_p == current_user_phone or cand_p in seen_member_phones:
+                            continue
+                        seen_member_phones.add(cand_p)
+                        suffix = cand_p[-10:] if len(cand_p) >= 10 else cand_p[-8:]
+                        matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
+                        members.append({
+                            "id": str(matched_crm.id) if matched_crm else cand_p,
+                            "chatId": f"{cand_p}@c.us",
+                            "phoneNumber": f"+{cand_p}",
+                            "name": matched_crm.contact_name if matched_crm else f"+{cand_p}",
+                            "designation": matched_crm.designation if matched_crm else "Participant",
+                            "official_email": matched_crm.official_email if matched_crm else "",
+                            "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else "",
+                            "is_admin": False,
+                            "is_current": False,
+                        })
+            else:
+                # 1-on-1 Contact: Fetch all Key People / Team Members from the same organization
+                if prospect:
+                    colleagues = ProspectContact.objects.filter(
+                        prospect=prospect,
+                        is_deleted=False,
+                    ).order_by("-is_primary", "contact_name")
+
+                    for col in colleagues:
+                        col_phone = re.sub(r"\D+", "", str(col.phone_number or ""))
+                        is_cur = bool(contact and col.id == contact.id)
+                        members.append({
+                            "id": str(col.id),
+                            "chatId": f"{col_phone}@c.us" if col_phone else "",
+                            "phoneNumber": col.phone_number or "",
+                            "name": col.contact_name,
+                            "designation": col.designation or ("Key Person" if col.is_primary else ""),
+                            "official_email": col.official_email or "",
+                            "company": prospect.company_name,
+                            "is_admin": False,
+                            "is_primary": bool(col.is_primary),
+                            "is_current": is_cur,
+                        })
+                elif contact:
+                    members.append({
+                        "id": str(contact.id),
+                        "chatId": f"{clean_phone}@c.us",
+                        "phoneNumber": contact.phone_number or f"+{clean_phone}",
+                        "name": contact.contact_name,
+                        "designation": contact.designation or "",
+                        "official_email": contact.official_email or "",
                         "company": "",
-                        "is_admin": True,
+                        "is_admin": False,
+                        "is_primary": False,
                         "is_current": True,
                     })
-                for cand_p in candidate_phones:
-                    if cand_p == current_user_phone or cand_p in seen_member_phones:
-                        continue
-                    seen_member_phones.add(cand_p)
-                    suffix = cand_p[-10:] if len(cand_p) >= 10 else cand_p[-8:]
-                    matched_crm = ProspectContact.objects.filter(phone_digits__endswith=suffix).select_related("prospect").first()
-                    members.append({
-                        "id": str(matched_crm.id) if matched_crm else cand_p,
-                        "chatId": f"{cand_p}@c.us",
-                        "phoneNumber": f"+{cand_p}",
-                        "name": matched_crm.contact_name if matched_crm else f"+{cand_p}",
-                        "designation": matched_crm.designation if matched_crm else "Participant",
-                        "official_email": matched_crm.official_email if matched_crm else "",
-                        "company": matched_crm.prospect.company_name if matched_crm and matched_crm.prospect else "",
-                        "is_admin": False,
-                        "is_current": False,
-                    })
-        else:
-            # 1-on-1 Contact: Fetch all Key People / Team Members from the same organization
-            if prospect:
-                colleagues = ProspectContact.objects.filter(
-                    prospect=prospect,
-                    is_deleted=False,
-                ).order_by("-is_primary", "contact_name")
 
-                for col in colleagues:
-                    col_phone = re.sub(r"\D+", "", str(col.phone_number or ""))
-                    is_cur = bool(contact and col.id == contact.id)
-                    members.append({
-                        "id": str(col.id),
-                        "chatId": f"{col_phone}@c.us" if col_phone else "",
-                        "phoneNumber": col.phone_number or "",
-                        "name": col.contact_name,
-                        "designation": col.designation or ("Key Person" if col.is_primary else ""),
-                        "official_email": col.official_email or "",
-                        "company": prospect.company_name,
-                        "is_admin": False,
-                        "is_primary": bool(col.is_primary),
-                        "is_current": is_cur,
-                    })
-            elif contact:
-                members.append({
-                    "id": str(contact.id),
-                    "chatId": f"{clean_phone}@c.us",
-                    "phoneNumber": contact.phone_number or f"+{clean_phone}",
-                    "name": contact.contact_name,
-                    "designation": contact.designation or "",
-                    "official_email": contact.official_email or "",
-                    "company": "",
-                    "is_admin": False,
-                    "is_primary": False,
-                    "is_current": True,
-                })
+            # Resolve contact mobile number: before the @c.us is the user mobile number (e.g. 9360239398@c.us -> +9360239398)
+            contact_phone = ""
+            target_jid = (conv.chat_id if conv else chat_id) or ""
+            if "@c.us" in target_jid.lower() or "@s.whatsapp.net" in target_jid.lower():
+                c_digits = re.sub(r"\D+", "", target_jid.split("@")[0].split(":")[0])
+                if c_digits and not _is_lid(c_digits):
+                    contact_phone = f"+{c_digits}"
+            elif conv and conv.phone_number:
+                c_digits = re.sub(r"\D+", "", str(conv.phone_number))
+                if c_digits and not _is_lid(c_digits):
+                    contact_phone = f"+{c_digits}"
+            elif contact and contact.phone_number:
+                c_digits = re.sub(r"\D+", "", str(contact.phone_number))
+                if c_digits and not _is_lid(c_digits):
+                    contact_phone = f"+{c_digits}"
 
-        # Resolve contact mobile number: before the @c.us is the user mobile number (e.g. 9360239398@c.us -> +9360239398)
-        contact_phone = ""
-        target_jid = (conv.chat_id if conv else chat_id) or ""
-        if "@c.us" in target_jid.lower() or "@s.whatsapp.net" in target_jid.lower():
-            c_digits = re.sub(r"\D+", "", target_jid.split("@")[0].split(":")[0])
-            if c_digits and not _is_lid(c_digits):
-                contact_phone = f"+{c_digits}"
-        elif conv and conv.phone_number:
-            c_digits = re.sub(r"\D+", "", str(conv.phone_number))
-            if c_digits and not _is_lid(c_digits):
-                contact_phone = f"+{c_digits}"
-        elif contact and contact.phone_number:
-            c_digits = re.sub(r"\D+", "", str(contact.phone_number))
-            if c_digits and not _is_lid(c_digits):
-                contact_phone = f"+{c_digits}"
+            clean_phone_display = f"+{clean_phone}" if (clean_phone and not _is_lid(clean_phone)) else ""
 
-        clean_phone_display = f"+{clean_phone}" if (clean_phone and not _is_lid(clean_phone)) else ""
-
-        data = {
-            "chatId": conv.chat_id if conv else chat_id,
-            "phoneNumber": contact_phone or clean_phone_display,
-            "name": (contact.contact_name if contact else "") or ((conv.whatsapp_name if (conv and not _is_lid(conv.whatsapp_name) and "@" not in str(conv.whatsapp_name)) else "") or contact_phone or clean_phone_display or "WhatsApp Contact"),
-            "company": prospect.company_name if prospect else "",
-            "contact_name": contact.contact_name if contact else "",
-            "designation": getattr(contact, "designation", "") if contact else "",
-            "official_email": getattr(contact, "official_email", "") if contact else "",
-            "is_matched": (conv.is_matched if conv else False) or (contact is not None) or is_group,
-            "prospect_id": str(prospect.id) if prospect else None,
-            "prospect_contact_id": str(contact.id) if contact else None,
-            "custom_avatar_url": conv.custom_avatar_url if conv else "",
-            "is_group": is_group,
-            "members": members,
-        }
-        return Response(data)
+            data = {
+                "chatId": conv.chat_id if conv else chat_id,
+                "phoneNumber": contact_phone or clean_phone_display,
+                "name": (contact.contact_name if contact else "") or ((conv.whatsapp_name if (conv and not _is_lid(conv.whatsapp_name) and "@" not in str(conv.whatsapp_name)) else "") or contact_phone or clean_phone_display or "WhatsApp Contact"),
+                "company": prospect.company_name if prospect else "",
+                "contact_name": contact.contact_name if contact else "",
+                "designation": getattr(contact, "designation", "") if contact else "",
+                "official_email": getattr(contact, "official_email", "") if contact else "",
+                "is_matched": (conv.is_matched if conv else False) or (contact is not None) or is_group,
+                "prospect_id": str(prospect.id) if prospect else None,
+                "prospect_contact_id": str(contact.id) if contact else None,
+                "custom_avatar_url": conv.custom_avatar_url if conv else "",
+                "is_group": is_group,
+                "members": members,
+            }
+            return Response(data)
+        except Exception as exc:
+            logger.error("Failed to get contact info for %s: %s", chat_id, exc, exc_info=True)
+            return Response({
+                "chatId": chat_id,
+                "phoneNumber": "",
+                "name": "WhatsApp Contact",
+                "company": "",
+                "contact_name": "",
+                "designation": "",
+                "official_email": "",
+                "is_matched": False,
+                "prospect_id": None,
+                "prospect_contact_id": None,
+                "custom_avatar_url": "",
+                "is_group": chat_id.endswith("@g.us"),
+                "members": [],
+            })
 
 
 class WhatsAppCRMContactsView(APIView):

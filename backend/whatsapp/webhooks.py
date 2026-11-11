@@ -1759,10 +1759,10 @@ def _handle_incoming_message(
             Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
         ).first()
 
-    if not is_from_me:
+    if not is_from_me and not is_group and phone_digits and len(phone_digits) >= 8:
         opt_out_registered = check_incoming_for_opt_out(
             message_body=raw_body,
-            phone_digits=phone_digits or "",
+            phone_digits=phone_digits,
             prospect_contact=conversation.prospect_contact if conversation else None,
         )
         if opt_out_registered:
