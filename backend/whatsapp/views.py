@@ -3040,7 +3040,10 @@ class WhatsAppCallStartView(APIView):
             call_id = result.get("callId") or result.get("call_id") or ""
             session_used = result.get("session_name") or session_name
             clean_call_id = str(call_id).replace("call_", "").strip()
-            from .webhooks import set_session_call_state
+            from .webhooks import set_session_call_state, mark_call_handled as _mark_outgoing_call_handled
+            if clean_call_id:
+                # Calls we place ourselves must never be surfaced as an incoming call to the caller.
+                _mark_outgoing_call_handled(clean_call_id)
             set_session_call_state(session_used, {
                 "call_id": clean_call_id,
                 "status": "active",

@@ -1108,6 +1108,17 @@ def _handle_call_event(
 
     call_dt = _parse_waha_timestamp(event_data)
 
+    # Outgoing calls placed by this session also emit ringing/offer events (direction="outbound").
+    # They must never surface as an incoming call banner/notification for the caller themselves.
+    call_direction = str(
+        event_data.get("direction") or sub_data.get("direction") or ""
+    ).strip().lower()
+    if is_received and call_direction in ("outbound", "outgoing"):
+        if call_id:
+            mark_call_handled(call_id)
+        logger.info("Ignoring ringing event for outgoing call %s in session %s", call_id, session_name)
+        return
+
     # Guard against late/duplicate/retried ringing webhooks for a call that was already attended, declined, or ended
     if is_received and call_id and is_call_handled(call_id):
         logger.info("Ignoring late/duplicate incoming call event %s for already-handled call %s", event_type, call_id)
