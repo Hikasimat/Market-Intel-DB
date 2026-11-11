@@ -1503,14 +1503,32 @@ def _handle_incoming_message(
 
     raw_from = str(event_data.get("from") or "").strip()
     raw_to = str(event_data.get("to") or "").strip()
+    # Unpack nested message containers if present (e.g. ephemeralMessage, viewOnceMessage)
+    _nested_msg = (
+        (event_data.get("message") or {})
+        or (_data.get("message") or {})
+    )
+    if isinstance(_nested_msg, dict):
+        if "ephemeralMessage" in _nested_msg and isinstance(_nested_msg.get("ephemeralMessage"), dict):
+            _nested_msg = _nested_msg["ephemeralMessage"].get("message") or _nested_msg
+        if "viewOnceMessage" in _nested_msg and isinstance(_nested_msg.get("viewOnceMessage"), dict):
+            _nested_msg = _nested_msg["viewOnceMessage"].get("message") or _nested_msg
+        if "viewOnceMessageV2" in _nested_msg and isinstance(_nested_msg.get("viewOnceMessageV2"), dict):
+            _nested_msg = _nested_msg["viewOnceMessageV2"].get("message") or _nested_msg
+        if "documentWithCaptionMessage" in _nested_msg and isinstance(_nested_msg.get("documentWithCaptionMessage"), dict):
+            _nested_msg = _nested_msg["documentWithCaptionMessage"].get("message") or _nested_msg
+
     raw_body = str(
         event_data.get("body")
         or event_data.get("text")
         or event_data.get("caption")
         or _data.get("body")
         or _data.get("text")
-        or (event_data.get("message") or {}).get("conversation")
-        or ((event_data.get("message") or {}).get("extendedTextMessage") or {}).get("text")
+        or (_nested_msg.get("conversation") if isinstance(_nested_msg, dict) else "")
+        or ((_nested_msg.get("extendedTextMessage") or {}).get("text") if isinstance(_nested_msg, dict) else "")
+        or ((_nested_msg.get("imageMessage") or {}).get("caption") if isinstance(_nested_msg, dict) else "")
+        or ((_nested_msg.get("videoMessage") or {}).get("caption") if isinstance(_nested_msg, dict) else "")
+        or ((_nested_msg.get("documentMessage") or {}).get("caption") if isinstance(_nested_msg, dict) else "")
         or ""
     ).strip()
     waha_message_id = str(event_data.get("id") or "")
@@ -1534,6 +1552,8 @@ def _handle_incoming_message(
         event_data.get("from"),
         _data.get("chatId"),
         (_data.get("chat") or {}).get("id"),
+        event_data.get("groupJid"),
+        (event_data.get("chat") or {}).get("id"),
     ):
         if candidate and "@g.us" in str(candidate):
             cand_norm = re.sub(r":[0-9]+@", "@", str(candidate).strip())
@@ -2496,7 +2516,13 @@ def sync_two_day_whatsapp_history(
         stats_msgs = client.get_recent_messages_from_stats(force=force)
         for m in stats_msgs:
             if chat_id:
-                m_chat = str(m.get("chatId") or m.get("from") or m.get("to") or "")
+                m_chat = str(
+                    m.get("chatId")
+                    or ((m.get("_data") or {}).get("key") or {}).get("remoteJid")
+                    or m.get("to")
+                    or m.get("from")
+                    or ""
+                )
                 m_chat = re.sub(r":[0-9]+@", "@", m_chat).replace("@s.whatsapp.net", "@c.us")
                 target_norm = re.sub(r":[0-9]+@", "@", chat_id).replace("@s.whatsapp.net", "@c.us")
                 if m_chat and target_norm and m_chat != target_norm:

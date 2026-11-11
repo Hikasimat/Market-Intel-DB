@@ -773,4 +773,80 @@ class WhatsAppMultiAccountIsolationTestCase(APITestCase):
         # Verify no message was created for unknown session
         self.assertFalse(WhatsAppMessage.objects.filter(full_body="Should be rejected cleanly").exists())
 
+    # Test G: Group incoming message from another member is visible to connected user
+    def test_group_incoming_message_from_other_member_visible(self):
+        group_jid = "120363023456789@g.us"
+        group_conv = WhatsAppConversation.objects.create(
+            session=self.session_a,
+            chat_id=group_jid,
+            whatsapp_name="Project Group Alpha",
+        )
+
+        # 1. Connected user A sent a message in the group
+        msg_out = WhatsAppMessage.objects.create(
+            conversation=group_conv,
+            waha_message_id=f"true_{group_jid}_out_101",
+            idempotency_key="idemp_group_out_101",
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            full_body="Welcome everyone to the group!",
+            body_preview="Welcome everyone to the group!",
+        )
+
+        # 2. Another group member (919876543210) sends a message into the group
+        member_phone = "919876543210@c.us"
+        payload_group_in = {
+            "event": "message",
+            "session": self.session_a.session_name,
+            "payload": {
+                "id": f"false_{group_jid}_in_member_202",
+                "rawId": "in_member_202",
+                "timestamp": int(timezone.now().timestamp()),
+                "from": member_phone,
+                "fromMe": False,
+                "to": group_jid,
+                "participant": member_phone,
+                "phone": "919876543210",
+                "pushName": "Bob Member",
+                "body": "Thanks for adding me!",
+                "hasMedia": False,
+                "ack": 3,
+                "ackName": "DEVICE",
+                "_data": {
+                    "key": {
+                        "remoteJid": group_jid,
+                        "fromMe": False,
+                        "id": "in_member_202",
+                        "participant": "919876543210@s.whatsapp.net",
+                    },
+                    "message": {
+                        "conversation": "Thanks for adding me!",
+                    },
+                    "messageTimestamp": int(timezone.now().timestamp()),
+                    "pushName": "Bob Member",
+                },
+            },
+        }
+
+        resp = self._post_signed_webhook(payload_group_in)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # Verify the incoming group message was saved under the group conversation
+        saved_msg = WhatsAppMessage.objects.filter(
+            conversation=group_conv,
+            full_body="Thanks for adding me!",
+        ).first()
+        self.assertIsNotNone(saved_msg, "Group message from other member was not saved under the group conversation!")
+        self.assertEqual(saved_msg.direction, WhatsAppMessage.Direction.INBOUND)
+        self.assertEqual(saved_msg.error_code, "Bob Member")
+
+        # 3. User A queries messages for this group conversation -> must see both messages
+        self.client.force_authenticate(user=self.user_a)
+        resp_msgs = self.client.get(f"/api/whatsapp/conversations/{group_conv.id}/messages/")
+        self.assertEqual(resp_msgs.status_code, status.HTTP_200_OK)
+        returned_bodies = [m["full_body"] for m in resp_msgs.data.get("messages", [])]
+        self.assertIn("Welcome everyone to the group!", returned_bodies)
+        self.assertIn("Thanks for adding me!", returned_bodies)
+
+
 
