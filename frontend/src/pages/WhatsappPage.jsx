@@ -633,6 +633,8 @@ export default function WhatsappPage() {
     } catch (_) {}
   }, []);
 
+  const endedPollCountRef = useRef(0);
+
   const checkCallingStatus = useCallback(async () => {
     try {
       const res = await api.get('/whatsapp/calls/status/');
@@ -648,11 +650,24 @@ export default function WhatsappPage() {
         const currentCallId = String(callState.callId || '').replace(/^call_/, '').trim();
         if (endedCallId && currentCallId && endedCallId === currentCallId) {
           if (activeCallData.status === 'ended') {
-            cleanupCallSession();
-          } else if (activeCallData.status === 'active' && callState.status === 'calling') {
-            setCallState((prev) => ({ ...prev, status: 'connected' }));
+            // Require 2 consecutive "ended" polls before tearing down, to guard against
+            // spurious Baileys/WAHA webhook events that transiently mark a call as ended
+            // while it is actually still active (e.g. the terminate event fired when the
+            // remote side answers an outgoing call during Baileys call signalling).
+            endedPollCountRef.current = (endedPollCountRef.current || 0) + 1;
+            if (endedPollCountRef.current >= 2) {
+              endedPollCountRef.current = 0;
+              cleanupCallSession();
+            }
+          } else {
+            endedPollCountRef.current = 0;
+            if (activeCallData.status === 'active' && callState.status === 'calling') {
+              setCallState((prev) => ({ ...prev, status: 'connected' }));
+            }
           }
         }
+      } else {
+        endedPollCountRef.current = 0;
       }
 
       const incoming = res.data?.incoming_call;
@@ -687,7 +702,7 @@ export default function WhatsappPage() {
     } catch (_) {
       setIsCallingPaired(false);
     }
-  }, [callState.active, cleanupCallSession]);
+  }, [callState.active, callState.callId, callState.status, cleanupCallSession]);
 
   const fetchCallRecordings = useCallback(async () => {
     setLoadingRecordings(true);

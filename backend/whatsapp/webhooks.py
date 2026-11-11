@@ -1409,8 +1409,29 @@ def _handle_call_event(
         "call.missed", "call.voice.missed",
         "call.ended", "call.voice.ended",
     ) or raw_status in ("reject", "declined", "rejected", "timeout", "missed", "terminate", "ended"):
-        mark_call_ended(session_name, call_id, reason=raw_status or event_type)
-        logger.info("Cleared and ended WhatsApp call: %s (%s) for session %s", call_id, event_type, session_name)
+        # Do NOT overwrite the call state file if the user has already actively accepted this
+        # call (state = "active"). Baileys/WAHA fires a spurious call.ended or terminate event
+        # when the remote side answers an outgoing call, or as a signalling handshake step during
+        # call setup. Only the WebSocket bridge closing with reason='call ended' or an explicit
+        # End Call API request should transition an active call to ended.
+        existing_state = get_active_call_state(session_name)
+        existing_call_id = _normalize_call_id((existing_state or {}).get("call_id", ""))
+        normalized_call_id = _normalize_call_id(call_id)
+        if (
+            existing_state
+            and existing_state.get("status") == "active"
+            and existing_call_id
+            and normalized_call_id
+            and existing_call_id == normalized_call_id
+        ):
+            logger.info(
+                "Webhook call.ended/terminate for %s suppressed: call is currently active in session %s. "
+                "Actual end will come via WebSocket bridge or explicit End Call action.",
+                call_id, session_name,
+            )
+        else:
+            mark_call_ended(session_name, call_id, reason=raw_status or event_type)
+            logger.info("Cleared and ended WhatsApp call: %s (%s) for session %s", call_id, event_type, session_name)
 
 
 def _handle_incoming_message(
