@@ -983,8 +983,9 @@ class WhatsAppSendMessageView(APIView):
                     target_conv.is_deleted = False
                     target_conv.save(update_fields=['is_deleted'])
 
-                reply_to_id = None
-                if raw_chat_id.endswith("@lid"):
+                reply_to_id = data.get("reply_to")
+                mentions_list = data.get("mentions")
+                if not reply_to_id and raw_chat_id.endswith("@lid"):
                     # For Business accounts (@lid), WAHA often rejects direct sends (HTTP 400).
                     # We must reply to the last inbound message instead.
                     last_inbound = WhatsAppMessage.objects.filter(
@@ -1012,7 +1013,13 @@ class WhatsAppSendMessageView(APIView):
                                 logger.warning("Failed to send CRM group message to %s: %s", p_chat, p_err)
                     waha_res = last_res or {"id": f"crm_{uuid.uuid4().hex[:12]}"}
                 else:
-                    waha_res = client.send_text(actual_session_name, raw_chat_id, message_body, reply_to=reply_to_id)
+                    waha_res = client.send_text(
+                        actual_session_name,
+                        raw_chat_id,
+                        message_body,
+                        reply_to=reply_to_id,
+                        mentions=mentions_list,
+                    )
 
                 body_hash = _hashlib.sha256(message_body.encode("utf-8")).hexdigest()
 
@@ -1114,6 +1121,9 @@ class WhatsAppConversationsView(APIView):
                                 unread_count=wc.get("unreadCount", 0),
                                 is_matched=True,
                             )
+                        elif conv_obj.is_deleted:
+                            # User explicitly deleted this group; do not restore
+                            continue
                         elif w_name and conv_obj.whatsapp_name != w_name:
                             conv_obj.whatsapp_name = w_name
                             conv_obj.is_matched = True
@@ -1447,6 +1457,14 @@ class WhatsAppConversationDeleteView(APIView):
         conv.deleted_at = timezone.now()
         conv.deleted_by = request.user
         conv.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
+
+        if conv.chat_id.endswith("@g.us") and conv.session:
+            try:
+                from .client import get_waha_client
+                client = get_waha_client()
+                client.leave_group(conv.session.session_name, conv.chat_id)
+            except Exception as leave_err:
+                logger.debug("Failed to leave group %s in WAHA: %s", conv.chat_id, leave_err)
 
         _write_audit_log(
             action=WhatsAppAuditLog.Action.CONVERSATION_DELETED,
@@ -2717,7 +2735,21 @@ class WhatsAppGroupAddParticipantView(APIView):
                         parts.append(f_p)
                 meta["participants"] = parts
                 conv.metadata = meta
-                conv.save(update_fields=["metadata"])
+                now = timezone.now()
+                added_notice = f"You added {', '.join(['+' + p for p in clean_phones])}"
+                WhatsAppMessage.objects.create(
+                    conversation=conv,
+                    idempotency_key=str(uuid.uuid4()),
+                    direction=WhatsAppMessage.Direction.INBOUND,
+                    status=WhatsAppMessage.Status.READ,
+                    message_type="notification",
+                    body_preview=added_notice,
+                    full_body=added_notice,
+                    sent_at=now,
+                )
+                conv.last_message_at = now
+                conv.last_message_preview = added_notice
+                conv.save(update_fields=["metadata", "last_message_at", "last_message_preview"])
             return Response({"status": "success", "result": res, "added": clean_phones}, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to add participant to group %s: %s", chat_id, exc)
@@ -2774,7 +2806,21 @@ class WhatsAppGroupRemoveParticipantView(APIView):
                 parts = meta.get("participants") or []
                 meta["participants"] = [p for p in parts if re.sub(r"\D+", "", str(p)) not in clean_phones]
                 conv.metadata = meta
-                conv.save(update_fields=["metadata"])
+                now = timezone.now()
+                removed_notice = f"You removed {', '.join(['+' + p for p in clean_phones])}"
+                WhatsAppMessage.objects.create(
+                    conversation=conv,
+                    idempotency_key=str(uuid.uuid4()),
+                    direction=WhatsAppMessage.Direction.INBOUND,
+                    status=WhatsAppMessage.Status.READ,
+                    message_type="notification",
+                    body_preview=removed_notice,
+                    full_body=removed_notice,
+                    sent_at=now,
+                )
+                conv.last_message_at = now
+                conv.last_message_preview = removed_notice
+                conv.save(update_fields=["metadata", "last_message_at", "last_message_preview"])
             return Response({"status": "success", "result": res, "removed": clean_phones}, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to remove participant from group %s: %s", chat_id, exc)

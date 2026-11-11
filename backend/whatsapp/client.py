@@ -527,6 +527,7 @@ class WAHAClient:
         chat_id: str,
         text: str,
         reply_to: str = None,
+        mentions: list = None,
     ) -> dict:
         """
         Send a plain-text WhatsApp message with automatic session recovery if needed.
@@ -539,9 +540,9 @@ class WAHAClient:
             }
             if reply_to:
                 p["reply_to"] = reply_to
-                ep = f"/api/sendText?session={sess}"
-            else:
-                ep = "/api/sendText"
+            if mentions:
+                p["mentions"] = mentions
+            ep = f"/api/sendText?session={sess}" if reply_to or mentions else "/api/sendText"
             return ep, p
 
         endpoint, payload = _build_req(session_name)
@@ -890,6 +891,20 @@ class WAHAClient:
             except Exception:
                 continue
         return {"status": "success", "participants": clean_participants}
+
+    def leave_group(self, session_name: str, group_id: str) -> dict:
+        """Leave a WhatsApp group."""
+        clean_gid = re.sub(r":[0-9]+@", "@", group_id.strip())
+        for path in (
+            f"/api/{session_name}/groups/{clean_gid}/leave",
+            f"/api/groups/{clean_gid}/leave",
+        ):
+            try:
+                _status, body = self._request("POST", path, payload={"session": session_name}, timeout=10.0)
+                return {"success": True, "result": body}
+            except Exception:
+                continue
+        return {"success": False}
 
     def get_group_invite_link(self, session_name: str, group_id: str) -> dict:
         """Get group invite code or invite link from WAHA."""

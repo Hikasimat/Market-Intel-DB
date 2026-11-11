@@ -50,9 +50,12 @@ import {
   Edit2,
   Disc,
   ShieldAlert,
-  FileAudio
+  FileAudio,
+  Reply,
+  Share2,
 } from 'lucide-react';
 import api from '../services/api';
+import { useCall } from '../context/CallContext';
 
 const API_BASE = api.defaults.baseURL || '/api';
 const HOST_URL = (API_BASE && API_BASE.startsWith('http'))
@@ -496,213 +499,30 @@ export default function WhatsappPage() {
   };
 
   // -------------------------------------------------------------------
-  // Voice Calling State (strictly tied to connected session — no duplicate QR)
+  // Voice Calling & Recording from shared CallContext (persists across page navigation)
   // -------------------------------------------------------------------
-  const [callState, setCallState] = useState({
-    active: false,
-    status: 'idle', // 'calling' | 'connected' | 'ended'
-    callId: null,
-    sessionName: null,
-    peerName: '',
-    peerPhone: '',
-    duration: 0,
-    isMuted: false,
-    error: null,
-    isIncoming: false,
-  });
+  const {
+    callState,
+    incomingCall,
+    isCallingPaired,
+    isRecordingCall,
+    recordingDuration,
+    showConsentModal,
+    setShowConsentModal,
+    startVoiceCall,
+    handleAcceptIncomingCall,
+    handleRejectIncomingCall,
+    handleEndCall,
+    handleToggleMute,
+    startCallRecording,
+    stopCallRecording,
+  } = useCall();
 
-  // Dual-Channel Call Recording State
-  const [isRecordingCall, setIsRecordingCall] = useState(false);
-  const [recordingDuration, setRecordingDuration] = useState(0);
-  const [showConsentModal, setShowConsentModal] = useState(false);
+  // Call Recordings Modal state
   const [showRecordingsModal, setShowRecordingsModal] = useState(false);
   const [callRecordings, setCallRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
   const [playingRecordingId, setPlayingRecordingId] = useState(null);
-
-  const callMediaRef = useRef({
-    peerConnection: null,
-    dataChannel: null,
-    audioWs: null,
-    audioCtx: null,
-    micStream: null,
-    recordDest: null,
-    mediaRecorder: null,
-    recordChunks: [],
-    isRecording: false,
-    recordingStartTime: 0,
-    reconnectCount: 0,
-    timerInterval: null,
-    captureBlobUrl: null,
-    playbackBlobUrl: null,
-  });
-
-  // Unified WhatsApp VoIP & Incoming Call Management
-  const [isCallingPaired, setIsCallingPaired] = useState(false);
-  const [incomingCall, setIncomingCall] = useState(null); // { call_id, caller_name, caller_phone, session_name, is_video }
-
-  const cleanupCallSession = useCallback(() => {
-    if (callMediaRef.current.timerInterval) {
-      clearInterval(callMediaRef.current.timerInterval);
-    }
-    if (callMediaRef.current.mediaRecorder && callMediaRef.current.isRecording) {
-      try {
-        callMediaRef.current.mediaRecorder.stop();
-      } catch (_) {}
-      callMediaRef.current.isRecording = false;
-      setIsRecordingCall(false);
-    }
-    if (callMediaRef.current.micStream) {
-      callMediaRef.current.micStream.getTracks().forEach((track) => track.stop());
-    }
-    if (callMediaRef.current.audioWs) {
-      try {
-        callMediaRef.current.audioWs.onclose = null;
-        callMediaRef.current.audioWs.close();
-      } catch (_) {}
-    }
-    if (callMediaRef.current.remoteAudioEl) {
-      try {
-        callMediaRef.current.remoteAudioEl.pause();
-        callMediaRef.current.remoteAudioEl.srcObject = null;
-      } catch (_) {}
-    }
-    if (callMediaRef.current.dataChannel) {
-      try {
-        callMediaRef.current.dataChannel.close();
-      } catch (_) {}
-    }
-    if (callMediaRef.current.peerConnection) {
-      try {
-        callMediaRef.current.peerConnection.close();
-      } catch (_) {}
-    }
-    if (callMediaRef.current.audioCtx) {
-      callMediaRef.current.audioCtx.close().catch(() => {});
-    }
-    if (callMediaRef.current.captureBlobUrl) {
-      try { URL.revokeObjectURL(callMediaRef.current.captureBlobUrl); } catch (_) {}
-    }
-    if (callMediaRef.current.playbackBlobUrl) {
-      try { URL.revokeObjectURL(callMediaRef.current.playbackBlobUrl); } catch (_) {}
-    }
-    callMediaRef.current = {
-      peerConnection: null,
-      dataChannel: null,
-      audioWs: null,
-      remoteAudioEl: null,
-      audioCtx: null,
-      micStream: null,
-      timerInterval: null,
-      captureBlobUrl: null,
-      playbackBlobUrl: null,
-    };
-    setCallState({
-      active: false,
-      status: 'idle',
-      callId: null,
-      sessionName: null,
-      peerName: '',
-      peerPhone: '',
-      duration: 0,
-      isMuted: false,
-      error: null,
-      isIncoming: false,
-    });
-  }, []);
-
-  // Track handled call IDs (accepted, declined, or ended) so polling never re-shows a finished call
-  const handledCallIdsRef = useRef(
-    (() => {
-      try {
-        const saved = sessionStorage.getItem('wa_handled_call_ids');
-        return saved ? new Set(JSON.parse(saved)) : new Set();
-      } catch (_) {
-        return new Set();
-      }
-    })()
-  );
-
-  const markCallIdHandled = useCallback((rawCallId) => {
-    const clean = String(rawCallId || '').replace(/^call_/, '').trim();
-    if (!clean) return;
-    handledCallIdsRef.current.add(clean);
-    try {
-      const arr = Array.from(handledCallIdsRef.current).slice(-200);
-      sessionStorage.setItem('wa_handled_call_ids', JSON.stringify(arr));
-    } catch (_) {}
-  }, []);
-
-  const endedPollCountRef = useRef(0);
-
-  const checkCallingStatus = useCallback(async () => {
-    try {
-      const res = await api.get('/whatsapp/calls/status/');
-      if (res.data?.calling?.paired || res.data?.paired || res.data?.connected) {
-        setIsCallingPaired(true);
-      } else {
-        setIsCallingPaired(false);
-      }
-
-      const activeCallData = res.data?.active_call;
-      if (activeCallData && callState.active) {
-        const endedCallId = String(activeCallData.call_id || '').replace(/^call_/, '').trim();
-        const currentCallId = String(callState.callId || '').replace(/^call_/, '').trim();
-        if (endedCallId && currentCallId && endedCallId === currentCallId) {
-          if (activeCallData.status === 'ended') {
-            // Require 2 consecutive "ended" polls before tearing down, to guard against
-            // spurious Baileys/WAHA webhook events that transiently mark a call as ended
-            // while it is actually still active (e.g. the terminate event fired when the
-            // remote side answers an outgoing call during Baileys call signalling).
-            endedPollCountRef.current = (endedPollCountRef.current || 0) + 1;
-            if (endedPollCountRef.current >= 2) {
-              endedPollCountRef.current = 0;
-              cleanupCallSession();
-            }
-          } else {
-            endedPollCountRef.current = 0;
-            if (activeCallData.status === 'active' && callState.status === 'calling') {
-              setCallState((prev) => ({ ...prev, status: 'connected' }));
-            }
-          }
-        }
-      } else {
-        endedPollCountRef.current = 0;
-      }
-
-      const incoming = res.data?.incoming_call;
-      if (incoming && incoming.call_id) {
-        const cleanIncId = String(incoming.call_id).replace(/^call_/, '').trim();
-        let isHandledAlready = handledCallIdsRef.current.has(cleanIncId);
-        if (!isHandledAlready) {
-          try {
-            const saved = sessionStorage.getItem('wa_handled_call_ids');
-            if (saved && JSON.parse(saved).includes(cleanIncId)) {
-              handledCallIdsRef.current.add(cleanIncId);
-              isHandledAlready = true;
-            }
-          } catch (_) {}
-        }
-        if (
-          !cleanIncId ||
-          incoming.status !== 'ringing' ||
-          callState.active ||
-          isHandledAlready
-        ) {
-          setIncomingCall(null);
-        } else {
-          setIncomingCall((prev) => {
-            if (prev && String(prev.call_id).replace(/^call_/, '').trim() === cleanIncId) return prev;
-            return { ...incoming, call_id: cleanIncId };
-          });
-        }
-      } else {
-        setIncomingCall(null);
-      }
-    } catch (_) {
-      setIsCallingPaired(false);
-    }
-  }, [callState.active, callState.callId, callState.status, cleanupCallSession]);
 
   const fetchCallRecordings = useCallback(async () => {
     setLoadingRecordings(true);
@@ -716,7 +536,7 @@ export default function WhatsappPage() {
     } finally {
       setLoadingRecordings(false);
     }
-  }, [selectedSession?.session_name, showToast]);
+  }, [selectedSession?.session_name]);
 
   const handleDeleteRecording = useCallback(async (recordingId) => {
     try {
@@ -727,646 +547,22 @@ export default function WhatsappPage() {
       console.error('Failed to delete recording:', err);
       showToast('Failed to delete recording', 'error');
     }
-  }, [showToast]);
-
-  const startCallRecording = useCallback(() => {
-    if (!callMediaRef.current.recordDest || !callState.active) {
-      showToast('Cannot start recording: No active call audio available', 'error');
-      return;
-    }
-    try {
-      const stream = callMediaRef.current.recordDest.stream;
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg');
-
-      const recorder = new MediaRecorder(stream, { mimeType });
-      callMediaRef.current.recordChunks = [];
-      callMediaRef.current.mediaRecorder = recorder;
-      callMediaRef.current.recordingStartTime = Date.now();
-
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          callMediaRef.current.recordChunks.push(e.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        const chunks = callMediaRef.current.recordChunks;
-        if (!chunks || !chunks.length) return;
-        const blob = new Blob(chunks, { type: mimeType });
-        const durationSec = Math.max(1, Math.round((Date.now() - (callMediaRef.current.recordingStartTime || Date.now())) / 1000));
-
-        const formData = new FormData();
-        const filename = `call_${callState.callId || 'rec'}_${Date.now()}.webm`;
-        formData.append('audio_file', blob, filename);
-        formData.append('call_id', callState.callId || '');
-        formData.append('session_name', callState.sessionName || selectedSession?.session_name || 'default');
-        formData.append('chat_id', selectedChat?.chat_id || callState.peerPhone || '');
-        formData.append('direction', callState.isIncoming ? 'inbound' : 'outbound');
-        formData.append('duration_seconds', durationSec);
-        formData.append('consent_obtained', 'true');
-
-        try {
-          await api.post('/whatsapp/calls/recordings/upload/', formData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-          });
-          showToast('Call recording saved securely', 'success');
-        } catch (err) {
-          console.error('Failed to upload call recording:', err);
-          showToast('Failed to upload call recording', 'error');
-        }
-      };
-
-      recorder.start(1000);
-      callMediaRef.current.isRecording = true;
-      setIsRecordingCall(true);
-      setRecordingDuration(0);
-      showToast('Call recording started (Dual-channel audio)', 'info');
-    } catch (err) {
-      console.error('Failed to start MediaRecorder:', err);
-      showToast(`Failed to record call: ${err.message}`, 'error');
-    }
-  }, [callState.active, callState.callId, callState.sessionName, callState.isIncoming, selectedSession?.session_name, selectedChat?.chat_id, showToast]);
-
-  const stopCallRecording = useCallback(() => {
-    if (callMediaRef.current.mediaRecorder && callMediaRef.current.isRecording) {
-      try {
-        callMediaRef.current.mediaRecorder.stop();
-      } catch (_) {}
-      callMediaRef.current.isRecording = false;
-    }
-    setIsRecordingCall(false);
-    setRecordingDuration(0);
   }, []);
 
-  useEffect(() => {
-    let timer = null;
-    if (isRecordingCall) {
-      timer = setInterval(() => {
-        setRecordingDuration((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [isRecordingCall]);
+  // Group Messaging, Replies, Forwards & Mentions State
+  const [replyingToMessage, setReplyingToMessage] = useState(null);
+  const [forwardingMessage, setForwardingMessage] = useState(null);
+  const [showForwardModal, setShowForwardModal] = useState(false);
+  const [forwardSearchQuery, setForwardSearchQuery] = useState('');
+  const [showMentionPopup, setShowMentionPopup] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [selectedMentions, setSelectedMentions] = useState([]);
 
-  useEffect(() => {
-    checkCallingStatus();
-    const interval = setInterval(checkCallingStatus, 1200);
-    return () => clearInterval(interval);
-  }, [checkCallingStatus]);
-
-  // Audible Ringing Chime for Incoming WhatsApp Calls
-  useEffect(() => {
-    if (!incomingCall) return;
-    let ringInterval = null;
-    let ringCtx = null;
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      ringCtx = new AudioCtx();
-      const playTone = () => {
-        if (!ringCtx || ringCtx.state === 'closed') return;
-        if (ringCtx.state === 'suspended') ringCtx.resume().catch(() => {});
-        const now = ringCtx.currentTime;
-        const osc = ringCtx.createOscillator();
-        const gain = ringCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(440, now);
-        osc.frequency.setValueAtTime(480, now + 0.1);
-        gain.gain.setValueAtTime(0.12, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
-        osc.connect(gain);
-        gain.connect(ringCtx.destination);
-        osc.start(now);
-        osc.stop(now + 0.8);
-      };
-      playTone();
-      ringInterval = setInterval(playTone, 2000);
-    } catch (_) {}
-    return () => {
-      if (ringInterval) clearInterval(ringInterval);
-      if (ringCtx) ringCtx.close().catch(() => {});
-    };
-  }, [incomingCall]);
-
-
-
-
-
-  // Call duration counter
-  useEffect(() => {
-    let timer = null;
-    if (callState.active && callState.status === 'connected') {
-      timer = setInterval(() => {
-        setCallState((prev) => ({ ...prev, duration: prev.duration + 1 }));
-      }, 1000);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [callState.active, callState.status]);
-
-
-
-  const handleEndCall = useCallback(async () => {
-    const activeCallId = callState.callId;
-    if (activeCallId) {
-      markCallIdHandled(activeCallId);
-      setIncomingCall(null);
-      try {
-        await api.post(`/whatsapp/calls/${encodeURIComponent(activeCallId)}/end/`, {
-          session_name: callState.sessionName,
-        });
-      } catch (err) {
-        console.warn('End call API notification failed:', err);
-      }
-    }
-    cleanupCallSession();
-  }, [callState.callId, callState.sessionName, markCallIdHandled, cleanupCallSession]);
-
-  const handleToggleMute = useCallback(() => {
-    const nextMuted = !callState.isMuted;
-    if (callMediaRef.current.micStream) {
-      callMediaRef.current.micStream.getAudioTracks().forEach((track) => {
-        track.enabled = !nextMuted;
-      });
-    }
-    callMediaRef.current.isMuted = nextMuted;
-    setCallState((prev) => ({ ...prev, isMuted: nextMuted }));
-  }, [callState.isMuted]);
-
-  const initWebRTCAudioChannel = useCallback(async (callId, callSessionName, audioWsUrl = '') => {
-    try {
-      // Close any previous transport/context before initializing to prevent duplicate channels
-      if (callMediaRef.current.audioWs) {
-        try {
-          callMediaRef.current.audioWs.onclose = null;
-          callMediaRef.current.audioWs.close();
-        } catch (_) {}
-        callMediaRef.current.audioWs = null;
-      }
-      if (callMediaRef.current.dataChannel) {
-        try { callMediaRef.current.dataChannel.close(); } catch (_) {}
-        callMediaRef.current.dataChannel = null;
-      }
-      if (callMediaRef.current.peerConnection) {
-        try { callMediaRef.current.peerConnection.close(); } catch (_) {}
-        callMediaRef.current.peerConnection = null;
-      }
-
-      // 1. Mic capture with hardware/browser acoustic echo cancellation
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          googEchoCancellation: true,
-          googAutoGainControl: true,
-          googNoiseSuppression: true,
-          googHighpassFilter: true,
-          channelCount: 1,
-        },
-      });
-      callMediaRef.current.micStream = stream;
-      callMediaRef.current.isMuted = false;
-      callMediaRef.current.remoteQueueEndAt = 0;
-      callMediaRef.current.remotePlaybackEndAt = 0;
-      callMediaRef.current.remoteAudioRms = 0;
-      callMediaRef.current.echoHangoverUntil = 0;
-      callMediaRef.current.playbackAvailableSamples = 0;
-      callMediaRef.current.localSpeechActiveUntil = 0;
-      callMediaRef.current.lastLocalSpokeAt = 0;
-      callMediaRef.current.postSpeechCooldownUntil = 0;
-      callMediaRef.current.wasLocalSpeaking = false;
-
-      // 2. Audio Context at 16000 Hz
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioCtxClass({ sampleRate: 16000 });
-      callMediaRef.current.audioCtx = ctx;
-
-      // Load Worklets via Blob URLs
-      const captureBlob = new Blob([CAPTURE_WORKLET_CODE], { type: 'application/javascript' });
-      const playbackBlob = new Blob([PLAYBACK_WORKLET_CODE], { type: 'application/javascript' });
-      const captureUrl = URL.createObjectURL(captureBlob);
-      const playbackUrl = URL.createObjectURL(playbackBlob);
-      callMediaRef.current.captureBlobUrl = captureUrl;
-      callMediaRef.current.playbackBlobUrl = playbackUrl;
-
-      try {
-        await ctx.audioWorklet.addModule(captureUrl);
-        await ctx.audioWorklet.addModule(playbackUrl);
-      } catch (workletErr) {
-        console.warn('Blob worklet load fallback to /worklets/:', workletErr);
-        await ctx.audioWorklet.addModule('/worklets/capture-processor.js');
-        await ctx.audioWorklet.addModule('/worklets/playback-processor.js');
-      }
-
-      await ctx.resume();
-
-      // Playback incoming audio directly through WebAudio destination for low-latency output without HTMLAudioElement delay jitter
-      const playbackNode = new AudioWorkletNode(ctx, 'playback-processor');
-      playbackNode.connect(ctx.destination);
-      playbackNode.port.onmessage = (e) => {
-        if (e.data && e.data.type === 'status') {
-          callMediaRef.current.playbackAvailableSamples = e.data.available || 0;
-        }
-      };
-
-      const sendRawPcm = (pcmBytes) => {
-        const ws = callMediaRef.current.audioWs;
-        const dc = callMediaRef.current.dataChannel;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(pcmBytes);
-        } else if (dc && dc.readyState === 'open') {
-          dc.send(pcmBytes);
-        }
-      };
-
-      const playIncomingBuffer = async (rawData) => {
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-        let buf = rawData;
-        if (buf instanceof Blob) {
-          buf = await buf.arrayBuffer();
-        }
-        const floats = int16LEToFloat32(buf);
-        if (!floats || !floats.length) return;
-
-        // Track incoming audio energy (RMS)
-        let sumSquares = 0;
-        for (let i = 0; i < floats.length; i++) {
-          sumSquares += floats[i] * floats[i];
-        }
-        const incomingRms = Math.sqrt(sumSquares / floats.length);
-
-        const durationMs = (floats.length / 16000) * 1000;
-        const now = performance.now();
-        callMediaRef.current.remotePlaybackEndAt = Math.max(
-          callMediaRef.current.remotePlaybackEndAt || 0,
-          now + durationMs
-        );
-        // If incoming chunk has audible voice, hold echo suppression gate through playback + 380ms room reverb tail
-        if (incomingRms > 0.005) {
-          callMediaRef.current.echoHangoverUntil = Math.max(
-            callMediaRef.current.echoHangoverUntil || 0,
-            now + durationMs + 380
-          );
-        }
-
-        playbackNode.port.postMessage(floats);
-      };
-
-      // Connect mic to captureNode for real-time full-duplex two-way audio
-      const micSource = ctx.createMediaStreamSource(stream);
-      const captureNode = new AudioWorkletNode(ctx, 'capture-processor');
-      captureNode.port.onmessage = (e) => {
-        const samples = e.data;
-        if (!samples || !samples.length) return;
-
-        if (callMediaRef.current.isMuted) {
-          const silenceBytes = new Int16Array(samples.length).buffer;
-          sendRawPcm(silenceBytes);
-          return;
-        }
-
-        // Transmit clear microphone audio directly to caller in real time
-        sendRawPcm(float32ToInt16LE(samples));
-      };
-      micSource.connect(captureNode);
-
-      // Setup dual-channel mix destination for secure call recording
-      try {
-        const recordDest = ctx.createMediaStreamDestination();
-        micSource.connect(recordDest);
-        playbackNode.connect(recordDest);
-        callMediaRef.current.recordDest = recordDest;
-      } catch (recErr) {
-        console.warn('Could not initialize recording destination:', recErr);
-      }
-
-      // Keep node alive by connecting to destination with gain=0 so browser actively pulls audio
-      const silenceGain = ctx.createGain();
-      silenceGain.gain.setValueAtTime(0, ctx.currentTime);
-      captureNode.connect(silenceGain);
-      silenceGain.connect(ctx.destination);
-
-      // 3. Connect primary WebSocket Audio Bridge (bypasses UDP NAT blocks and avoids Pion ICE timeout killing the call)
-      let normalizedWsUrl = audioWsUrl || '';
-      if (normalizedWsUrl && callSessionName && callSessionName !== 'default') {
-        normalizedWsUrl = normalizedWsUrl.replace(
-          '/api/calling/sessions/default/calls/',
-          `/api/calling/sessions/${encodeURIComponent(callSessionName)}/calls/`
-        );
-      }
-
-      let wsConnected = false;
-      if (normalizedWsUrl) {
-        wsConnected = await new Promise((resolve) => {
-          let settled = false;
-          let openVerifyTimer = null;
-          const finish = (ok) => {
-            if (openVerifyTimer) {
-              clearTimeout(openVerifyTimer);
-              openVerifyTimer = null;
-            }
-            if (!settled) {
-              settled = true;
-              resolve(ok);
-            }
-          };
-          const connectSocket = (isReconnect = false) => {
-            try {
-              const ws = new WebSocket(normalizedWsUrl);
-              ws.binaryType = 'arraybuffer';
-              callMediaRef.current.audioWs = ws;
-
-              ws.onopen = () => {
-                if (ctx.state === 'suspended') {
-                  ctx.resume().catch(() => {});
-                }
-                if (!isReconnect) {
-                  // Verify socket remains open for 180ms (ensures AudioSocketGateway resolved session)
-                  openVerifyTimer = setTimeout(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                      finish(true);
-                    }
-                  }, 180);
-                }
-              };
-              ws.onmessage = (e) => {
-                if (!settled) finish(true);
-                playIncomingBuffer(e.data);
-              };
-              ws.onerror = () => {
-                if (!isReconnect) finish(false);
-              };
-              ws.onclose = (ev) => {
-                if (!isReconnect && !settled) {
-                  finish(false);
-                  return;
-                }
-                const isServerEnded = ev.reason === 'call ended';
-                const reconnectCount = callMediaRef.current.reconnectCount || 0;
-                if (isServerEnded || reconnectCount >= 3) {
-                  markCallIdHandled(callId);
-                  setIncomingCall(null);
-                  setCallState((prev) => (prev.active ? { ...prev, status: 'ended', error: 'Call ended' } : prev));
-                  setTimeout(() => cleanupCallSession(), 1000);
-                  return;
-                }
-                callMediaRef.current.reconnectCount = reconnectCount + 1;
-                // Reconnect automatically if transient network drop
-                if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
-                  setTimeout(() => {
-                    if (callMediaRef.current.audioCtx && callMediaRef.current.audioCtx.state !== 'closed') {
-                      connectSocket(true);
-                    }
-                  }, 500);
-                }
-              };
-            } catch (_) {
-              finish(false);
-            }
-          };
-          connectSocket(false);
-          setTimeout(() => finish(false), 2500);
-        });
-      }
-
-      // 4. Only negotiate WebRTC DataChannel if WebSocket audio bridge is unavailable
-      // (Avoids starting Pion WebRTC PeerConnection when WS is active, because Pion's OnTerminalICE kills the call if UDP ICE fails)
-      if (!wsConnected) {
-        const pc = new RTCPeerConnection({
-          iceServers: [
-            { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-          ]
-        });
-        callMediaRef.current.peerConnection = pc;
-
-        const bindDataChannel = (channel) => {
-          if (!channel) return;
-          callMediaRef.current.dataChannel = channel;
-          channel.binaryType = 'arraybuffer';
-          channel.onopen = () => {
-            if (ctx.state === 'suspended') {
-              ctx.resume().catch(() => {});
-            }
-          };
-          channel.onmessage = (e) => {
-            playIncomingBuffer(e.data);
-          };
-        };
-
-        const dc = pc.createDataChannel('pcm', { ordered: true });
-        bindDataChannel(dc);
-
-        pc.ondatachannel = (event) => {
-          bindDataChannel(event.channel);
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        await new Promise((resolve) => {
-          if (pc.iceGatheringState === 'complete') resolve();
-          else {
-            const checkIce = () => {
-              if (pc.iceGatheringState === 'complete') {
-                pc.removeEventListener('icegatheringstatechange', checkIce);
-                resolve();
-              }
-            };
-            pc.addEventListener('icegatheringstatechange', checkIce);
-            setTimeout(resolve, 2000);
-          }
-        });
-
-        const sdpOffer = pc.localDescription?.sdp || '';
-        try {
-          const webrtcRes = await api.post(`/whatsapp/calls/${encodeURIComponent(callId)}/webrtc/`, {
-            sdp_offer: sdpOffer,
-            session_name: callSessionName,
-          });
-          const sdpAnswer = webrtcRes.data?.sdp_answer || webrtcRes.data?.sdpAnswer;
-          if (sdpAnswer) {
-            await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
-          }
-        } catch (webrtcErr) {
-          console.warn('WebRTC SDP negotiation warning:', webrtcErr);
-        }
-      }
-
-      setCallState((prev) => ({
-        ...prev,
-        status: 'connected',
-      }));
-    } catch (err) {
-      console.warn('WebRTC Audio Channel initialization warning:', err);
-      setCallState((prev) => ({
-        ...prev,
-        status: 'connected',
-      }));
-    }
-  }, [cleanupCallSession]);
-
-  const handleStartVoiceCall = useCallback(async () => {
-    if (!selectedChat) return;
-
-    if (selectedChat.chat_id?.endsWith('@g.us')) {
-      showToast('Voice calling is supported for direct 1-on-1 WhatsApp contacts.', 'info');
-      return;
-    }
-
-    if (selectedSession?.status !== 'READY') {
-      showToast('Your WhatsApp session is not connected. Please scan the QR code to connect first.', 'error');
-      return;
-    }
-
-    const rawPhone = getConversationPhoneNumber(selectedChat) || selectedChat.phone_number || (selectedChat.chat_id || '').split('@')[0].split(':')[0];
-    const cleanPhone = (rawPhone || '').replace(/\D+/g, '');
-    if (!cleanPhone) {
-      showToast('No valid phone number found for this contact.', 'error');
-      return;
-    }
-
-    try {
-      setCallState({
-        active: true,
-        status: 'calling',
-        callId: null,
-        peerName: getContactDisplayName(selectedChat),
-        peerPhone: `+${cleanPhone}`,
-        duration: 0,
-        isMuted: false,
-        error: null,
-      });
-
-      const startRes = await api.post('/whatsapp/calls/start/', {
-        phone: cleanPhone,
-        chat_id: selectedChat.chat_id,
-        session_name: selectedSession?.session_name || undefined,
-      });
-
-      const newCallId = startRes.data?.call_id || startRes.data?.callId;
-      const resolvedSession = startRes.data?.session_name || selectedSession?.session_name;
-      const audioWsUrl = startRes.data?.audio_ws_url || '';
-      if (!newCallId) {
-        throw new Error(startRes.data?.error || 'No call ID returned by WhatsApp calling service');
-      }
-
-      setCallState((prev) => ({
-        ...prev,
-        callId: newCallId,
-        sessionName: resolvedSession,
-      }));
-
-      await initWebRTCAudioChannel(newCallId, resolvedSession, audioWsUrl);
-    } catch (err) {
-      console.error('Start voice call failed:', err.response?.data || err);
-      const isNotPaired = err.response?.data?.error === 'calling_not_paired' || (err.response?.data?.detail || '').includes('calling device') || (err.response?.data?.error || '').includes('not paired');
-      if (isNotPaired) {
-        cleanupCallSession();
-        showToast('Voice calling is initializing with your connected WhatsApp session. Please try again.', 'info');
-        return;
-      }
-      const errDetail = err.response?.data?.detail || err.response?.data?.error || err.message || 'Failed to initiate WhatsApp call';
-      showToast(`Call failed: ${errDetail}`, 'error');
-      setCallState((prev) => ({
-        ...prev,
-        status: 'ended',
-        error: errDetail,
-      }));
-      setTimeout(() => {
-        cleanupCallSession();
-      }, 4000);
-    }
-  }, [selectedChat, selectedSession?.status, initWebRTCAudioChannel, cleanupCallSession, showToast]);
-
-  // Answer Incoming WhatsApp Voice Call (declared after initWebRTCAudioChannel)
-  const handleAcceptIncomingCall = useCallback(async (explicitCall = null) => {
-    const targetCall = explicitCall || incomingCall;
-    if (!targetCall) return;
-    const rawId = targetCall.call_id || targetCall.callId || targetCall.id || '';
-    const cleanCallId = String(rawId).replace(/^call_/, '').trim();
-    if (!cleanCallId) return;
-
-    markCallIdHandled(cleanCallId);
-    const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
-
-    // Auto-select caller conversation if present in conversations list
-    if (targetCall.chat_id && chats?.length > 0) {
-      const match = chats.find((c) => c.chat_id === targetCall.chat_id);
-      if (match && selectedChat?.chat_id !== match.chat_id) {
-        setSelectedChat(match);
-      }
-    }
-
-    setIncomingCall(null);
-    setCallState({
-      active: true,
-      status: 'connected',
-      callId: cleanCallId,
-      peerName: targetCall.caller_name || targetCall.peerName || 'WhatsApp Contact',
-      peerPhone: targetCall.caller_phone || targetCall.peerPhone || '',
-      duration: 0,
-      isMuted: false,
-      error: null,
-      sessionName: sessionToUse,
-      isIncoming: true,
-    });
-
-    let resolvedSession = sessionToUse;
-    let audioWsUrl = targetCall.audio_ws_url || '';
-
-    if (!targetCall.alreadyAccepted) {
-      try {
-        const acceptRes = await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/accept/`, {
-          session_name: sessionToUse,
-        });
-        if (acceptRes.data?.session_name) {
-          resolvedSession = acceptRes.data.session_name;
-          setCallState((prev) => ({ ...prev, sessionName: resolvedSession }));
-        }
-        if (acceptRes.data?.audio_ws_url) {
-          audioWsUrl = acceptRes.data.audio_ws_url;
-        }
-      } catch (acceptErr) {
-        console.warn('Accept call error (may already be accepted):', acceptErr);
-      }
-    }
-
-    try {
-      await initWebRTCAudioChannel(cleanCallId, resolvedSession, audioWsUrl);
-    } catch (audioErr) {
-      console.error('WebRTC Audio connect error:', audioErr);
-      showToast('Connected, but audio channel initialization failed.', 'error');
-    }
-  }, [incomingCall, selectedSession?.session_name, chats, selectedChat?.chat_id, markCallIdHandled, initWebRTCAudioChannel, showToast]);
-
-  // Reject / Decline Incoming WhatsApp Voice Call
-  const handleRejectIncomingCall = useCallback(async (explicitCall = null) => {
-    const targetCall = explicitCall || incomingCall;
-    if (!targetCall) return;
-    const rawId = targetCall.call_id || targetCall.callId || targetCall.id || '';
-    const cleanCallId = String(rawId).replace(/^call_/, '').trim();
-    const sessionToUse = targetCall.session_name || selectedSession?.session_name || 'default';
-    if (cleanCallId) {
-      markCallIdHandled(cleanCallId);
-    }
-    setIncomingCall(null);
-    if (!cleanCallId) return;
-    try {
-      await api.post(`/whatsapp/calls/${encodeURIComponent(cleanCallId)}/reject/`, {
-        session_name: sessionToUse,
-      });
-      showToast('Call declined', 'info');
-    } catch (err) {
-      console.warn('Decline call error:', err);
-    }
-  }, [incomingCall, selectedSession?.session_name, markCallIdHandled, showToast]);
+  const mentionCandidates = (wahaContact?.members || []).filter(m => {
+    if (!mentionQuery) return true;
+    const name = (m.name || m.phoneNumber || '').toLowerCase();
+    return name.includes(mentionQuery);
+  }).slice(0, 8);
 
   // Auto-accept incoming call if user answered from another page
   useEffect(() => {
@@ -1710,12 +906,21 @@ export default function WhatsappPage() {
   const handleSendMessage = async () => {
     if (!message.trim() || !selectedChat) return;
     const body = message.trim();
+    const replyId = replyingToMessage ? (replyingToMessage.waha_message_id || replyingToMessage.id) : undefined;
+    const mentionsToSend = selectedMentions.length > 0 ? selectedMentions : undefined;
+
     setMessage('');
+    setReplyingToMessage(null);
+    setSelectedMentions([]);
+    setShowMentionPopup(false);
+
     try {
       const response = await api.post('/whatsapp/send/', {
         prospect_contact_id: selectedChat.prospect_contact || null,
         chat_id: selectedChat.chat_id,
         message_body: body,
+        reply_to: replyId,
+        mentions: mentionsToSend,
       });
 
       setMessages(prev => [...prev, response.data]);
@@ -1741,6 +946,43 @@ export default function WhatsappPage() {
       console.error('Failed to send message:', error);
       showToast(error.response?.data?.detail || 'Failed to send message.', 'error');
     }
+  };
+
+  const handleForwardToChat = async (targetChat) => {
+    if (!forwardingMessage || !targetChat) return;
+    try {
+      const body = forwardingMessage.full_body || forwardingMessage.body_preview || '';
+      if (forwardingMessage.has_media && (forwardingMessage.media_url || forwardingMessage.media_file)) {
+        const mediaUrl = forwardingMessage.media_url || (forwardingMessage.media_file ? `${HOST_URL}${forwardingMessage.media_file}` : '');
+        await api.post('/whatsapp/send-media/', {
+          chat_id: targetChat.chat_id,
+          media_url: mediaUrl,
+          caption: body,
+        });
+      } else {
+        await api.post('/whatsapp/send/', {
+          chat_id: targetChat.chat_id,
+          message_body: body,
+        });
+      }
+      showToast(`Message forwarded to ${targetChat.whatsapp_name || targetChat.contact_name || 'contact'}`, 'success');
+      setShowForwardModal(false);
+      setForwardingMessage(null);
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to forward message', 'error');
+    }
+  };
+
+  const handleSelectMention = (member) => {
+    const lastAtIdx = message.lastIndexOf('@');
+    const nameToInsert = member.name || member.phoneNumber || 'User';
+    const newMsg = (lastAtIdx >= 0 ? message.slice(0, lastAtIdx) : message) + `@${nameToInsert} `;
+    setMessage(newMsg);
+    const jid = member.chatId || (member.phoneNumber ? `${member.phoneNumber.replace(/\D/g, '')}@c.us` : null);
+    if (jid && !selectedMentions.includes(jid)) {
+      setSelectedMentions(prev => [...prev, jid]);
+    }
+    setShowMentionPopup(false);
   };
 
   // -------------------------------------------------------------------
@@ -1861,13 +1103,14 @@ export default function WhatsappPage() {
 
   const handleDeleteChat = async () => {
     if (!selectedChat) return;
-    if (!window.confirm("Delete this conversation?")) return;
+    const isGrp = selectedChat.is_group || selectedChat.chat_id?.endsWith('@g.us');
+    if (!window.confirm(isGrp ? "Are you sure you want to leave and delete this group?" : "Delete this conversation?")) return;
     try {
       await api.delete(`/whatsapp/conversations/${selectedChat.id}/`);
       setChats(prev => prev.filter(c => c.id !== selectedChat.id));
       setSelectedChat(null);
       setMessages([]);
-      showToast('Conversation deleted.', 'success');
+      showToast(isGrp ? 'Group deleted and left successfully.' : 'Conversation deleted.', 'success');
     } catch (err) {
       showToast(err.response?.data?.detail || 'Failed to delete conversation.', 'error');
     }
@@ -2259,6 +1502,34 @@ export default function WhatsappPage() {
     return 'WhatsApp Direct';
   };
 
+  const handleStartVoiceCall = useCallback(() => {
+    if (!selectedChat) return;
+
+    if (selectedChat.chat_id?.endsWith('@g.us') || selectedChat.is_group) {
+      showToast('Voice calling is supported for direct 1-on-1 WhatsApp contacts.', 'info');
+      return;
+    }
+
+    if (selectedSession?.status !== 'READY') {
+      showToast('Your WhatsApp session is not connected. Please scan the QR code to connect first.', 'error');
+      return;
+    }
+
+    const rawPhone = getConversationPhoneNumber(selectedChat) || selectedChat.phone_number || (selectedChat.chat_id || '').split('@')[0].split(':')[0];
+    const cleanPhone = (rawPhone || '').replace(/\D+/g, '');
+    if (!cleanPhone) {
+      showToast('No valid phone number found for this contact.', 'error');
+      return;
+    }
+
+    startVoiceCall({
+      phone: cleanPhone,
+      name: getContactDisplayName(selectedChat),
+      chatId: selectedChat.chat_id,
+      sessionName: selectedSession?.session_name,
+    });
+  }, [selectedChat, selectedSession?.status, selectedSession?.session_name, startVoiceCall]);
+
   // Filter & deduplicate conversations by canonical phone digits / group JID
   const filteredChats = chats.filter((chat, index, self) => {
     if (chatFilter === 'unread' && chat.unread_count === 0) return false;
@@ -2355,7 +1626,7 @@ export default function WhatsappPage() {
     return (
       <div 
         className="bg-[#eae6df] flex flex-col justify-between relative overflow-hidden font-sans"
-        style={{ minHeight: 'calc((100vh - 2rem) / 0.9)' }}
+        style={{ minHeight: 'calc(100vh / 0.9)' }}
       >
         {/* Top Emerald Header Banner */}
         <div className="bg-[#00a884] h-56 w-full px-8 py-6 text-white flex items-center justify-between shadow-sm">
@@ -2528,7 +1799,7 @@ export default function WhatsappPage() {
   return (
     <div 
       className="flex flex-1 bg-[#f0f2f5] overflow-hidden relative font-sans"
-      style={{ height: 'calc((100vh - 2rem) / 0.9)', minHeight: 'calc((100vh - 2rem) / 0.9)' }}
+      style={{ height: 'calc(100vh / 0.9)', minHeight: 'calc(100vh / 0.9)' }}
     >
       
       {/* Toast Notification */}
@@ -2915,13 +2186,15 @@ export default function WhatsappPage() {
                   <User className="w-4 h-4" />
                 </button>
 
-                <button
-                  onClick={handleDeleteChat}
-                  className="p-2 rounded-full hover:bg-red-100 text-red-500 transition"
-                  title="Delete Chat"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {(selectedChat?.is_group || selectedChat?.chat_id?.endsWith('@g.us')) && (
+                  <button
+                    onClick={handleDeleteChat}
+                    className="p-2 rounded-full hover:bg-red-100 text-red-500 transition"
+                    title="Delete Group"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
 

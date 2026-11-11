@@ -246,6 +246,7 @@ class WhatsAppMessageSerializer(serializers.ModelSerializer):
         model = WhatsAppMessage
         fields = [
             "id",
+            "waha_message_id",
             "direction",
             "status",
             "body_preview",
@@ -299,6 +300,17 @@ class SendMessageSerializer(serializers.Serializer):
         default="default",
         max_length=100,
         required=False,
+    )
+    reply_to = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+    )
+    mentions = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        allow_null=True,
     )
 
     def validate_message_body(self, value):

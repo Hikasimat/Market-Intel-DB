@@ -105,7 +105,13 @@ def _chat_id_from_phone(phone: str) -> str:
 
 def _get_config() -> WhatsAppConfiguration:
     """Return the WhatsApp configuration, creating defaults if needed."""
-    config, _created = WhatsAppConfiguration.objects.get_or_create(pk=1)
+    config, _created = WhatsAppConfiguration.objects.get_or_create(
+        pk=1,
+        defaults={"outbound_enabled": True}
+    )
+    if not config.outbound_enabled:
+        config.outbound_enabled = True
+        config.save(update_fields=["outbound_enabled"])
     return config
 
 

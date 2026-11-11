@@ -868,6 +868,8 @@ def process_webhook_event(
             _handle_call_event(event_data, session_name, event_record, event_type)
         elif event_type == "message.ack":
             _handle_message_ack(event_data, session_name, event_record)
+        elif event_type in ("group.v2.participants", "group.join", "group.leave"):
+            _handle_group_participant_event(event_data, session_name, event_record, event_type)
         elif event_type == "session.status":
             _handle_session_status(event_data, session_name, event_record)
         elif event_type == "session.connected":
@@ -1734,8 +1736,10 @@ def _handle_incoming_message(
         conversation = WhatsAppConversation.objects.filter(
             chat_id=target_chat_id,
             session=session_obj,
-            is_deleted=False,
         ).order_by("-last_message_at", "-updated_at").first()
+        if conversation and conversation.is_deleted:
+            conversation.is_deleted = False
+            conversation.save(update_fields=["is_deleted"])
 
     if not conversation:
         # Find existing conversation for THIS session only (checking both @c.us and @s.whatsapp.net)
@@ -2105,15 +2109,6 @@ def _handle_incoming_message(
             args=(conversation.pk, session_name, target_chat_id)
         ).start()
 
-    # Self-healing: if any messages for this group were previously saved into another conversation by mistake, reassign them
-    if is_group and conversation:
-        try:
-            WhatsAppMessage.objects.filter(
-                waha_message_id__icontains=target_chat_id
-            ).exclude(conversation=conversation).update(conversation=conversation)
-        except Exception:
-            pass
-
     _write_audit_log(
         action=WhatsAppAuditLog.Action.MESSAGE_RECEIVED,
         prospect_contact=prospect_contact,
@@ -2165,7 +2160,13 @@ def _ack_message_id_candidates(event_data: dict) -> list:
     if not raw_id and composite.count("_") >= 2 and composite.split("_", 1)[0] in ("true", "false"):
         raw_id = composite.split("_", 2)[2]
     candidates = []
-    for c in (composite, raw_id, f"true_{remote}_{raw_id}" if (remote and raw_id) else ""):
+    for c in (
+        composite,
+        raw_id,
+        f"true_{remote}_{raw_id}" if (remote and raw_id) else "",
+        f"false_{remote}_{raw_id}" if (remote and raw_id) else "",
+        f"_{raw_id}" if raw_id else "",
+    ):
         if c and c not in candidates:
             candidates.append(c)
     return candidates
@@ -2237,11 +2238,6 @@ def _handle_message_ack(
         logger.warning("Message ack for unmapped session %r ignored.", session_name)
         return
 
-    # Acks only drive the tick state of OUTBOUND messages.
-    direction = str(event_data.get("direction") or "").lower()
-    if direction == "inbound" or event_data.get("fromMe") is False:
-        return
-
     candidates = _ack_message_id_candidates(event_data)
     if not candidates:
         return
@@ -2259,6 +2255,74 @@ def _handle_message_ack(
             "Message ACK matched nothing to advance in session %s (ids=%s ack=%s) — no other session touched.",
             session_name, candidates, event_data.get("ack"),
         )
+
+
+def _handle_group_participant_event(
+    event_data: dict,
+    session_name: str,
+    event_record: WhatsAppEvent,
+    event_type: str,
+) -> None:
+    """
+    Handle group participant join/leave/add/remove notifications.
+    Creates a system notification message in the group conversation.
+    """
+    session_obj = WhatsAppSession.objects.filter(session_name=(session_name or "").strip()).first()
+    if not session_obj:
+        return
+
+    group_jid = _normalize_chat_jid(
+        event_data.get("groupJid") or event_data.get("id") or event_data.get("chatId") or ""
+    )
+    if not group_jid or not group_jid.endswith("@g.us"):
+        return
+
+    action = str(event_data.get("action") or ("add" if event_type == "group.join" else "remove" if event_type == "group.leave" else "")).lower()
+    raw_participants = event_data.get("participants") or []
+    if isinstance(raw_participants, str):
+        raw_participants = [raw_participants]
+
+    participant_labels = []
+    for p in raw_participants:
+        clean_p = re.sub(r"\D+", "", str(p).split("@")[0].split(":")[0])
+        if clean_p:
+            participant_labels.append(f"+{clean_p}")
+        elif p:
+            participant_labels.append(str(p))
+
+    if not participant_labels:
+        return
+
+    names_str = ", ".join(participant_labels)
+    if action in ("add", "join"):
+        notice = f"{names_str} was added to the group"
+    elif action in ("remove", "leave"):
+        notice = f"{names_str} was removed from the group"
+    else:
+        notice = f"Group participants updated: {names_str}"
+
+    conv = WhatsAppConversation.objects.filter(session=session_obj, chat_id=group_jid).first()
+    if not conv:
+        return
+
+    if conv.is_deleted:
+        conv.is_deleted = False
+        conv.save(update_fields=["is_deleted"])
+
+    now = timezone.now()
+    WhatsAppMessage.objects.create(
+        conversation=conv,
+        idempotency_key=str(uuid.uuid4()),
+        direction=WhatsAppMessage.Direction.INBOUND,
+        status=WhatsAppMessage.Status.READ,
+        message_type="notification",
+        body_preview=notice,
+        full_body=notice,
+        sent_at=now,
+    )
+    conv.last_message_at = now
+    conv.last_message_preview = notice
+    conv.save(update_fields=["last_message_at", "last_message_preview"])
 
 
 def _handle_session_status(

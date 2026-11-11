@@ -51,7 +51,7 @@ class WhatsAppConfiguration(models.Model):
     # Global outbound kill switch.
     # If False, ALL outbound messages are blocked regardless of other settings.
     outbound_enabled = models.BooleanField(
-        default=False,
+        default=True,
         help_text=(
             "Master kill switch for outbound WhatsApp messages. "
             "Set to False to immediately stop all outbound sends."

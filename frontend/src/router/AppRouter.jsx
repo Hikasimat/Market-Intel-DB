@@ -43,6 +43,7 @@ const PageSpinner = () => (
 );
 
 import Layout from '../components/layout/Layout';
+import { CallProvider } from '../context/CallContext';
 
 const RoleRoute = ({ children, allowedRoles, requireAdmin }) => {
   const { isAuthenticated, user } = useSelector((state) => state.auth);
@@ -97,8 +98,9 @@ const AppRouter = () => {
 
   return (
     <Router>
-      <Suspense fallback={<PageSpinner />}>
-        <Routes>
+      <CallProvider>
+        <Suspense fallback={<PageSpinner />}>
+          <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/auth/google/callback" element={<LoginPage />} />
           <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
@@ -176,7 +178,8 @@ const AppRouter = () => {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
-    </Router>
+    </CallProvider>
+  </Router>
   );
 };
 
