@@ -2434,6 +2434,22 @@ export default function WhatsappPage() {
                             </span>
                           )}
 
+                          {/* Quoted (replied-to) message preview */}
+                          {msg.reply_context && (msg.reply_context.body || msg.reply_context.sender) && (
+                            <div
+                              className={`mb-1.5 rounded-lg border-l-4 px-2.5 py-1.5 text-xs ${
+                                isMe ? 'bg-emerald-100/70 border-emerald-500' : 'bg-slate-100 border-sky-500'
+                              }`}
+                            >
+                              <span className={`block font-bold text-[11px] ${isMe ? 'text-emerald-700' : 'text-sky-700'}`}>
+                                {msg.reply_context.from_me ? 'You' : (msg.reply_context.sender || 'Contact')}
+                              </span>
+                              <span className="block text-slate-600 line-clamp-2 break-words">
+                                {msg.reply_context.body || 'Message'}
+                              </span>
+                            </div>
+                          )}
+
                           {/* Message Text Body */}
                           {msg.message_type === 'call' ? (
                             <div className="flex items-center gap-2.5 py-1">

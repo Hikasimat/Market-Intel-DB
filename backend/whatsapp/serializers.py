@@ -262,6 +262,8 @@ class WhatsAppMessageSerializer(serializers.ModelSerializer):
             "media_file",
             "media_mime_type",
             "media_url",
+            "is_edited",
+            "reply_context",
         ]
         read_only_fields = fields
 

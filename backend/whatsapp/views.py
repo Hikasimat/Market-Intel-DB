@@ -263,6 +263,25 @@ def _get_owned_conversation(request, conversation_id):
     return conv, None
 
 
+def _build_reply_context(conv, reply_to_id):
+    """Build the quoted-message preview stored with a reply (strictly within `conv`)."""
+    if not reply_to_id:
+        return None
+    reply_to_id = str(reply_to_id)
+    quoted = WhatsAppMessage.objects.filter(
+        conversation=conv, waha_message_id=reply_to_id
+    ).first()
+    if not quoted:
+        return {"id": reply_to_id}
+    from_me = quoted.direction == WhatsAppMessage.Direction.OUTBOUND
+    body = quoted.full_body or quoted.body_preview or ("[Media]" if quoted.has_media else "")
+    return {
+        "id": reply_to_id,
+        "body": body[:200],
+        "sender": "You" if from_me else (quoted.error_code or conv.whatsapp_name or ""),
+        "from_me": from_me,
+    }
+
 # ---------------------------------------------------------------------------
 # Health (no authentication required — used by monitoring)
 # ---------------------------------------------------------------------------
@@ -984,6 +1003,7 @@ class WhatsAppSendMessageView(APIView):
                     target_conv.save(update_fields=['is_deleted'])
 
                 reply_to_id = data.get("reply_to")
+                explicit_reply_id = reply_to_id
                 mentions_list = data.get("mentions")
                 if not reply_to_id and raw_chat_id.endswith("@lid"):
                     # For Business accounts (@lid), WAHA often rejects direct sends (HTTP 400).
@@ -1034,6 +1054,7 @@ class WhatsAppSendMessageView(APIView):
                     status="SENT",
                     sent_at=timezone.now(),
                     performed_by=request.user,
+                    reply_context=_build_reply_context(target_conv, explicit_reply_id),
                 )
 
                 # Update conversation last-message metadata.
@@ -1611,10 +1632,12 @@ class WhatsAppMessageEditView(APIView):
                 logger.warning("Failed to propagate edit to WAHA: %s", e)
 
         # Update message in DB
+        import hashlib as _edit_hashlib
         msg.full_body = new_text
         msg.body_preview = new_text[:200]
-        msg.body_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
-        msg.save(update_fields=["full_body", "body_preview", "body_hash"])
+        msg.body_hash = _edit_hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+        msg.is_edited = True
+        msg.save(update_fields=["full_body", "body_preview", "body_hash", "is_edited"])
 
         # Update conversation preview if this was the latest message
         if conv.last_message_at and (not msg.waha_timestamp or conv.last_message_at <= (msg.waha_timestamp or msg.sent_at or msg.created_at)):

@@ -1822,7 +1822,7 @@ def _handle_incoming_message(
             if len(d) >= 8:
                 resolved_phone = f"+{d}"
 
-    if not resolved_phone and not target_chat_id.endswith("@lid"):
+    if not resolved_phone and not is_group and not target_chat_id.endswith("@lid"):
         d = re.sub(r"\D+", "", target_chat_id.split("@")[0].split(":")[0])
         if len(d) >= 8:
             resolved_phone = f"+{d}"
@@ -1843,8 +1843,8 @@ def _handle_incoming_message(
         prospect_contact = conversation.prospect_contact
         conv_updates = []
 
-        # Update phone number if resolved
-        if resolved_phone and not conversation.phone_number:
+        # Update phone number if resolved (never for groups: a group has no phone number)
+        if resolved_phone and not conversation.phone_number and not is_group:
             conversation.phone_number = resolved_phone
             conv_updates.append("phone_number")
 
@@ -2041,12 +2041,39 @@ def _handle_incoming_message(
         elif _mime_type:
             msg_type = "document"
 
+    # Quoted-reply context (WAHA `replyTo`: {id, participant, body}), scoped to this conversation.
+    reply_context = None
+    _reply = event_data.get("replyTo")
+    if isinstance(_reply, dict) and _reply.get("id"):
+        _rid = str(_reply.get("id"))
+        _quoted = (
+            WhatsAppMessage.objects.filter(conversation=conversation, waha_message_id__endswith=f"_{_rid}").first()
+            or WhatsAppMessage.objects.filter(conversation=conversation, waha_message_id=_rid).first()
+        )
+        if _quoted:
+            _q_from_me = _quoted.direction == WhatsAppMessage.Direction.OUTBOUND
+            reply_context = {
+                "id": _quoted.waha_message_id,
+                "body": (_quoted.full_body or _quoted.body_preview or ("[Media]" if _quoted.has_media else ""))[:200],
+                "sender": "You" if _q_from_me else (_quoted.error_code or conversation.whatsapp_name or ""),
+                "from_me": _q_from_me,
+            }
+        else:
+            _p_digits = re.sub(r"\D+", "", str(_reply.get("participant") or "").split("@")[0].split(":")[0])
+            reply_context = {
+                "id": _rid,
+                "body": str(_reply.get("body") or "")[:200],
+                "sender": f"+{_p_digits}" if _p_digits else "",
+                "from_me": False,
+            }
+
     try:
         with transaction.atomic():
             wa_message = WhatsAppMessage.objects.create(
                 idempotency_key=msg_idempotency,
                 conversation=conversation,
                 performed_by=None,
+                reply_context=reply_context,
                 waha_message_id=waha_message_id or None,
                 direction=WhatsAppMessage.Direction.OUTBOUND if is_from_me else WhatsAppMessage.Direction.INBOUND,
                 status=WhatsAppMessage.Status.SENT if is_from_me else WhatsAppMessage.Status.DELIVERED,

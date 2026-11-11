@@ -453,6 +453,14 @@ class WhatsAppMessage(models.Model):
     error_message = models.TextField(blank=True, null=True)
     error_code = models.CharField(max_length=50, blank=True, null=True)
 
+    # Edit / reply (quoted message) support.
+    is_edited = models.BooleanField(default=False)
+    reply_context = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Quoted message preview: {id, body, sender, from_me}.",
+    )
+
     # Soft-delete support.
     # Message content/media is hidden when deleted but metadata is preserved for audit.
     is_deleted = models.BooleanField(default=False)
