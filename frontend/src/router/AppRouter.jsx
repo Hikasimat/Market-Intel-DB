@@ -27,6 +27,9 @@ const WhatsappPage = lazy(() => import('../pages/WhatsappPage'));
 const SettingsPage = lazy(() => import('../pages/SettingsPage'));
 const GmailCallbackPage = lazy(() => import('../pages/GmailCallbackPage'));
 const CalendarCallbackPage = lazy(() => import('../pages/CalendarCallbackPage'));
+const ZoomCallbackPage = lazy(() => import('../pages/ZoomCallbackPage'));
+const MicrosoftCallbackPage = lazy(() => import('../pages/MicrosoftCallbackPage'));
+
 
 const DigitalMarketingDashboardPage = lazy(() => import('../pages/digitalMarketing/DigitalMarketingDashboardPage'));
 const InstagramPage = lazy(() => import('../pages/digitalMarketing/InstagramPage'));
@@ -105,6 +108,9 @@ const AppRouter = () => {
           <Route path="/auth/google/callback" element={<LoginPage />} />
           <Route path="/auth/gmail/callback" element={<GmailCallbackPage />} />
           <Route path="/auth/calendar/callback" element={<CalendarCallbackPage />} />
+          <Route path="/auth/zoom/callback" element={<ZoomCallbackPage />} />
+          <Route path="/auth/microsoft/callback" element={<MicrosoftCallbackPage />} />
+
           
           {/* ── Manager routes ────────────────────────────────── */}
           <Route path="/manager-dashboard" element={

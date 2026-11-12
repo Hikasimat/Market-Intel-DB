@@ -319,6 +319,21 @@ CALENDAR_OAUTH_REDIRECT_URI = os.getenv(
 ).strip()
 MEETING_DEFAULT_DURATION_MINUTES = int(os.getenv('MEETING_DEFAULT_DURATION_MINUTES', '30'))
 
+# ── Zoom Integration ──────────────────────────────────────────────────────────
+ZOOM_CLIENT_ID = os.getenv('ZOOM_CLIENT_ID', '').strip()
+ZOOM_CLIENT_SECRET = os.getenv('ZOOM_CLIENT_SECRET', '').strip()
+ZOOM_OAUTH_REDIRECT_URI = os.getenv(
+    'ZOOM_OAUTH_REDIRECT_URI', 'http://localhost:5173/auth/zoom/callback'
+).strip()
+
+# ── Microsoft 365 / Teams / Outlook Calendar Integration ──────────────────────
+MICROSOFT_CLIENT_ID = os.getenv('MICROSOFT_CLIENT_ID', '').strip()
+MICROSOFT_CLIENT_SECRET = os.getenv('MICROSOFT_CLIENT_SECRET', '').strip()
+MICROSOFT_OAUTH_REDIRECT_URI = os.getenv(
+    'MICROSOFT_OAUTH_REDIRECT_URI', 'http://localhost:5173/auth/microsoft/callback'
+).strip()
+
+
 
 
 

@@ -239,12 +239,13 @@ export default function LqWorkspaceModal({
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingTime, setMeetingTime] = useState('');
   const [meetingLink, setMeetingLink] = useState('');
-  const [meetingProvider, setMeetingProvider] = useState('GOOGLE_MEET');
-  const [calendarStatus, setCalendarStatus] = useState(null);
-  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [meetingProvider, setMeetingProvider] = useState('');
+  const [providersStatus, setProvidersStatus] = useState(null);
+  const [providersLoading, setProvidersLoading] = useState(false);
   const [createdMeeting, setCreatedMeeting] = useState(null);
   const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
   const [isRefreshingMeet, setIsRefreshingMeet] = useState(false);
+
 
   // Inbound State
   const [inboundMode, setInboundMode] = useState(false);
@@ -429,37 +430,61 @@ export default function LqWorkspaceModal({
     return () => clearInterval(interval);
   }, [showTrackingModal, sentEmailData?.id]);
 
-  const fetchCalendarStatus = async () => {
-    setCalendarLoading(true);
+  const fetchProvidersStatus = async () => {
+    setProvidersLoading(true);
     try {
-      const res = await api.get('/auth/google/calendar/status/');
-      setCalendarStatus(res.data);
+      const res = await api.get('/auth/meeting-providers/status/');
+      setProvidersStatus(res.data);
     } catch (e) {
-      console.warn('Failed to fetch calendar status', e);
-      setCalendarStatus({ is_connected: false, is_configured: false });
+      console.warn('Failed to fetch meeting providers status', e);
+      try {
+        const gRes = await api.get('/auth/google/calendar/status/');
+        setProvidersStatus({
+          google_meet: gRes.data,
+          zoom: { is_connected: false, is_configured: false },
+          ms_teams: { is_connected: false, is_configured: false },
+        });
+      } catch {
+        setProvidersStatus({
+          google_meet: { is_connected: false, is_configured: false },
+          zoom: { is_connected: false, is_configured: false },
+          ms_teams: { is_connected: false, is_configured: false },
+        });
+      }
     } finally {
-      setCalendarLoading(false);
+      setProvidersLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchCalendarStatus();
+    fetchProvidersStatus();
   }, []);
 
-  const handleConnectCalendar = async () => {
+  const handleConnectProvider = async (providerId) => {
     try {
-      const res = await api.get('/auth/google/calendar/url/');
+      let endpoint = '/auth/google/calendar/url/';
+      let storageKey = 'calendar_oauth_return_url';
+      if (providerId === 'ZOOM') {
+        endpoint = '/auth/zoom/url/';
+        storageKey = 'zoom_oauth_return_url';
+      } else if (providerId === 'MS_TEAMS') {
+        endpoint = '/auth/microsoft/url/';
+        storageKey = 'microsoft_oauth_return_url';
+      }
+
+      const res = await api.get(endpoint);
       const authUrl = res.data?.url || res.data?.authorization_url;
       if (authUrl) {
-        localStorage.setItem('calendar_oauth_return_url', window.location.pathname + window.location.search);
+        localStorage.setItem(storageKey, window.location.pathname + window.location.search);
         window.location.href = authUrl;
       } else {
-        toast.error('Google Calendar authorization URL was not returned.');
+        toast.error('Authorization URL was not returned.');
       }
     } catch (e) {
-      toast.error('Could not initiate Google Calendar connection.');
+      toast.error('Could not initiate connection.');
     }
   };
+
 
   const handleRefreshMeetLink = async () => {
     if (!createdMeeting?.id) return;
@@ -737,6 +762,10 @@ export default function LqWorkspaceModal({
     }
     // 3c. Lead Qualified
     if (callStatus === 'Connected' && communicationOutcome === 'Lead Qualified') {
+      if (!meetingProvider) {
+        setCallError('Please select a meeting platform (Google Meet, Zoom, or Microsoft Teams).');
+        return;
+      }
       if (!meetingDate || !meetingTime) {
         setCallError('Meeting Date and Time are required.');
         return;
@@ -746,6 +775,7 @@ export default function LqWorkspaceModal({
         return;
       }
     }
+
     // 3d. Requested Email Contact validation
     if (callStatus === 'Connected' && communicationOutcome === 'Requested Email') {
       if (!requestedEmailConfirm.trim()) {
@@ -792,7 +822,8 @@ export default function LqWorkspaceModal({
       else if (communicationOutcome === 'Shared Another Contact') detailsParts.push(`Outcome: Shared Contact ${sharedContactName} - ${sharedContactDesignation} (Ph: ${sharedContactPhone || 'N/A'}, Email: ${sharedContactEmail || 'N/A'})`);
       else if (communicationOutcome === 'Not Interested') detailsParts.push(`Outcome: Not Interested (Reason: ${notInterestedReason})`);
       else if (communicationOutcome === 'Lead Qualified') {
-        detailsParts.push(`Outcome: Lead Qualified (Meeting Scheduled: ${meetingDate} at ${meetingTime})`);
+        const provName = meetingProvider === 'ZOOM' ? 'Zoom Meeting' : (meetingProvider === 'MS_TEAMS' ? 'Microsoft Teams' : 'Google Meet');
+        detailsParts.push(`Outcome: Lead Qualified (Platform: ${provName}, Scheduled: ${meetingDate} at ${meetingTime})`);
         if (meetingLink) detailsParts.push(`Link: ${meetingLink}`);
         detailsParts.push(`Agenda: ${leadQualifiedDescription}`);
       }
@@ -919,7 +950,7 @@ export default function LqWorkspaceModal({
             prospect_contact: selectedContactId || null,
             scheduled_datetime,
             agenda: leadQualifiedDescription,
-            meeting_provider: 'GOOGLE_MEET',
+            meeting_provider: meetingProvider || 'GOOGLE_MEET',
             client_request_id: clientReqId,
           };
           const meetRes = await api.post(`/meetings/`, payload);
@@ -935,25 +966,23 @@ export default function LqWorkspaceModal({
           attended_meeting: attendedMeeting
         });
 
+        const providerLabel =
+          savedMeeting?.meeting_provider === 'ZOOM'
+            ? 'Zoom Meeting'
+            : savedMeeting?.meeting_provider === 'MS_TEAMS'
+            ? 'Microsoft Teams'
+            : 'Google Meet';
+
         toast.success(
-          savedMeeting?.meeting_provider === 'GOOGLE_MEET'
-            ? (savedMeeting.conference_status === 'CONFIRMED'
-              ? 'Meeting scheduled with Google Meet! Link ready.'
-              : 'Meeting scheduled. Google Meet link is being generated.')
-            : 'Activity saved successfully. Lead Qualified!'
+          savedMeeting?.conference_status === 'CONFIRMED' || savedMeeting?.conference_status === 'READY'
+            ? `Meeting scheduled with ${providerLabel}! Link ready and calendar synced.`
+            : `Meeting scheduled with ${providerLabel}. Generating meeting link...`
         );
       } catch (err) {
         console.error('Failed to update qualification status or schedule meeting', err);
         const errMsg = err.response?.data?.error || err.response?.data?.detail || 'Failed to update qualification status or schedule meeting';
         toast.error(errMsg);
-        if (
-          err.response?.status === 409 ||
-          err.response?.data?.code === 'calendar_reauth_required' ||
-          err.response?.data?.code === 'calendar_not_connected' ||
-          String(errMsg).toLowerCase().includes('reconnect')
-        ) {
-          setCalendarStatus({ is_connected: false, is_configured: true, email: '' });
-        }
+        fetchProvidersStatus();
         setIsCreatingMeeting(false);
         return;
       } finally {
@@ -961,6 +990,7 @@ export default function LqWorkspaceModal({
       }
       return;
     }
+
 
     toast.success("Activity saved successfully.");
   };
@@ -1714,43 +1744,101 @@ export default function LqWorkspaceModal({
                               )}
                               {communicationOutcome === 'Lead Qualified' && (
                                 <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-4 shadow-sm">
-                                  <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✅ Lead Qualified & Schedule Meeting</span>
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                    <div>
-                                      <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Date *</label>
-                                      <input type="date" max="9999-12-31" required value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
-                                    </div>
-                                    <div>
-                                      <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Time *</label>
-                                      <TimeSelect value={meetingTime} onChange={setMeetingTime} />
-                                    </div>
-                                  </div>
-                                  <div>
-                                    <MeetingProviderPicker
-                                      calendarStatus={calendarStatus}
-                                      calendarLoading={calendarLoading}
-                                      onConnectCalendar={handleConnectCalendar}
-                                      isCreating={isCreatingMeeting}
-                                    />
-                                    {createdMeeting && (
-                                      <div className="mt-3">
-                                        <CreatedMeetingCard
-                                          meeting={createdMeeting}
-                                          onDismiss={() => setCreatedMeeting(null)}
-                                          onRefresh={handleRefreshMeetLink}
-                                          isRefreshing={isRefreshingMeet}
-                                        />
-                                      </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">✅ Lead Qualified & Schedule Meeting</span>
+                                    {meetingProvider && (
+                                      <span className="text-[11px] font-semibold text-slate-500">
+                                        Meeting Type:{' '}
+                                        <strong className="text-slate-800">
+                                          {meetingProvider === 'ZOOM'
+                                            ? 'Zoom Meeting'
+                                            : meetingProvider === 'MS_TEAMS'
+                                            ? 'Microsoft Teams'
+                                            : 'Google Meet'}
+                                        </strong>
+                                      </span>
                                     )}
                                   </div>
-                                  <div>
-                                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Agenda *</label>
-                                    <textarea rows={2} value={leadQualifiedDescription} onChange={(e) => setLeadQualifiedDescription(e.target.value)} className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold resize-none focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${leadQualifiedDescription.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`} />
-                                  </div>
-                                  <div className="flex items-center gap-2 mt-2">
-                                    <input type="checkbox" id="attendedMeeting" checked={attendedMeeting} onChange={(e) => setAttendedMeeting(e.target.checked)} className="w-4 h-4 text-sky-600 rounded border-slate-200 focus:ring-sky-500" />
-                                    <label htmlFor="attendedMeeting" className="text-[11px] font-bold text-slate-700 cursor-pointer">Prospect Attended Meeting</label>
-                                  </div>
+
+                                  {/* Step 2: Display provider selection interface */}
+                                  <MeetingProviderPicker
+                                    selectedProvider={meetingProvider}
+                                    onSelectProvider={setMeetingProvider}
+                                    providersStatus={providersStatus}
+                                    loadingStatus={providersLoading}
+                                    onConnectProvider={handleConnectProvider}
+                                    isCreating={isCreatingMeeting}
+                                  />
+
+                                  {/* Step 3: After selecting a meeting provider, display the existing scheduling fields */}
+                                  {meetingProvider ? (
+                                    <div className="space-y-3.5 pt-3 border-t border-slate-100">
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div>
+                                          <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Date *</label>
+                                          <input type="date" max="9999-12-31" required value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all" />
+                                        </div>
+                                        <div>
+                                          <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Meeting Time *</label>
+                                          <TimeSelect value={meetingTime} onChange={setMeetingTime} />
+                                        </div>
+                                      </div>
+
+                                      {/* Key Person / Prospect Contact confirmation & selection */}
+                                      <div>
+                                        <label className="block text-[11px] font-bold text-slate-700 mb-1.5">
+                                          Key Person / Prospect Contact
+                                        </label>
+                                        {prospect?.key_contacts && prospect.key_contacts.length > 0 ? (
+                                          <select
+                                            value={selectedContactId || ''}
+                                            onChange={(e) => {
+                                              const id = e.target.value ? Number(e.target.value) : '';
+                                              setSelectedContactId(id);
+                                              setSelectedContactData(prospect.key_contacts.find((c) => c.id === id) || null);
+                                            }}
+                                            className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
+                                          >
+                                            <option value="">General Company Contact (Official Line)</option>
+                                            {prospect.key_contacts.map((c) => (
+                                              <option key={c.id} value={c.id}>
+                                                {c.contact_name} {c.designation ? `(${c.designation})` : ''} {c.official_email ? `— ${c.official_email}` : ''}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        ) : (
+                                          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 font-medium">
+                                            {generalCallSpokeTo ? `${generalCallSpokeTo} (${generalCallDesignation || 'Spoke To'})` : 'Official Company Contact'}
+                                          </div>
+                                        )}
+                                      </div>
+
+                                      {createdMeeting && (
+                                        <div>
+                                          <CreatedMeetingCard
+                                            meeting={createdMeeting}
+                                            onDismiss={() => setCreatedMeeting(null)}
+                                            onRefresh={handleRefreshMeetLink}
+                                            isRefreshing={isRefreshingMeet}
+                                          />
+                                        </div>
+                                      )}
+
+                                      <div>
+                                        <label className="block text-[11px] font-bold text-slate-700 mb-1.5">Agenda *</label>
+                                        <textarea rows={2} value={leadQualifiedDescription} onChange={(e) => setLeadQualifiedDescription(e.target.value)} placeholder="Discuss business proposal, qualification criteria..." className={`w-full p-2.5 bg-slate-50 border rounded-lg text-xs font-semibold resize-none focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all ${leadQualifiedDescription.trim() ? 'border-slate-200' : 'border-rose-300 ring-1 ring-rose-200'}`} />
+                                      </div>
+
+                                      <div className="flex items-center gap-2 mt-2">
+                                        <input type="checkbox" id="attendedMeeting" checked={attendedMeeting} onChange={(e) => setAttendedMeeting(e.target.checked)} className="w-4 h-4 text-sky-600 rounded border-slate-200 focus:ring-sky-500 cursor-pointer" />
+                                        <label htmlFor="attendedMeeting" className="text-[11px] font-bold text-slate-700 cursor-pointer">Prospect Attended Meeting</label>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="p-3 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-slate-500 text-xs font-semibold">
+                                      Please select a meeting platform above to continue scheduling.
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>

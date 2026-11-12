@@ -482,17 +482,25 @@ from .models import Meeting
 class MeetingSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source='prospect.company_name', read_only=True)
     key_person_name = serializers.SerializerMethodField()
+    created_by_username = serializers.CharField(source='created_by.username', read_only=True)
 
     class Meta:
         model = Meeting
         fields = [
-            'id', 'prospect', 'company_name', 'key_person_name', 'scheduled_datetime',
+            'id', 'prospect', 'company_name', 'key_person_name', 'prospect_contact', 'scheduled_datetime',
+            'meeting_date', 'meeting_time', 'timezone',
             'meeting_link', 'agenda', 'is_completed',
-            'meeting_provider', 'conference_status',
+            'meeting_provider', 'conference_status', 'status',
+            'provider_meeting_id', 'calendar_event_id', 'calendar_type',
+            'created_by', 'created_by_username',
             'notified_1h', 'notified_30m', 'notified_15m',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'meeting_provider', 'conference_status']
+        read_only_fields = [
+            'id', 'created_at', 'updated_at', 'conference_status',
+            'provider_meeting_id', 'calendar_event_id', 'calendar_type',
+            'created_by', 'created_by_username'
+        ]
 
     def get_key_person_name(self, obj):
         if hasattr(obj, 'prospect_contact') and obj.prospect_contact:
@@ -501,6 +509,7 @@ class MeetingSerializer(serializers.ModelSerializer):
         if contacts:
             return contacts[0].contact_name
         return None
+
 
 from .models import OutreachEmail, OutreachEmailRecipient, EmailAttachment, CallActivity, CommunicationActivity
 

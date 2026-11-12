@@ -27,7 +27,21 @@ from .calendar_views import (
     CalendarOAuthStatusView,
     CalendarOAuthDisconnectView,
     CalendarEventsView,
+    MeetingProvidersStatusView,
 )
+from .zoom_views import (
+    ZoomOAuthURLView,
+    ZoomOAuthCallbackView,
+    ZoomOAuthStatusView,
+    ZoomOAuthDisconnectView,
+)
+from .microsoft_views import (
+    MicrosoftOAuthURLView,
+    MicrosoftOAuthCallbackView,
+    MicrosoftOAuthStatusView,
+    MicrosoftOAuthDisconnectView,
+)
+
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
@@ -100,5 +114,21 @@ urlpatterns = [
     path('google/calendar/status/', CalendarOAuthStatusView.as_view(), name='calendar_oauth_status'),
     path('google/calendar/disconnect/', CalendarOAuthDisconnectView.as_view(), name='calendar_oauth_disconnect'),
     path('google/calendar/events/', CalendarEventsView.as_view(), name='calendar_events'),
+
+    # Unified Meeting Providers status
+    path('meeting-providers/status/', MeetingProvidersStatusView.as_view(), name='meeting_providers_status'),
+
+    # Zoom OAuth authorization & status
+    path('zoom/url/', ZoomOAuthURLView.as_view(), name='zoom_oauth_url'),
+    path('zoom/callback/', ZoomOAuthCallbackView.as_view(), name='zoom_oauth_callback'),
+    path('zoom/status/', ZoomOAuthStatusView.as_view(), name='zoom_oauth_status'),
+    path('zoom/disconnect/', ZoomOAuthDisconnectView.as_view(), name='zoom_oauth_disconnect'),
+
+    # Microsoft 365 OAuth authorization & status
+    path('microsoft/url/', MicrosoftOAuthURLView.as_view(), name='microsoft_oauth_url'),
+    path('microsoft/callback/', MicrosoftOAuthCallbackView.as_view(), name='microsoft_oauth_callback'),
+    path('microsoft/status/', MicrosoftOAuthStatusView.as_view(), name='microsoft_oauth_status'),
+    path('microsoft/disconnect/', MicrosoftOAuthDisconnectView.as_view(), name='microsoft_oauth_disconnect'),
 ]
+
 

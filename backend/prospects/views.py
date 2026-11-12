@@ -752,17 +752,28 @@ class MeetingViewSet(viewsets.ModelViewSet):
             return apply_lq_distribution_filter(queryset, user, 'prospect_id__')
         return queryset
 
-    # ── Google Meet integration ──────────────────────────────────────────────
-    # Manual calendar feature has been completely removed: all meetings require Google Meet.
+    # ── Multi-Provider Meeting Integration (Google Meet, Zoom, Microsoft Teams) ─────
+    # Manual calendar feature has been removed: all meetings require a supported provider.
     def create(self, request, *args, **kwargs):
         provider = str(request.data.get('meeting_provider') or 'GOOGLE_MEET').strip().upper()
         if provider == 'MANUAL':
             return self._meet_error(
-                'Manual calendar feature has been removed. All meetings must be scheduled through Google Calendar / Google Meet.',
+                'Manual calendar feature has been removed. All meetings must be scheduled through Google Meet, Zoom, or Microsoft Teams.',
                 'manual_calendar_removed',
                 status.HTTP_400_BAD_REQUEST
             )
-        return self._create_google_meet(request)
+        if provider == 'GOOGLE_MEET':
+            return self._create_google_meet(request)
+        elif provider == 'ZOOM':
+            return self._create_zoom_meeting(request)
+        elif provider in ('MS_TEAMS', 'MICROSOFT_TEAMS', 'TEAMS'):
+            return self._create_ms_teams_meeting(request)
+        else:
+            return self._meet_error(
+                f"Unsupported meeting provider '{provider}'. Please choose Google Meet, Zoom, or Microsoft Teams.",
+                'invalid_provider',
+                status.HTTP_400_BAD_REQUEST
+            )
 
     @staticmethod
     def _meet_error(message, code, http_status):
@@ -787,7 +798,8 @@ class MeetingViewSet(viewsets.ModelViewSet):
         # Idempotency: a retried/duplicate submit returns the original meeting.
         existing = Meeting.objects.filter(client_request_id=client_request_id).first()
         if existing:
-            if existing.google_calendar_owner_id != user.id:
+            owner_id = existing.google_calendar_owner_id or (existing.created_by_id if hasattr(existing, 'created_by_id') else None)
+            if owner_id and owner_id != user.id:
                 raise PermissionDenied('This request id belongs to another user.')
             return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
 
@@ -843,14 +855,19 @@ class MeetingViewSet(viewsets.ModelViewSet):
                     meeting_link=result['meet_url'] or '',
                     meeting_provider='GOOGLE_MEET',
                     google_event_id=result['event_id'],
+                    calendar_event_id=result['event_id'],
+                    calendar_type='GOOGLE_CALENDAR',
                     google_calendar_owner=user,
+                    created_by=user,
+                    timezone=tz_name,
+                    status='SCHEDULED' if result['status'] == 'READY' else 'PENDING',
                     conference_status=result['status'],
                     client_request_id=client_request_id,
                     prospect_contact=contact,
                 )
         except IntegrityError:
             existing = Meeting.objects.filter(client_request_id=client_request_id).first()
-            if existing and existing.google_calendar_owner_id == user.id:
+            if existing and (existing.google_calendar_owner_id == user.id or existing.created_by_id == user.id):
                 return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
             cal.delete_event(creds, result['event_id'])
             raise
@@ -860,6 +877,269 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
         http_status = status.HTTP_201_CREATED if result['status'] == 'READY' else status.HTTP_202_ACCEPTED
         return Response(self.get_serializer(meeting).data, status=http_status)
+
+    def _create_zoom_meeting(self, request):
+        from django.core.validators import validate_email
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import IntegrityError, transaction
+        from zoneinfo import ZoneInfo
+        from datetime import timedelta
+        from accounts import zoom_services as zoom
+        from accounts import calendar_services as cal
+        from accounts import microsoft_services as ms
+
+        user = request.user
+        role = getattr(getattr(user, 'profile', None), 'role', None)
+        if not (user.is_superuser or role in ('PRE', 'LQ', 'MANAGER')):
+            raise PermissionDenied('Only PRE, Lead Qualifiers and Managers can create Zoom meetings.')
+
+        client_request_id = str(request.data.get('client_request_id') or '').strip()
+        if not (8 <= len(client_request_id) <= 64):
+            return self._meet_error('A valid client_request_id is required for Zoom.', 'invalid_request', status.HTTP_400_BAD_REQUEST)
+
+        existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+        if existing:
+            owner_id = existing.created_by_id or existing.google_calendar_owner_id
+            if owner_id and owner_id != user.id:
+                raise PermissionDenied('This request id belongs to another user.')
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prospect = serializer.validated_data['prospect']
+
+        if not apply_lq_distribution_filter(Prospect.objects.filter(pk=prospect.pk), user).exists():
+            raise PermissionDenied('You do not have access to this prospect.')
+
+        contact, attendees = None, []
+        contact_id = request.data.get('prospect_contact')
+        if contact_id:
+            contact = ProspectContact.objects.filter(pk=contact_id, prospect=prospect).first()
+            if not contact:
+                return self._meet_error('Selected key person does not belong to this prospect.', 'invalid_contact', status.HTTP_400_BAD_REQUEST)
+            candidate = (contact.official_email or '').strip()
+            if candidate:
+                try:
+                    validate_email(candidate)
+                    attendees.append(candidate)
+                except DjangoValidationError:
+                    pass
+
+        zoom_creds = zoom.get_zoom_credentials(user)
+        if not zoom_creds:
+            return self._meet_error(
+                'Zoom account is not connected. Connect Zoom to schedule Zoom meetings.',
+                'zoom_not_connected', status.HTTP_409_CONFLICT
+            )
+
+        # Check for connected calendar to sync event
+        g_creds = cal.get_calendar_credentials(user)
+        ms_creds = ms.get_microsoft_credentials(user)
+
+        if not g_creds and not ms_creds:
+            return self._meet_error(
+                'To schedule a Zoom meeting, connect either Google Calendar or Microsoft Outlook Calendar to synchronize the meeting event.',
+                'calendar_not_connected', status.HTTP_409_CONFLICT
+            )
+
+        tz_name = getattr(getattr(user, 'profile', None), 'timezone', None) or 'UTC'
+        start_dt = serializer.validated_data['scheduled_datetime']
+        agenda = serializer.validated_data.get('agenda') or ''
+
+        # 1. Create Zoom Meeting
+        try:
+            zoom_result = zoom.create_zoom_meeting(
+                zoom_creds,
+                summary=prospect.company_name,
+                description=agenda,
+                start_dt=start_dt,
+                tz_name=tz_name,
+                duration_minutes=30,
+            )
+        except zoom.ZoomAuthError as exc:
+            return self._meet_error(str(exc), 'zoom_reauth_required', status.HTTP_409_CONFLICT)
+        except zoom.ZoomAPIError as exc:
+            return self._meet_error(str(exc) or 'Zoom meeting creation failed.', 'zoom_api_error', status.HTTP_502_BAD_GATEWAY)
+        except Exception as exc:
+            return self._meet_error(f"Zoom meeting error: {exc}", 'zoom_error', status.HTTP_502_BAD_GATEWAY)
+
+        # 2. Sync to connected calendar
+        cal_event_id = ''
+        cal_type = ''
+        try:
+            if g_creds:
+                cal_type = 'GOOGLE_CALENDAR'
+                event_id = cal.deterministic_event_id(user.id, client_request_id)
+                try:
+                    tz = ZoneInfo(tz_name or 'UTC')
+                except Exception:
+                    tz = ZoneInfo('UTC')
+                start_local = start_dt.astimezone(tz)
+                end_local = start_local + timedelta(minutes=30)
+                cal_body = {
+                    'id': event_id,
+                    'summary': f"{prospect.company_name} (Zoom Meeting)",
+                    'description': f"{agenda}\n\nJoin Zoom Meeting:\n{zoom_result['join_url']}",
+                    'location': zoom_result['join_url'],
+                    'start': {'dateTime': start_local.isoformat(), 'timeZone': tz_name},
+                    'end': {'dateTime': end_local.isoformat(), 'timeZone': tz_name},
+                }
+                if attendees:
+                    cal_body['attendees'] = [{'email': a} for a in attendees]
+                params = {'sendUpdates': 'all' if attendees else 'none'}
+                try:
+                    ev = cal._api_request(g_creds, 'POST', '/calendars/primary/events', body=cal_body, params=params)
+                    cal_event_id = ev.get('id') or event_id
+                except cal.CalendarAPIError as e:
+                    if e.status == 409:
+                        cal_event_id = event_id
+                    else:
+                        raise
+            elif ms_creds:
+                cal_type = 'OUTLOOK_CALENDAR'
+                cal_event_id = ms.create_outlook_event_for_zoom(
+                    ms_creds,
+                    summary=prospect.company_name,
+                    description=agenda,
+                    start_dt=start_dt,
+                    tz_name=tz_name,
+                    attendees=attendees,
+                    zoom_join_url=zoom_result['join_url'],
+                    duration_minutes=30,
+                )
+        except Exception as cal_err:
+            zoom.delete_zoom_meeting(zoom_creds, zoom_result['meeting_id'])
+            return self._meet_error(
+                f"Failed to synchronize Zoom meeting with connected calendar: {cal_err}",
+                'calendar_sync_failed', status.HTTP_502_BAD_GATEWAY
+            )
+
+        # 3. Store Meeting record
+        try:
+            with transaction.atomic():
+                meeting = serializer.save(
+                    meeting_link=zoom_result['join_url'],
+                    meeting_provider='ZOOM',
+                    provider_meeting_id=zoom_result['meeting_id'],
+                    calendar_event_id=cal_event_id,
+                    calendar_type=cal_type,
+                    created_by=user,
+                    timezone=tz_name,
+                    status='SCHEDULED',
+                    conference_status='READY',
+                    client_request_id=client_request_id,
+                    prospect_contact=contact,
+                )
+        except IntegrityError:
+            existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+            if existing and (existing.created_by_id == user.id or existing.google_calendar_owner_id == user.id):
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+            zoom.delete_zoom_meeting(zoom_creds, zoom_result['meeting_id'])
+            raise
+        except Exception:
+            zoom.delete_zoom_meeting(zoom_creds, zoom_result['meeting_id'])
+            raise
+
+        return Response(self.get_serializer(meeting).data, status=status.HTTP_201_CREATED)
+
+    def _create_ms_teams_meeting(self, request):
+        from django.core.validators import validate_email
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import IntegrityError, transaction
+        from accounts import microsoft_services as ms
+
+        user = request.user
+        role = getattr(getattr(user, 'profile', None), 'role', None)
+        if not (user.is_superuser or role in ('PRE', 'LQ', 'MANAGER')):
+            raise PermissionDenied('Only PRE, Lead Qualifiers and Managers can create Microsoft Teams meetings.')
+
+        client_request_id = str(request.data.get('client_request_id') or '').strip()
+        if not (8 <= len(client_request_id) <= 64):
+            return self._meet_error('A valid client_request_id is required for Microsoft Teams.', 'invalid_request', status.HTTP_400_BAD_REQUEST)
+
+        existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+        if existing:
+            owner_id = existing.created_by_id or existing.google_calendar_owner_id
+            if owner_id and owner_id != user.id:
+                raise PermissionDenied('This request id belongs to another user.')
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prospect = serializer.validated_data['prospect']
+
+        if not apply_lq_distribution_filter(Prospect.objects.filter(pk=prospect.pk), user).exists():
+            raise PermissionDenied('You do not have access to this prospect.')
+
+        contact, attendees = None, []
+        contact_id = request.data.get('prospect_contact')
+        if contact_id:
+            contact = ProspectContact.objects.filter(pk=contact_id, prospect=prospect).first()
+            if not contact:
+                return self._meet_error('Selected key person does not belong to this prospect.', 'invalid_contact', status.HTTP_400_BAD_REQUEST)
+            candidate = (contact.official_email or '').strip()
+            if candidate:
+                try:
+                    validate_email(candidate)
+                    attendees.append(candidate)
+                except DjangoValidationError:
+                    pass
+
+        ms_creds = ms.get_microsoft_credentials(user)
+        if not ms_creds:
+            return self._meet_error(
+                'Microsoft 365 account is not connected. Connect Microsoft 365 to schedule Teams meetings and sync to Outlook Calendar.',
+                'microsoft_not_connected', status.HTTP_409_CONFLICT
+            )
+
+        tz_name = getattr(getattr(user, 'profile', None), 'timezone', None) or 'UTC'
+        start_dt = serializer.validated_data['scheduled_datetime']
+        agenda = serializer.validated_data.get('agenda') or ''
+
+        try:
+            ms_result = ms.create_teams_meeting_and_event(
+                ms_creds,
+                summary=prospect.company_name,
+                description=agenda,
+                start_dt=start_dt,
+                tz_name=tz_name,
+                attendees=attendees,
+                duration_minutes=30,
+            )
+        except ms.MicrosoftAuthError as exc:
+            return self._meet_error(str(exc), 'microsoft_reauth_required', status.HTTP_409_CONFLICT)
+        except ms.MicrosoftAPIError as exc:
+            return self._meet_error(str(exc) or 'Microsoft Teams request failed.', 'microsoft_api_error', status.HTTP_502_BAD_GATEWAY)
+        except Exception as exc:
+            return self._meet_error(f"Microsoft Teams error: {exc}", 'microsoft_error', status.HTTP_502_BAD_GATEWAY)
+
+        try:
+            with transaction.atomic():
+                meeting = serializer.save(
+                    meeting_link=ms_result['join_url'],
+                    meeting_provider='MS_TEAMS',
+                    provider_meeting_id=ms_result.get('meeting_id', ''),
+                    calendar_event_id=ms_result.get('event_id', ''),
+                    calendar_type='OUTLOOK_CALENDAR',
+                    created_by=user,
+                    timezone=tz_name,
+                    status='SCHEDULED',
+                    conference_status='READY',
+                    client_request_id=client_request_id,
+                    prospect_contact=contact,
+                )
+        except IntegrityError:
+            existing = Meeting.objects.filter(client_request_id=client_request_id).first()
+            if existing and (existing.created_by_id == user.id or existing.google_calendar_owner_id == user.id):
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+            ms.delete_outlook_event(ms_creds, ms_result.get('event_id'))
+            raise
+        except Exception:
+            ms.delete_outlook_event(ms_creds, ms_result.get('event_id'))
+            raise
+
+        return Response(self.get_serializer(meeting).data, status=status.HTTP_201_CREATED)
+
 
     @action(detail=True, methods=['post'], url_path='refresh-meet-link')
     def refresh_meet_link(self, request, pk=None):

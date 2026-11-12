@@ -96,6 +96,41 @@ class CalendarOAuthDisconnectView(_CalendarBase):
         return Response({"detail": "Google account disconnected."}, status=status.HTTP_200_OK)
 
 
+class MeetingProvidersStatusView(_CalendarBase):
+    """Returns connected & configured status for Google Meet, Zoom, and Microsoft Teams."""
+    def get(self, request):
+        from .zoom_services import ZoomOAuthService, get_zoom_credentials
+        from .microsoft_services import MicrosoftOAuthService, get_microsoft_credentials
+
+        g_conf = GoogleOAuthService.is_configured()
+        g_creds = get_calendar_credentials(request.user)
+
+        z_conf = ZoomOAuthService.is_configured()
+        z_creds = get_zoom_credentials(request.user)
+
+        ms_conf = MicrosoftOAuthService.is_configured()
+        ms_creds = get_microsoft_credentials(request.user)
+
+        return Response({
+            'google_meet': {
+                'is_connected': bool(g_creds),
+                'is_configured': g_conf,
+                'email': g_creds.email if g_creds else '',
+            },
+            'zoom': {
+                'is_connected': bool(z_creds),
+                'is_configured': z_conf,
+                'email': z_creds.email if z_creds else '',
+            },
+            'ms_teams': {
+                'is_connected': bool(ms_creds),
+                'is_configured': ms_conf,
+                'email': ms_creds.email if ms_creds else '',
+            },
+        }, status=status.HTTP_200_OK)
+
+
+
 class CalendarEventsView(_CalendarBase):
     """
     Fetch events directly from Google Calendar primary calendar for the authenticated user.

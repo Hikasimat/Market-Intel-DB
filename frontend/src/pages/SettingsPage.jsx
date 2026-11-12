@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
-import { Mail, PenLine, Inbox } from 'lucide-react';
+import { Mail, PenLine, Inbox, Video } from 'lucide-react';
 import EmailTemplateList from '../components/settings/EmailTemplateList';
 import SignatureTemplateList from '../components/settings/SignatureTemplateList';
 import EmailTemplateEditor from '../components/settings/EmailTemplateEditor';
 import SignatureTemplateEditor from '../components/settings/SignatureTemplateEditor';
 import MailboxSettings from '../components/settings/MailboxSettings';
+import MeetingPlatformSettings from '../components/settings/MeetingPlatformSettings';
 
 const TABS = [
   { key: 'mailbox', label: 'Mailbox & Gmail', icon: Inbox },
+  { key: 'meetings', label: 'Meeting Platforms', icon: Video },
   { key: 'email', label: 'Email Templates', icon: Mail },
   { key: 'signature', label: 'Signatures', icon: PenLine },
 ];
+
 
 /** LQ-only settings (route protected by RoleRoute + backend IsLQOnly). */
 const SettingsPage = () => {
@@ -61,6 +64,8 @@ const SettingsPage = () => {
           </div>
           {tab === 'mailbox' ? (
             <MailboxSettings />
+          ) : tab === 'meetings' ? (
+            <MeetingPlatformSettings />
           ) : tab === 'email' ? (
             <EmailTemplateList
               refreshKey={refreshKey}
@@ -76,6 +81,7 @@ const SettingsPage = () => {
               onEdit={(id, isCustom) => setEditing({ kind: 'signature', id, isCustom })}
             />
           )}
+
         </>
       )}
     </div>

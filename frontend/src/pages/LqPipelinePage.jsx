@@ -43,8 +43,19 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
       nextParams.delete('calendar_connected');
       setSearchParams(nextParams, { replace: true });
       toast.success('Google Calendar connected successfully! You can now schedule Google Meet meetings.');
+    } else if (searchParams.get('zoom_connected') === '1') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('zoom_connected');
+      setSearchParams(nextParams, { replace: true });
+      toast.success('Zoom connected successfully! You can now schedule Zoom meetings.');
+    } else if (searchParams.get('microsoft_connected') === '1') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('microsoft_connected');
+      setSearchParams(nextParams, { replace: true });
+      toast.success('Microsoft 365 connected successfully! You can now schedule Microsoft Teams meetings.');
     }
   }, [searchParams, setSearchParams]);
+
   
   const [searchTerm, setSearchTerm] = useState(() => {
     const userId = user?.id || 'default';

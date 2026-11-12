@@ -224,17 +224,32 @@ class Meeting(models.Model):
     agenda = models.TextField(blank=True, null=True)
     is_completed = models.BooleanField(default=False)
 
-    # Google Calendar / Meet sync (all optional; manual-link meetings leave these blank)
-    MEETING_PROVIDER_CHOICES = (('MANUAL', 'Manual link'), ('GOOGLE_MEET', 'Google Meet'))
-    meeting_provider = models.CharField(max_length=20, choices=MEETING_PROVIDER_CHOICES, default='MANUAL')
+    # Multi-provider meeting & calendar synchronization
+    MEETING_PROVIDER_CHOICES = (
+        ('MANUAL', 'Manual link'),
+        ('GOOGLE_MEET', 'Google Meet'),
+        ('ZOOM', 'Zoom Meeting'),
+        ('MS_TEAMS', 'Microsoft Teams'),
+    )
+    meeting_provider = models.CharField(max_length=20, choices=MEETING_PROVIDER_CHOICES, default='GOOGLE_MEET')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_meetings'
+    )
     google_event_id = models.CharField(max_length=255, blank=True, null=True)
     google_calendar_owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
     )
+    provider_meeting_id = models.CharField(max_length=255, blank=True, default='')
+    calendar_event_id = models.CharField(max_length=255, blank=True, default='')
+    calendar_type = models.CharField(max_length=50, blank=True, default='')
+    meeting_date = models.DateField(null=True, blank=True)
+    meeting_time = models.TimeField(null=True, blank=True)
+    timezone = models.CharField(max_length=100, blank=True, default='UTC')
+    status = models.CharField(max_length=50, blank=True, default='SCHEDULED')
     conference_status = models.CharField(max_length=20, blank=True, default='')
     client_request_id = models.CharField(
         max_length=64, blank=True, null=True, unique=True,
-        help_text='Idempotency key supplied by the client for Google Meet creation.'
+        help_text='Idempotency key supplied by the client for meeting creation.'
     )
 
     notified_1h = models.BooleanField(default=False)
@@ -244,8 +259,25 @@ class Meeting(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args, **kwargs):
+        if self.scheduled_datetime:
+            if not self.meeting_date:
+                self.meeting_date = self.scheduled_datetime.date()
+            if not self.meeting_time:
+                self.meeting_time = self.scheduled_datetime.time()
+        if self.google_event_id and not self.calendar_event_id:
+            self.calendar_event_id = self.google_event_id
+        elif self.calendar_event_id and not self.google_event_id and self.meeting_provider == 'GOOGLE_MEET':
+            self.google_event_id = self.calendar_event_id
+        if self.google_calendar_owner and not self.created_by:
+            self.created_by = self.google_calendar_owner
+        elif self.created_by and not self.google_calendar_owner:
+            self.google_calendar_owner = self.created_by
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Meeting for {self.prospect.company_name} at {self.scheduled_datetime}"
+
 
 class OutreachEmail(models.Model):
     prospect = models.ForeignKey(Prospect, on_delete=models.CASCADE, null=True, blank=True, related_name='outreach_emails')

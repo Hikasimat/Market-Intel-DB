@@ -155,3 +155,52 @@ class GoogleCalendarCredentials(models.Model):
         return f"GoogleCalendar({self.email}) for {self.user.username}"
 
 
+class ZoomCredentials(models.Model):
+    """
+    Encrypted OAuth tokens for a user's Zoom account.
+    Tokens are Fernet-encrypted at rest and never returned to the frontend.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='zoom_credentials')
+    email = models.EmailField(blank=True, default='')
+    zoom_user_id = models.CharField(max_length=255, blank=True, default='')
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField(blank=True, default='')
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    scopes = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Zoom Credential'
+        verbose_name_plural = 'Zoom Credentials'
+
+    def __str__(self):
+        return f"Zoom({self.email}) for {self.user.username}"
+
+
+class MicrosoftCalendarCredentials(models.Model):
+    """
+    Encrypted OAuth tokens for a user's Microsoft 365 / Outlook / Teams connection.
+    Tokens are Fernet-encrypted at rest and never returned to the frontend.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='microsoft_calendar_credentials')
+    email = models.EmailField(blank=True, default='')
+    ms_user_id = models.CharField(max_length=255, blank=True, default='')
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField(blank=True, default='')
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    scopes = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Microsoft Calendar Credential'
+        verbose_name_plural = 'Microsoft Calendar Credentials'
+
+    def __str__(self):
+        return f"MicrosoftCalendar({self.email}) for {self.user.username}"
+
+
+
