@@ -73,7 +73,7 @@ const InboxPage = () => {
   const [sendingEmail, setSendingEmail] = useState(false);
   const sendingEmailRef = useRef(false);
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
-  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [showCc, setShowCc] = useState(false);
@@ -369,7 +369,7 @@ const InboxPage = () => {
       }
       setShowCompose(false);
       setAttachments([]);
-      setOpenTrackingEnabled(false);
+      setOpenTrackingEnabled(true);
       setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '', draft_id: null, thread_id: null });
       setTemplateSelection({ templateId: '', signatureId: '', baseBody: null });
 

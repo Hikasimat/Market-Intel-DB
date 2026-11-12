@@ -103,9 +103,9 @@ def is_tracking_configured_and_valid():
 def resolve_open_tracking(requested_value):
     """Effective tracking state: requested by the user AND permitted globally.
 
-    An omitted/invalid request value means "not requested" (safe default).
+    An omitted/invalid request value means "requested" (enabled by default).
     """
-    return global_open_tracking_enabled() and parse_bool(requested_value, default=False)
+    return global_open_tracking_enabled() and parse_bool(requested_value, default=True)
 
 
 def build_tracking_pixel_html(tracking_token):

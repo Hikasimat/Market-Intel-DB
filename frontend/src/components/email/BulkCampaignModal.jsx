@@ -27,7 +27,7 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
   const [emailSubject, setEmailSubject] = useState('');
   const [emailBody, setEmailBody] = useState('');
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
-  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
 

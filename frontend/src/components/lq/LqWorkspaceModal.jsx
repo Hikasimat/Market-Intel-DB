@@ -27,7 +27,9 @@ import {
   ShieldCheck,
   Sparkles,
   Upload,
-  Paperclip
+  Paperclip,
+  Loader2,
+  Video
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
@@ -159,7 +161,7 @@ export default function LqWorkspaceModal({
   const [emailSubject, setEmailSubject] = useState(`Company Introduction & Solutions Overview — ${prospect.company_name || ''}`);
   const [emailBody, setEmailBody] = useState(`Dear ${prospect.company_name || 'Team'},\n\nWe are pleased to introduce our solution portfolio tailored for ${prospect.primary_industries || 'your industry'}. We would love to schedule a brief introductory discussion to explore potential alignment.\n\nBest regards,\nLead Qualification Team`);
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
-  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -237,7 +239,7 @@ export default function LqWorkspaceModal({
   const [notInterestedReason, setNotInterestedReason] = useState('');
   const [leadQualifiedDescription, setLeadQualifiedDescription] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
-  const [meetingTime, setMeetingTime] = useState('');
+  const [meetingTime, setMeetingTime] = useState('12:00');
   const [meetingLink, setMeetingLink] = useState('');
   const [meetingProvider, setMeetingProvider] = useState('');
   const [providersStatus, setProvidersStatus] = useState(null);
@@ -500,6 +502,52 @@ export default function LqWorkspaceModal({
       toast.error(e.response?.data?.error || 'Failed to refresh Meet link.');
     } finally {
       setIsRefreshingMeet(false);
+    }
+  };
+
+  const handleScheduleMeetingOnly = async () => {
+    if (!meetingProvider) {
+      setCallError('Please select a meeting platform (Google Meet, Zoom, or Microsoft Teams).');
+      return;
+    }
+    if (!meetingDate) {
+      setCallError('Meeting Date is required.');
+      return;
+    }
+    const effectiveTime = meetingTime || '12:00';
+    const agendaText = leadQualifiedDescription.trim() || `Introductory discussion with ${prospect.company_name}`;
+    setCallError('');
+    setIsCreatingMeeting(true);
+    try {
+      const scheduled_datetime = localDateTimeToUTC(meetingDate, effectiveTime, user?.timezone);
+      const clientReqId = window.crypto?.randomUUID ? window.crypto.randomUUID() : (`req-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const payload = {
+        prospect: prospect.id,
+        prospect_contact: selectedContactId || null,
+        scheduled_datetime,
+        agenda: agendaText,
+        meeting_provider: meetingProvider,
+        client_request_id: clientReqId,
+      };
+      const meetRes = await api.post(`/meetings/`, payload);
+      const savedMeeting = meetRes?.data;
+      setCreatedMeeting(savedMeeting);
+      if (savedMeeting?.meeting_link) {
+        setMeetingLink(savedMeeting.meeting_link);
+      }
+      const provLabel =
+        savedMeeting?.meeting_provider === 'ZOOM'
+          ? 'Zoom Meeting'
+          : savedMeeting?.meeting_provider === 'MS_TEAMS'
+          ? 'Microsoft Teams'
+          : 'Google Meet';
+      toast.success(`Meeting scheduled with ${provLabel}! Link generated and calendar synced.`);
+    } catch (err) {
+      console.error('Failed to schedule meeting', err);
+      const errMsg = err.response?.data?.error || err.response?.data?.detail || 'Failed to schedule meeting';
+      toast.error(errMsg);
+    } finally {
+      setIsCreatingMeeting(false);
     }
   };
 
@@ -940,16 +988,17 @@ export default function LqWorkspaceModal({
     if (callStatus === 'Connected' && communicationOutcome === 'Lead Qualified') {
       setIsCreatingMeeting(true);
       try {
-        let savedMeeting = null;
-        // Save Meeting if date & time exist
-        if (meetingDate && meetingTime) {
-          const scheduled_datetime = localDateTimeToUTC(meetingDate, meetingTime, user?.timezone);
+        let savedMeeting = createdMeeting;
+        // Save Meeting if not already saved and date exists
+        if (!savedMeeting && meetingDate) {
+          const effectiveTime = meetingTime || '12:00';
+          const scheduled_datetime = localDateTimeToUTC(meetingDate, effectiveTime, user?.timezone);
           const clientReqId = window.crypto?.randomUUID ? window.crypto.randomUUID() : (`req-${Date.now()}-${Math.random().toString(36).slice(2)}`);
           const payload = {
             prospect: prospect.id,
             prospect_contact: selectedContactId || null,
             scheduled_datetime,
-            agenda: leadQualifiedDescription,
+            agenda: leadQualifiedDescription.trim() || `Introductory discussion with ${prospect.company_name}`,
             meeting_provider: meetingProvider || 'GOOGLE_MEET',
             client_request_id: clientReqId,
           };
@@ -1833,6 +1882,36 @@ export default function LqWorkspaceModal({
                                         <input type="checkbox" id="attendedMeeting" checked={attendedMeeting} onChange={(e) => setAttendedMeeting(e.target.checked)} className="w-4 h-4 text-sky-600 rounded border-slate-200 focus:ring-sky-500 cursor-pointer" />
                                         <label htmlFor="attendedMeeting" className="text-[11px] font-bold text-slate-700 cursor-pointer">Prospect Attended Meeting</label>
                                       </div>
+
+                                      {!createdMeeting && (
+                                        <div className="pt-2">
+                                          <button
+                                            type="button"
+                                            onClick={handleScheduleMeetingOnly}
+                                            disabled={isCreatingMeeting || !meetingDate}
+                                            className={`w-full py-2.5 px-4 font-extrabold text-xs rounded-xl transition flex items-center justify-center gap-2 shadow-sm ${
+                                              !meetingDate || isCreatingMeeting
+                                                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                                : 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer hover:shadow-md'
+                                            }`}
+                                          >
+                                            {isCreatingMeeting ? (
+                                              <>
+                                                <Loader2 className="w-4 h-4 animate-spin" />
+                                                <span>Generating {meetingProvider === 'ZOOM' ? 'Zoom' : meetingProvider === 'MS_TEAMS' ? 'Teams' : 'Google Meet'} Link...</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Video className="w-4 h-4" />
+                                                <span>Schedule {meetingProvider === 'ZOOM' ? 'Zoom Meeting' : meetingProvider === 'MS_TEAMS' ? 'Teams Meeting' : 'Google Meet'} & Generate Link</span>
+                                              </>
+                                            )}
+                                          </button>
+                                          {!meetingDate && (
+                                            <p className="text-[10px] text-slate-400 text-center mt-1 font-medium">Select a Meeting Date above to generate the meeting link</p>
+                                          )}
+                                        </div>
+                                      )}
                                     </div>
                                   ) : (
                                     <div className="p-3 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-slate-500 text-xs font-semibold">

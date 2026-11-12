@@ -894,7 +894,7 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             build_tracking_pixel_html,
             strip_application_tracking_markup,
         )
-        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'))
+        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'), default=True)
         if requested_tracking and global_open_tracking_enabled():
             valid_cfg, cfg_err = validate_tracking_configuration()
             if not valid_cfg:

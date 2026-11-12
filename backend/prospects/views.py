@@ -850,10 +850,19 @@ class MeetingViewSet(viewsets.ModelViewSet):
             return self._meet_error(str(exc) or 'Google Calendar request failed.', 'calendar_api_error', status.HTTP_502_BAD_GATEWAY)
 
         try:
+            from zoneinfo import ZoneInfo
+            user_tz = ZoneInfo(tz_name or 'UTC')
+        except Exception:
+            user_tz = ZoneInfo('UTC')
+        start_local = serializer.validated_data['scheduled_datetime'].astimezone(user_tz)
+
+        try:
             with transaction.atomic():
                 meeting = serializer.save(
                     meeting_link=result['meet_url'] or '',
                     meeting_provider='GOOGLE_MEET',
+                    meeting_date=start_local.date(),
+                    meeting_time=start_local.time(),
                     google_event_id=result['event_id'],
                     calendar_event_id=result['event_id'],
                     calendar_type='GOOGLE_CALENDAR',
@@ -1016,10 +1025,19 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
         # 3. Store Meeting record
         try:
+            from zoneinfo import ZoneInfo
+            user_tz = ZoneInfo(tz_name or 'UTC')
+        except Exception:
+            user_tz = ZoneInfo('UTC')
+        start_local = start_dt.astimezone(user_tz)
+
+        try:
             with transaction.atomic():
                 meeting = serializer.save(
                     meeting_link=zoom_result['join_url'],
                     meeting_provider='ZOOM',
+                    meeting_date=start_local.date(),
+                    meeting_time=start_local.time(),
                     provider_meeting_id=zoom_result['meeting_id'],
                     calendar_event_id=cal_event_id,
                     calendar_type=cal_type,
@@ -1114,10 +1132,19 @@ class MeetingViewSet(viewsets.ModelViewSet):
             return self._meet_error(f"Microsoft Teams error: {exc}", 'microsoft_error', status.HTTP_502_BAD_GATEWAY)
 
         try:
+            from zoneinfo import ZoneInfo
+            user_tz = ZoneInfo(tz_name or 'UTC')
+        except Exception:
+            user_tz = ZoneInfo('UTC')
+        start_local = start_dt.astimezone(user_tz)
+
+        try:
             with transaction.atomic():
                 meeting = serializer.save(
                     meeting_link=ms_result['join_url'],
                     meeting_provider='MS_TEAMS',
+                    meeting_date=start_local.date(),
+                    meeting_time=start_local.time(),
                     provider_meeting_id=ms_result.get('meeting_id', ''),
                     calendar_event_id=ms_result.get('event_id', ''),
                     calendar_type='OUTLOOK_CALENDAR',
@@ -1491,7 +1518,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             build_tracking_pixel_html,
             strip_application_tracking_markup,
         )
-        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'))
+        requested_tracking = parse_bool(request.data.get('open_tracking_enabled'), default=True)
         if requested_tracking and global_open_tracking_enabled():
             valid_cfg, cfg_err = validate_tracking_configuration()
             if not valid_cfg:
@@ -2265,7 +2292,7 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
         body = request.data.get('body', '')
         template_id = request.data.get('template_id') or None
         signature_id = request.data.get('signature_id') or None
-        open_tracking_raw = request.data.get('open_tracking_enabled', 'false')
+        open_tracking_raw = request.data.get('open_tracking_enabled', 'true')
         open_tracking_enabled = str(open_tracking_raw).lower() in ['true', '1', 'yes']
 
         # Parse recipients

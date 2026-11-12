@@ -10,7 +10,7 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.core.cache import cache
@@ -280,7 +280,11 @@ def zoom_api_request(creds, method, path, body=None, params=None):
 def create_zoom_meeting(creds, *, summary, description, start_dt, tz_name, duration_minutes=None):
     """Create a real Zoom meeting using Zoom Meetings API."""
     duration = duration_minutes or getattr(settings, 'MEETING_DEFAULT_DURATION_MINUTES', DEFAULT_MEETING_DURATION_MINUTES)
-    start_time_iso = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    if timezone.is_aware(start_dt):
+        start_utc = start_dt.astimezone(dt_timezone.utc)
+    else:
+        start_utc = start_dt.replace(tzinfo=dt_timezone.utc)
+    start_time_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     payload = {
         'topic': summary,
         'type': 2,  # Scheduled meeting
