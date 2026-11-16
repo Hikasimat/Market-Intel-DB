@@ -108,6 +108,8 @@ class WhatsAppSessionListSerializer(serializers.ModelSerializer):
             "phone_number",
             "is_active",
             "last_used_at",
+            "last_synced_at",
+            "stopped_at",
             "owner_username",
             "started_at",
             "updated_at",
@@ -299,9 +301,10 @@ class SendMessageSerializer(serializers.Serializer):
         help_text="Plain-text message body.",
     )
     session_name = serializers.CharField(
-        default="default",
+        default="",
         max_length=100,
         required=False,
+        allow_blank=True,
     )
     reply_to = serializers.CharField(
         max_length=255,

@@ -8,7 +8,12 @@ from .views import (
     EmailCampaignViewSet
 )
 from .verification_views import EmailVerificationViewSet
-from .manager_views import manager_dashboard
+from .manager_views import (
+    manager_dashboard,
+    manager_email_activity_list,
+    manager_email_activity_detail,
+    manager_email_summary_refresh,
+)
 
 router = DefaultRouter()
 router.register(r'government-entities', GovernmentEntityViewSet, basename='government-entities')
@@ -30,5 +35,8 @@ urlpatterns = [
     path('email-tracking/click/<uuid:tracking_token>/', EmailLinkClickTrackingView.as_view(), name='email-click-tracking'),
     path('pre-dashboard-stats/', pre_dashboard_stats, name='pre-dashboard-stats'),
     path('manager-dashboard/', manager_dashboard, name='manager-dashboard'),
+    path('manager-dashboard/email-activity/', manager_email_activity_list, name='manager-email-activity-list'),
+    path('manager-dashboard/email-activity/<uuid:thread_id>/', manager_email_activity_detail, name='manager-email-activity-detail'),
+    path('manager-dashboard/email-activity/<uuid:thread_id>/refresh-summary/', manager_email_summary_refresh, name='manager-email-summary-refresh'),
     path('', include(router.urls)),
 ]

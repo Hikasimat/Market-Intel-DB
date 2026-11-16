@@ -1,6 +1,7 @@
-import React from 'react';
-import { Video, Copy, ExternalLink, Loader2, CheckCircle2, AlertTriangle, Calendar as CalendarIcon, Users } from 'lucide-react';
+import React, { useState } from 'react';
+import { Video, Copy, ExternalLink, Loader2, CheckCircle2, AlertTriangle, Calendar as CalendarIcon, Users, Headphones, Download } from 'lucide-react';
 import { toast } from 'react-toastify';
+import api from '../../services/api';
 
 export const copyToClipboard = async (text) => {
   try {
@@ -230,7 +231,15 @@ export default function MeetingProviderPicker({
 }
 
 /** Shows the real meeting URL returned by provider API once created. */
-export function CreatedMeetingCard({ meeting, onDismiss, onRefresh, isRefreshing }) {
+export function CreatedMeetingCard({ meeting: initialMeeting, onDismiss, onRefresh, isRefreshing }) {
+  const [meeting, setMeeting] = useState(initialMeeting);
+  const [isSyncingRecording, setIsSyncingRecording] = useState(false);
+
+  // Sync meeting state when initialMeeting prop updates
+  React.useEffect(() => {
+    setMeeting(initialMeeting);
+  }, [initialMeeting]);
+
   if (!meeting) return null;
 
   const providerId = meeting.meeting_provider || 'GOOGLE_MEET';
@@ -247,6 +256,32 @@ export function CreatedMeetingCard({ meeting, onDismiss, onRefresh, isRefreshing
       : providerId === 'MS_TEAMS'
       ? 'Outlook Calendar'
       : 'Connected Calendar';
+
+  const handleSyncRecording = async () => {
+    if (!meeting?.id) return;
+    setIsSyncingRecording(true);
+    try {
+      const res = await api.post(`/meetings/${meeting.id}/sync-recording/`);
+      if (res?.data) {
+        setMeeting(res.data);
+      }
+      const syncResult = res?.data?.sync_result;
+      if (syncResult?.success) {
+        toast.success('Google Meet audio record downloaded to Market Intel DB!');
+      } else if (syncResult?.status === 'PROCESSING') {
+        toast.info(syncResult.detail || 'Recording is being processed by Google Meet. Try again shortly.');
+      } else if (syncResult?.status === 'NOT_FOUND') {
+        toast.info(syncResult.detail || 'No recording found yet for this meeting.');
+      } else {
+        toast.warn(syncResult?.error || 'Could not sync recording at this time.');
+      }
+    } catch (err) {
+      const msg = err?.response?.data?.error || err?.response?.data?.detail || 'Failed to sync recording from Google Meet.';
+      toast.error(msg);
+    } finally {
+      setIsSyncingRecording(false);
+    }
+  };
 
   return (
     <div
@@ -279,7 +314,7 @@ export function CreatedMeetingCard({ meeting, onDismiss, onRefresh, isRefreshing
       </div>
 
       {ready ? (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           {/* Meeting details */}
           <div className="text-[11px] text-slate-700 flex flex-wrap items-center gap-x-3 gap-y-1 font-semibold">
             {meeting.meeting_date && (
@@ -324,6 +359,57 @@ export function CreatedMeetingCard({ meeting, onDismiss, onRefresh, isRefreshing
               <ExternalLink className="w-3 h-3" /> Open
             </a>
           </div>
+
+          {/* Google Meet REST API Audio Recording Section */}
+          {providerId === 'GOOGLE_MEET' && (
+            <div className="pt-2 border-t border-slate-200/70 flex flex-wrap items-center justify-between gap-2 bg-white/60 p-2.5 rounded-lg border border-slate-200/50">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700">
+                <Headphones className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Google Meet Audio Record:</span>
+                {meeting.recording_file ? (
+                  <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-100 px-2 py-0.5 rounded text-[10px]">
+                    <CheckCircle2 className="w-3 h-3" /> In Market Intel DB
+                  </span>
+                ) : meeting.recording_status === 'PROCESSING' ? (
+                  <span className="text-amber-700 font-bold text-[10px] bg-amber-100 px-2 py-0.5 rounded">
+                    Processing by Google Meet...
+                  </span>
+                ) : (
+                  <span className="text-slate-400 text-[10px] italic">
+                    {meeting.recording_status === 'NOT_FOUND' ? 'No recording found yet' : 'Ready after meeting concludes'}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {meeting.recording_file ? (
+                  <a
+                    href={meeting.recording_file}
+                    download
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-extrabold flex items-center gap-1 shadow-xs cursor-pointer"
+                  >
+                    <Download className="w-3 h-3" /> Download Audio
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSyncRecording}
+                    disabled={isSyncingRecording}
+                    className="px-2.5 py-1 bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 rounded-lg text-[10px] font-extrabold flex items-center gap-1 shadow-xs cursor-pointer disabled:opacity-60"
+                  >
+                    {isSyncingRecording ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                    <span>{isSyncingRecording ? 'Downloading...' : 'Sync Audio Record'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {providerId === 'GOOGLE_MEET' && meeting.recording_file && (
+            <audio controls preload="none" src={meeting.recording_file} className="w-full" />
+          )}
         </div>
       ) : (
         <button

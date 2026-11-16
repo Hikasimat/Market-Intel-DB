@@ -27,6 +27,7 @@ from .calendar_views import (
     CalendarOAuthStatusView,
     CalendarOAuthDisconnectView,
     CalendarEventsView,
+    GoogleCalendarSyncRecordingView,
     MeetingProvidersStatusView,
 )
 from .zoom_views import (
@@ -41,6 +42,7 @@ from .microsoft_views import (
     MicrosoftOAuthStatusView,
     MicrosoftOAuthDisconnectView,
 )
+from .attachment_library_views import EmailAttachmentLibraryViewSet
 
 
 router = DefaultRouter()
@@ -48,6 +50,7 @@ router.register(r'users', UserViewSet, basename='user')
 router.register(r'mail-account', MailAccountViewSet, basename='mail-account')
 router.register(r'email-templates', EmailTemplateViewSet, basename='email-template')
 router.register(r'email-signatures', EmailSignatureTemplateViewSet, basename='email-signature')
+router.register(r'attachment-library', EmailAttachmentLibraryViewSet, basename='attachment-library')
 
 
 class LogoutView(APIView):
@@ -114,6 +117,7 @@ urlpatterns = [
     path('google/calendar/status/', CalendarOAuthStatusView.as_view(), name='calendar_oauth_status'),
     path('google/calendar/disconnect/', CalendarOAuthDisconnectView.as_view(), name='calendar_oauth_disconnect'),
     path('google/calendar/events/', CalendarEventsView.as_view(), name='calendar_events'),
+    path('google/calendar/sync-recording/', GoogleCalendarSyncRecordingView.as_view(), name='calendar_sync_recording'),
 
     # Unified Meeting Providers status
     path('meeting-providers/status/', MeetingProvidersStatusView.as_view(), name='meeting_providers_status'),

@@ -29,7 +29,8 @@ import {
   Upload,
   Paperclip,
   Loader2,
-  Video
+  Video,
+  FolderOpen
 } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchCommunications, sendOutreachEmail, recordCall, syncMail } from '../../features/outreach/outreachSlice';
@@ -39,6 +40,7 @@ import { localDateTimeToUTC } from '../../utils/timezone';
 import TemplatePicker from './TemplatePicker';
 import OpenTrackingToggle from '../email/OpenTrackingToggle';
 import MeetingProviderPicker, { CreatedMeetingCard } from './MeetingProviderPicker';
+import AttachmentLibraryModal from '../email/AttachmentLibraryModal';
 import { notifyMailSent } from '../../services/mailSyncService';
 
 const TimeSelect = ({ value, onChange, className }) => {
@@ -164,6 +166,7 @@ export default function LqWorkspaceModal({
   const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [showAttachmentLibrary, setShowAttachmentLibrary] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [senderMailStatus, setSenderMailStatus] = useState(null);
   const [showTrackingModal, setShowTrackingModal] = useState(false);
@@ -247,6 +250,7 @@ export default function LqWorkspaceModal({
   const [createdMeeting, setCreatedMeeting] = useState(null);
   const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
   const [isRefreshingMeet, setIsRefreshingMeet] = useState(false);
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState([]);
 
 
   // Inbound State
@@ -524,6 +528,7 @@ export default function LqWorkspaceModal({
       const payload = {
         prospect: prospect.id,
         prospect_contact: selectedContactId || null,
+        participant_contact_ids: selectedParticipantIds,
         scheduled_datetime,
         agenda: agendaText,
         meeting_provider: meetingProvider,
@@ -671,6 +676,32 @@ export default function LqWorkspaceModal({
   const removeAttachment = (index) => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
     setAttachmentError('');
+  };
+
+  const handleAttachFromLibrary = (newFiles) => {
+    setAttachmentError('');
+    let currentTotalSize = attachments.reduce((acc, file) => acc + file.size, 0);
+    const validFiles = [];
+
+    for (const file of newFiles) {
+      if (attachments.some(a => a.name === file.name && Math.abs(a.size - file.size) < 100)) {
+        continue;
+      }
+      if (attachments.length + validFiles.length >= 5) {
+        setAttachmentError('Maximum of 5 files reached.');
+        break;
+      }
+      if (currentTotalSize + file.size > 25 * 1024 * 1024) {
+        setAttachmentError(`Adding ${file.name} exceeds the total 25MB attachment limit.`);
+        break;
+      }
+      validFiles.push(file);
+      currentTotalSize += file.size;
+    }
+
+    if (validFiles.length > 0) {
+      setAttachments(prev => [...prev, ...validFiles]);
+    }
   };
 
   const handleSendIntroEmail = async (e) => {
@@ -997,6 +1028,7 @@ export default function LqWorkspaceModal({
           const payload = {
             prospect: prospect.id,
             prospect_contact: selectedContactId || null,
+            participant_contact_ids: selectedParticipantIds,
             scheduled_datetime,
             agenda: leadQualifiedDescription.trim() || `Introductory discussion with ${prospect.company_name}`,
             meeting_provider: meetingProvider || 'GOOGLE_MEET',
@@ -1424,7 +1456,7 @@ export default function LqWorkspaceModal({
                             </span>
                           </div>
                           <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2.5">
-                            <div className="flex items-center gap-3">
+                            <div className="flex flex-wrap items-center gap-2.5">
                               <input
                                 type="file"
                                 id="lq-attachments-upload"
@@ -1444,6 +1476,22 @@ export default function LqWorkspaceModal({
                                 <Upload className="w-3.5 h-3.5" />
                                 <span>Upload File</span>
                               </label>
+
+                              <button
+                                type="button"
+                                onClick={() => setShowAttachmentLibrary(true)}
+                                disabled={isEmailSent || attachments.length >= 5}
+                                className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition ${
+                                  attachments.length >= 5 || isEmailSent
+                                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                    : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300 hover:border-indigo-300 cursor-pointer shadow-2xs'
+                                }`}
+                                title="Choose from your personal 5-file Attachment Library"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5 text-indigo-600" />
+                                <span>Choose from Library</span>
+                              </button>
+
                               <span className="text-[11px] text-slate-400 font-medium">
                                 {attachments.length >= 5 ? 'Maximum 5 files reached' : 'Select up to 5 files to attach'}
                               </span>
@@ -1858,6 +1906,86 @@ export default function LqWorkspaceModal({
                                         ) : (
                                           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 font-medium">
                                             {generalCallSpokeTo ? `${generalCallSpokeTo} (${generalCallDesignation || 'Spoke To'})` : 'Official Company Contact'}
+                                          </div>
+                                        )}
+
+                                        {prospect?.key_contacts && prospect.key_contacts.length > 0 && (
+                                          <div className="mt-2.5 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                                            <div className="flex items-center justify-between">
+                                              <label className="block text-[11px] font-bold text-slate-700">
+                                                Meeting Participants / Attendees
+                                              </label>
+                                              <span className="text-[10px] font-semibold text-slate-500">
+                                                {selectedParticipantIds.length} participant(s) selected
+                                              </span>
+                                            </div>
+
+                                            {/* Dropdown to choose key persons */}
+                                            <div className="flex items-center gap-2">
+                                              <select
+                                                value=""
+                                                onChange={(e) => {
+                                                  const val = Number(e.target.value);
+                                                  if (val && !selectedParticipantIds.includes(val)) {
+                                                    setSelectedParticipantIds(prev => [...prev, val]);
+                                                  }
+                                                }}
+                                                className="flex-1 p-2 bg-white border border-slate-300 rounded-lg text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-100 cursor-pointer"
+                                              >
+                                                <option value="">-- Choose Key Person to add as participant --</option>
+                                                {prospect.key_contacts.map((c) => {
+                                                  const isSelected = selectedParticipantIds.includes(c.id);
+                                                  return (
+                                                    <option key={c.id} value={c.id} disabled={isSelected}>
+                                                      {isSelected ? '✓ ' : ''}{c.contact_name} {c.designation ? `(${c.designation})` : ''} {c.official_email ? `— ${c.official_email}` : '(No official email)'}
+                                                    </option>
+                                                  );
+                                                })}
+                                              </select>
+                                              {selectedParticipantIds.length > 0 && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setSelectedParticipantIds([])}
+                                                  className="text-[11px] text-slate-500 hover:text-rose-600 font-semibold px-2 py-1 rounded transition cursor-pointer"
+                                                >
+                                                  Clear
+                                                </button>
+                                              )}
+                                            </div>
+
+                                            {/* Selected Key Person Badges */}
+                                            {selectedParticipantIds.length > 0 ? (
+                                              <div className="flex flex-wrap gap-1.5 pt-1">
+                                                {prospect.key_contacts
+                                                  .filter(c => selectedParticipantIds.includes(c.id))
+                                                  .map(c => (
+                                                    <span
+                                                      key={c.id}
+                                                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-indigo-200 text-indigo-900 rounded-lg text-[11px] font-semibold shadow-2xs"
+                                                    >
+                                                      <span className={`w-1.5 h-1.5 rounded-full ${c.official_email ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                                                      <span>{c.contact_name} {c.designation ? `(${c.designation})` : ''}</span>
+                                                      {c.official_email ? (
+                                                        <span className="text-slate-400 font-normal">({c.official_email})</span>
+                                                      ) : (
+                                                        <span className="text-amber-600 font-normal text-[10px]">(no email)</span>
+                                                      )}
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => setSelectedParticipantIds(prev => prev.filter(id => id !== c.id))}
+                                                        className="text-slate-400 hover:text-rose-600 transition ml-1 p-0.5 rounded cursor-pointer"
+                                                        title="Remove participant"
+                                                      >
+                                                        <X className="w-3 h-3" />
+                                                      </button>
+                                                    </span>
+                                                  ))}
+                                              </div>
+                                            ) : (
+                                              <p className="text-[11px] text-slate-400 italic">
+                                                Choose key persons from the dropdown above to add them as meeting participants.
+                                              </p>
+                                            )}
                                           </div>
                                         )}
                                       </div>
@@ -2428,6 +2556,14 @@ export default function LqWorkspaceModal({
             </div>
           </div>
         )}
+        {/* Attachment Library Modal */}
+        <AttachmentLibraryModal
+          isOpen={showAttachmentLibrary}
+          onClose={() => setShowAttachmentLibrary(false)}
+          onAttachFiles={handleAttachFromLibrary}
+          existingAttachments={attachments}
+          maxAllowedToAttach={5}
+        />
       </div>
     </div>
   );

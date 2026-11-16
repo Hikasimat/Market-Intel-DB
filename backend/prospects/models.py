@@ -252,6 +252,23 @@ class Meeting(models.Model):
         help_text='Idempotency key supplied by the client for meeting creation.'
     )
 
+    # Google Meet Recording integration via Google Meet REST API
+    recording_file = models.FileField(
+        upload_to='meeting_recordings/%Y/%m/',
+        null=True, blank=True,
+        help_text='Downloaded audio/video recording of the meeting from Google Meet.'
+    )
+    recording_status = models.CharField(
+        max_length=50, blank=True, default='NONE',
+        help_text='Status of recording download (NONE, PROCESSING, COMPLETED, FAILED, NOT_FOUND)'
+    )
+    recording_downloaded_at = models.DateTimeField(null=True, blank=True)
+    recording_file_size = models.BigIntegerField(null=True, blank=True)
+    recording_mime_type = models.CharField(max_length=100, blank=True, default='')
+    google_conference_record_id = models.CharField(max_length=255, blank=True, default='')
+    google_recording_id = models.CharField(max_length=255, blank=True, default='')
+    recording_drive_file_id = models.CharField(max_length=255, blank=True, default='')
+
     notified_1h = models.BooleanField(default=False)
     notified_30m = models.BooleanField(default=False)
     notified_15m = models.BooleanField(default=False)
@@ -705,4 +722,194 @@ class EmailCampaignAttachment(models.Model):
 
     def __str__(self):
         return f"{self.original_filename} ({self.campaign.name})"
+
+
+class EmailThread(models.Model):
+    """
+    Normalized per-user email conversation thread combining outbound (Outreach, Inbox,
+    Bulk Campaigns) and synced inbound email replies for Manager Dashboard visibility
+    and AI conversation summarization.
+    """
+
+    class Status(models.TextChoices):
+        WAITING_REPLY = 'WAITING_REPLY', 'Waiting Reply'
+        REPLIED = 'REPLIED', 'Replied'
+        FAILED = 'FAILED', 'Failed'
+        SENDING = 'SENDING', 'Sending'
+        UNMATCHED = 'UNMATCHED', 'Unmatched'
+
+    class MatchStatus(models.TextChoices):
+        MATCHED = 'MATCHED', 'Matched'
+        UNMATCHED = 'UNMATCHED', 'Unmatched'
+
+    class Direction(models.TextChoices):
+        OUTBOUND = 'OUTBOUND', 'Outbound'
+        INBOUND = 'INBOUND', 'Inbound'
+
+    class SummaryStatus(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        READY = 'READY', 'Ready'
+        FAILED = 'FAILED', 'Failed'
+        SKIPPED = 'SKIPPED', 'Skipped'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='email_threads')
+    company = models.ForeignKey(
+        'companies.Company',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='email_threads',
+    )
+    prospect = models.ForeignKey(
+        Prospect,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='email_threads',
+    )
+    prospect_contact = models.ForeignKey(
+        ProspectContact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='email_threads',
+    )
+    external_thread_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    mailbox_email = models.EmailField(blank=True, default='', db_index=True)
+    correspondent_email = models.EmailField(blank=True, default='', db_index=True)
+    correspondent_name = models.CharField(max_length=255, blank=True, default='')
+    subject = models.CharField(max_length=500, blank=True, default='')
+    normalized_subject = models.CharField(max_length=500, blank=True, default='', db_index=True)
+    match_status = models.CharField(
+        max_length=20,
+        choices=MatchStatus.choices,
+        default=MatchStatus.UNMATCHED,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.WAITING_REPLY,
+    )
+    last_direction = models.CharField(
+        max_length=16,
+        choices=Direction.choices,
+        default=Direction.OUTBOUND,
+    )
+    last_message_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_snippet = models.TextField(blank=True, default='')
+    message_count = models.PositiveIntegerField(default=0)
+    unread_count = models.PositiveIntegerField(default=0)
+
+    # AI Summary fields
+    summary_text = models.TextField(blank=True, default='')
+    next_action = models.CharField(max_length=500, blank=True, default='')
+    summary_status = models.CharField(
+        max_length=20,
+        choices=SummaryStatus.choices,
+        default=SummaryStatus.PENDING,
+    )
+    summary_provider = models.CharField(max_length=64, blank=True, default='')
+    summary_model = models.CharField(max_length=128, blank=True, default='')
+    summary_error = models.TextField(blank=True, default='')
+    summary_content_hash = models.CharField(max_length=64, blank=True, default='')
+    summary_generated_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-last_message_at', '-updated_at']
+        indexes = [
+            models.Index(fields=['owner', '-last_message_at']),
+            models.Index(fields=['owner', 'external_thread_id']),
+            models.Index(fields=['owner', 'normalized_subject', 'correspondent_email']),
+            models.Index(fields=['status', '-last_message_at']),
+        ]
+
+    def __str__(self):
+        return f"Thread({self.owner_id}): {self.subject or '(No Subject)'}"
+
+
+class EmailThreadMessage(models.Model):
+    """
+    Individual chronological message within an EmailThread.
+    Does not store or expose OAuth tokens, SMTP credentials, or BCC recipients.
+    """
+
+    class Direction(models.TextChoices):
+        OUTBOUND = 'OUTBOUND', 'Outbound'
+        INBOUND = 'INBOUND', 'Inbound'
+
+    class Source(models.TextChoices):
+        OUTREACH = 'OUTREACH', 'Outreach'
+        INBOX = 'INBOX', 'Inbox'
+        CAMPAIGN = 'CAMPAIGN', 'Campaign'
+        SYNC = 'SYNC', 'Sync'
+
+    class Status(models.TextChoices):
+        SENDING = 'SENDING', 'Sending'
+        SENT = 'SENT', 'Sent'
+        RECEIVED = 'RECEIVED', 'Received'
+        FAILED = 'FAILED', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.ForeignKey(EmailThread, on_delete=models.CASCADE, related_name='messages')
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='email_thread_messages')
+    outreach_email = models.OneToOneField(
+        OutreachEmail,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='thread_message',
+    )
+    campaign_recipient = models.OneToOneField(
+        EmailCampaignRecipient,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='thread_message',
+    )
+    direction = models.CharField(max_length=16, choices=Direction.choices, default=Direction.OUTBOUND)
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.OUTREACH)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.SENT)
+
+    external_message_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    external_thread_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    rfc_message_id = models.CharField(max_length=500, blank=True, default='', db_index=True)
+    in_reply_to = models.CharField(max_length=500, blank=True, default='', db_index=True)
+    references_header = models.TextField(blank=True, default='')
+    dedup_key = models.CharField(max_length=255)
+
+    sender_email = models.EmailField(blank=True, default='')
+    sender_name = models.CharField(max_length=255, blank=True, default='')
+    to_emails = models.JSONField(default=list, blank=True)
+    cc_emails = models.JSONField(default=list, blank=True)
+    subject = models.CharField(max_length=500, blank=True, default='')
+    body_text = models.TextField(blank=True, default='')
+    body_html = models.TextField(blank=True, default='')
+    snippet = models.TextField(blank=True, default='')
+    attachments_metadata = models.JSONField(default=list, blank=True)
+    error_message = models.TextField(blank=True, default='')
+
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sent_at', 'created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['owner', 'dedup_key'],
+                name='unique_owner_email_thread_msg_dedup',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['thread', 'sent_at']),
+            models.Index(fields=['owner', '-sent_at']),
+            models.Index(fields=['external_message_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.direction} {self.subject[:60]} ({self.owner_id})"
 

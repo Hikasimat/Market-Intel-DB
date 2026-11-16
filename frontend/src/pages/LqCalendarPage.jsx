@@ -70,6 +70,42 @@ export default function LqCalendarPage() {
   // Selected event modal
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [syncingRecording, setSyncingRecording] = useState(false);
+
+  const toMediaUrl = (path) => {
+    if (!path) return "";
+    if (/^https?:\/\//i.test(path)) return path;
+    try {
+      const base = new URL(api.defaults.baseURL || "/", window.location.origin);
+      return `${base.origin}${path}`;
+    } catch {
+      return path;
+    }
+  };
+
+  const handleSyncRecording = async (evt) => {
+    setSyncingRecording(true);
+    try {
+      const res = await api.post("/auth/google/calendar/sync-recording/", {
+        meeting_id: evt.meeting_id,
+        event_id: evt.id,
+        meet_url: evt.meet_url,
+      });
+      const d = res.data || {};
+      if (d.success && d.recording_url) {
+        const patch = { recording_file: d.recording_url, recording_status: "COMPLETED", meeting_id: d.meeting_id };
+        setSelectedEvent((prev) => (prev ? { ...prev, ...patch } : prev));
+        setEvents((prev) => prev.map((e) => (e.id === evt.id ? { ...e, ...patch } : e)));
+        toast.success("Audio record saved to Market Intel DB");
+      } else {
+        toast.info(d.detail || "No recording available yet.");
+      }
+    } catch (err) {
+      toast.error(err?.response?.data?.error || "Could not fetch recording from Google Meet.");
+    } finally {
+      setSyncingRecording(false);
+    }
+  };
 
   // Add Schedule modal & draft slot state
   const [isAddScheduleOpen, setIsAddScheduleOpen] = useState(false);
@@ -1340,6 +1376,48 @@ export default function LqCalendarPage() {
                 )}
 
                 {/* Description */}
+                {/* Google Meet audio recording stored in Market Intel DB */}
+                {selectedEvent.meet_url && (
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <span className="font-bold text-slate-800 text-xs">Meeting Audio Record</span>
+                    {selectedEvent.recording_file ? (
+                      <div className="space-y-2">
+                        <audio
+                          controls
+                          preload="none"
+                          src={toMediaUrl(selectedEvent.recording_file)}
+                          className="w-full"
+                        />
+                        <a
+                          href={toMediaUrl(selectedEvent.recording_file)}
+                          download
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition"
+                        >
+                          Download Audio
+                        </a>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={syncingRecording}
+                          onClick={() => handleSyncRecording(selectedEvent)}
+                          className="px-3 py-1.5 bg-white border border-indigo-200 text-indigo-700 font-bold text-xs rounded-xl hover:bg-indigo-50 transition disabled:opacity-60"
+                        >
+                          {syncingRecording ? "Fetching from Google Meet..." : "Fetch Audio from Google Meet"}
+                        </button>
+                        <span className="text-[11px] text-slate-400">
+                          {selectedEvent.recording_status === "PROCESSING"
+                            ? "Google is still processing the recording"
+                            : "Available after the meeting ends (recording must be on)"}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {selectedEvent.description && (
                   <div>
                     <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block mb-1">

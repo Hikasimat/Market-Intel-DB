@@ -381,20 +381,23 @@ export default function WhatsappPage() {
   const dispatch = useDispatch();
   const location = useLocation();
   const { user } = useSelector((state) => state.auth);
+  const waCacheKey = user?.id ? `wa_cached_session_${user.id}` : null;
 
-  // Retrieve cached active WhatsApp session from sessionStorage to eliminate UI flash on page navigation
-  const getCachedActiveSession = () => {
+  // Retrieve cached active WhatsApp session from sessionStorage scoped to user.id
+  const getCachedActiveSession = useCallback(() => {
+    if (!waCacheKey) return null;
     try {
-      const saved = sessionStorage.getItem('wa_cached_session');
+      sessionStorage.removeItem('wa_cached_session');
+      const saved = sessionStorage.getItem(waCacheKey);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && (parsed.status === 'READY' || parsed.phone_number)) {
+        if (parsed && parsed.status === 'READY') {
           return parsed;
         }
       }
     } catch (_) {}
     return null;
-  };
+  }, [waCacheKey]);
 
   const initialCachedSession = getCachedActiveSession();
 
@@ -402,7 +405,7 @@ export default function WhatsappPage() {
   const [sessions, setSessions] = useState(initialCachedSession ? [initialCachedSession] : []);
   const [selectedSession, setSelectedSession] = useState(initialCachedSession);
   const [sessionStatus, setSessionStatus] = useState(
-    initialCachedSession ? {
+    initialCachedSession && initialCachedSession.status === 'READY' ? {
       status: 'WORKING',
       connected: true,
       session_name: initialCachedSession.session_name,
@@ -412,6 +415,7 @@ export default function WhatsappPage() {
   const [qrCodeData, setQrCodeData] = useState(null);
   const [loadingQR, setLoadingQR] = useState(false);
   const [qrExpired, setQrExpired] = useState(false);
+  const [connectionError, setConnectionError] = useState(null);
   const [showSessionDropdown, setShowSessionDropdown] = useState(false);
 
   // Phone Pairing code alternative
@@ -583,35 +587,55 @@ export default function WhatsappPage() {
   const fetchSessions = useCallback(async () => {
     try {
       const res = await api.get('/whatsapp/session/list/');
-      setSessions(res.data);
-      if (res.data && res.data.length > 0) {
-        const found = res.data[0];
-        setSelectedSession(prev => {
-          if (prev?.status === 'READY' && found.status !== 'READY') {
-            return prev;
-          }
-          if (found.status === 'READY') {
+      const list = Array.isArray(res.data) ? res.data : [];
+      setSessions(list);
+      setConnectionError(null);
+      if (list.length > 0) {
+        const found = list[0];
+        setSelectedSession(found);
+        if (found.status === 'READY') {
+          if (waCacheKey) {
             try {
-              sessionStorage.setItem('wa_cached_session', JSON.stringify(found));
+              sessionStorage.setItem(waCacheKey, JSON.stringify(found));
             } catch (_) {}
-            setSessionStatus({
-              status: 'WORKING',
-              connected: true,
-              session_name: found.session_name,
-              phone_number: found.phone_number,
-            });
           }
-          return found;
-        });
+          setSessionStatus({
+            status: 'WORKING',
+            connected: true,
+            session_name: found.session_name,
+            phone_number: found.phone_number,
+          });
+        } else {
+          if (waCacheKey) {
+            try {
+              sessionStorage.removeItem(waCacheKey);
+            } catch (_) {}
+          }
+          setSessionStatus({
+            status: found.status || 'DISCONNECTED',
+            connected: false,
+            session_name: found.session_name,
+            phone_number: found.phone_number,
+          });
+        }
       }
     } catch (err) {
       console.error('Failed to fetch WhatsApp sessions:', err);
+      setConnectionError(err.response?.data?.detail || 'Unable to load WhatsApp session status.');
     }
-  }, []);
+  }, [waCacheKey]);
 
+  // Reset local session view cleanly if the logged-in Market Intel user changes
   useEffect(() => {
+    setSelectedSession(null);
+    setSessionStatus(null);
+    setQrCodeData(null);
+    setChats([]);
+    setSelectedChat(null);
+    setMessages([]);
+    setConnectionError(null);
     fetchSessions();
-  }, [fetchSessions]);
+  }, [user?.id, fetchSessions]);
 
   // Fetch live QR or Connection state for current user's session
   const isFetchingQRRef = useRef(false);
@@ -620,13 +644,13 @@ export default function WhatsappPage() {
     if (selectedSession?.status === 'READY' && !forceRestart) {
       return;
     }
-    // Fast exit if cached session is already ready
-    if (!forceRestart) {
+    // Fast exit if cached session for this user is already ready
+    if (!forceRestart && waCacheKey) {
       try {
-        const saved = sessionStorage.getItem('wa_cached_session');
+        const saved = sessionStorage.getItem(waCacheKey);
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (parsed && (parsed.status === 'READY' || parsed.phone_number)) {
+          if (parsed && parsed.status === 'READY') {
             return;
           }
         }
@@ -642,6 +666,7 @@ export default function WhatsappPage() {
       const res = await api.get(url);
       const data = res.data;
       setSessionStatus(data);
+      setConnectionError(null);
 
       if (data.status === 'WORKING' || data.connected) {
         setQrCodeData(null);
@@ -651,13 +676,18 @@ export default function WhatsappPage() {
           status: 'READY',
           phone_number: data.phone_number || selectedSession?.phone_number
         };
-        try {
-          sessionStorage.setItem('wa_cached_session', JSON.stringify(readySession));
-        } catch (_) {}
+        if (waCacheKey) {
+          try {
+            sessionStorage.setItem(waCacheKey, JSON.stringify(readySession));
+          } catch (_) {}
+        }
         setSelectedSession(prev => ({
           ...(prev || {}),
           ...readySession,
         }));
+        if (data.account_switched && data.message) {
+          showToast(data.message, 'info');
+        }
       } else if (data.status === 'SCAN_QR_CODE') {
         const qr = data.qrBase64 || data.qr || data.value || data.data;
         if (qr) {
@@ -667,11 +697,12 @@ export default function WhatsappPage() {
       }
     } catch (err) {
       console.error('Failed to get QR code status:', err);
+      setConnectionError(err.response?.data?.detail || 'Could not reach WhatsApp service. Retrying...');
     } finally {
       isFetchingQRRef.current = false;
       setLoadingQR(false);
     }
-  }, [selectedSession?.status, selectedSession?.session_name, selectedSession?.phone_number]);
+  }, [selectedSession?.status, selectedSession?.session_name, selectedSession?.phone_number, waCacheKey]);
 
   // QR Polling: Sequential polling prevents request piling and worker thread starvation
   useEffect(() => {
@@ -707,11 +738,11 @@ export default function WhatsappPage() {
     }
     setRequestingCode(true);
     try {
-      const sessionName = selectedSession?.session_name || 'default';
-      const res = await api.post('/whatsapp/pair-code/', {
-        session_name: sessionName,
-        phone_number: clean,
-      });
+      const payload = { phone_number: clean };
+      if (selectedSession?.session_name) {
+        payload.session_name = selectedSession.session_name;
+      }
+      const res = await api.post('/whatsapp/pair-code/', payload);
       if (res.data?.code) {
         setPairingCode(res.data.code);
         showToast('Pairing code generated! Check your phone.', 'success');
@@ -725,21 +756,26 @@ export default function WhatsappPage() {
     }
   };
 
-  // Disconnect / Logout Session
+  // Disconnect / Logout Session (preserves DB conversations and historical phone number)
   const handleLogoutSession = async () => {
-    if (!window.confirm("Are you sure you want to disconnect WhatsApp? You will need to scan the QR code again.")) return;
+    if (!window.confirm("Disconnect WhatsApp now? Your existing conversation history remains saved in Market Intel DB and will restore when you reconnect.")) return;
     try {
       const sessionName = selectedSession?.session_name || '';
-      try {
-        sessionStorage.removeItem('wa_cached_session');
-      } catch (_) {}
+      if (waCacheKey) {
+        try {
+          sessionStorage.removeItem(waCacheKey);
+        } catch (_) {}
+      }
       await api.post('/whatsapp/session/logout/', { session_name: sessionName });
-      showToast('WhatsApp session disconnected.', 'info');
-      setSelectedSession(null);
-      setSessionStatus({ status: 'SCAN_QR_CODE', connected: false });
-      setChats([]);
-      setSelectedChat(null);
-      setMessages([]);
+      showToast('WhatsApp disconnected. Historical chats preserved.', 'info');
+      setSelectedSession(prev => prev ? { ...prev, status: 'DISCONNECTED' } : null);
+      setSessionStatus(prev => ({
+        status: 'SCAN_QR_CODE',
+        connected: false,
+        session_name: sessionName || prev?.session_name,
+        phone_number: prev?.phone_number || selectedSession?.phone_number,
+      }));
+      setQrCodeData(null);
       fetchQR(true);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Failed to disconnect session.', 'error');
@@ -1703,9 +1739,23 @@ export default function WhatsappPage() {
             {/* Left Steps Column */}
             <div className="p-8 md:p-12 flex-1 flex flex-col justify-between">
               <div>
-                <h2 className="text-2xl font-light text-slate-800 mb-6">
+                <h2 className="text-2xl font-light text-slate-800 mb-4">
                   To use WhatsApp on your computer:
                 </h2>
+
+                {selectedSession?.phone_number && (
+                  <div className="mb-5 px-3.5 py-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+                    <span className="font-semibold">Previously connected:</span>{' '}
+                    <span className="font-mono">{formatPhone(selectedSession.phone_number)}</span>
+                    {' '}({selectedSession.status || 'DISCONNECTED'}). Scan to reconnect and restore saved history.
+                  </div>
+                )}
+
+                {connectionError && (
+                  <div className="mb-5 px-3.5 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    {connectionError}
+                  </div>
+                )}
 
                 <ol className="space-y-5 text-slate-600 text-sm md:text-base">
                   <li className="flex items-start gap-4">

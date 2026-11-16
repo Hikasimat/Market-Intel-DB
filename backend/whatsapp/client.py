@@ -679,8 +679,21 @@ class WAHAClient:
             logger.debug("Failed to get groups from WAHA for session %s: %s", session_name, e)
             return []
 
-    def get_chats(self, session_name: str = "default", limit: int = 50) -> list:
-        """Get list of chats / groups from WAHA noweb-light."""
+    def get_chats(self, session_name: str = "", limit: int = 50) -> list:
+        """Get list of chats / groups from WAHA for a specific owned session."""
+        if not session_name or session_name == "default":
+            return []
+        try:
+            _status, body = self._request(
+                "GET",
+                f"/api/{session_name}/chats",
+                query={"limit": min(int(limit or 50), 200)},
+                timeout=4.0,
+            )
+            if isinstance(body, list):
+                return body
+        except Exception:
+            pass
         return self.get_groups(session_name)
 
     def get_messages(
@@ -688,6 +701,7 @@ class WAHAClient:
         session_name: str,
         chat_id: str,
         limit: int = 100,
+        offset: int = 0,
     ) -> list:
         """Get messages for a specific chat across WAHA endpoints for the logged-in session only."""
         if not session_name or session_name == "default":
@@ -696,20 +710,96 @@ class WAHAClient:
             f"/api/{session_name}/chats/{chat_id}/messages",
             f"/api/chats/{chat_id}/messages",
         ]
+        query_params = {"session": session_name, "limit": min(limit, 500), "downloadMedia": "true"}
+        if offset and offset > 0:
+            query_params["offset"] = int(offset)
 
         for path in endpoints:
             try:
                 _status, body = self._request(
                     "GET",
                     path,
-                    query={"session": session_name, "limit": min(limit, 500), "downloadMedia": "true"},
+                    query=query_params,
                     timeout=5.0,
                 )
                 if isinstance(body, list) and body:
                     return body
+            except WAHAServiceError as exc:
+                err_str = str(exc).lower()
+                if exc.status_code in (429, 503, 504) or "rate-overlimit" in err_str:
+                    raise
+                continue
             except Exception:
                 continue
         return []
+
+    def get_messages_paginated(
+        self,
+        session_name: str,
+        chat_id: str,
+        page_size: int = 100,
+        max_pages: int = 10,
+        cutoff_dt=None,
+    ) -> list:
+        """
+        Paginated message retrieval from WAHA with bounded rate-limit retry and
+        duplicate-page protection (in case WAHA ignores offset).
+        """
+        import time as _time
+        from datetime import datetime, timezone as dt_timezone
+
+        if not session_name or session_name == "default":
+            return []
+
+        collected = []
+        seen_ids = set()
+        for page in range(max_pages):
+            offset = page * page_size
+            batch = None
+            for attempt in range(3):
+                try:
+                    if offset > 0:
+                        batch = self.get_messages(session_name, chat_id, limit=page_size, offset=offset)
+                    else:
+                        batch = self.get_messages(session_name, chat_id, limit=page_size)
+                    break
+                except WAHAServiceError as exc:
+                    err_str = str(exc).lower()
+                    if (exc.status_code in (429, 503, 504) or "rate-overlimit" in err_str) and attempt < 2:
+                        _time.sleep(0.5 * (attempt + 1))
+                        continue
+                    batch = []
+                    break
+
+            if not batch:
+                break
+
+            new_in_page = 0
+            oldest_ts = None
+            for m in batch:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("id") or "")
+                if mid and mid in seen_ids:
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+                collected.append(m)
+                new_in_page += 1
+
+                raw_ts = m.get("timestamp") or (m.get("_data") or {}).get("messageTimestamp")
+                if isinstance(raw_ts, (int, float)) and raw_ts > 0:
+                    val = float(raw_ts) / (1000.0 if raw_ts >= 10_000_000_000 else 1.0)
+                    dt_val = datetime.fromtimestamp(val, tz=dt_timezone.utc)
+                    if oldest_ts is None or dt_val < oldest_ts:
+                        oldest_ts = dt_val
+
+            if new_in_page == 0 or len(batch) < page_size:
+                break
+            if cutoff_dt and oldest_ts and oldest_ts < cutoff_dt:
+                break
+
+        return collected
 
     def mark_as_read(self, session_name: str, chat_id: str, message_id: str = None) -> dict:
         """Mark messages in a chat as read via WAHA sendSeen."""

@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
@@ -847,6 +847,412 @@ class WhatsAppMultiAccountIsolationTestCase(APITestCase):
         returned_bodies = [m["full_body"] for m in resp_msgs.data.get("messages", [])]
         self.assertIn("Welcome everyone to the group!", returned_bodies)
         self.assertIn("Thanks for adding me!", returned_bodies)
+
+
+class WhatsAppDynamicSyncAndLifecycleTestCase(APITestCase):
+    """
+    Comprehensive test suite covering Part A requirements:
+    - Dynamic unlimited multi-user sessions with deterministic HMAC naming
+    - No hardcoded session names / 'default' fallback leaks
+    - Persistent DB storage (messages, timestamps, media, reply context, acks, groups, @lid)
+    - Scenario A: Logout preserves owner, phone_number, conversations, messages
+    - Scenario B: Reconnect same number restores history and syncs missing messages idempotently
+    - Scenario C: Reconnect different number preserves old account history separately without merging
+    - Calling endpoints regression intact
+    """
+
+    WEBHOOK_SECRET = "test-dynamic-webhook-secret"
+
+    def setUp(self):
+        self.patcher_secret = patch("django.conf.settings.WHATSAPP_WEBHOOK_SECRET", self.WEBHOOK_SECRET, create=True)
+        self.patcher_secret.start()
+        self.addCleanup(self.patcher_secret.stop)
+        self._env_patch = patch.dict("os.environ", {"WHATSAPP_WEBHOOK_SECRET": self.WEBHOOK_SECRET})
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+        from django.core.cache import cache
+        cache.clear()
+
+        self.patcher_avatar = patch("whatsapp.webhooks._fetch_contact_profile_picture_bg")
+        self.patcher_avatar.start()
+        self.addCleanup(self.patcher_avatar.stop)
+        self.patcher_media = patch("whatsapp.webhooks._download_and_save_media_bg")
+        self.patcher_media.start()
+        self.addCleanup(self.patcher_media.stop)
+
+        WhatsAppConfiguration.objects.get_or_create(pk=1, defaults={"outbound_enabled": True})
+
+        self.user1 = User.objects.create_user(username="dyn_pre1", password="p1", email="dyn1@test.com")
+        self.user1.profile.role = "PRE"
+        self.user1.profile.save()
+
+        self.user2 = User.objects.create_user(username="dyn_pre2", password="p2", email="dyn2@test.com")
+        self.user2.profile.role = "PRE"
+        self.user2.profile.save()
+
+        self.user3 = User.objects.create_user(username="dyn_pre3", password="p3", email="dyn3@test.com")
+        self.user3.profile.role = "LQ"
+        self.user3.profile.save()
+
+        self.prospect = Prospect.objects.create(company_name="Acme Dynamics Ltd")
+        self.contact = ProspectContact.objects.create(
+            prospect=self.prospect,
+            contact_name="Alice KeyPerson",
+            phone_number="+919811122233",
+        )
+
+    def _post_signed_webhook(self, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        sig = hmac.new(self.WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        return self.client.post(
+            "/api/whatsapp/webhook/",
+            data=body,
+            content_type="application/json",
+            HTTP_X_WEBHOOK_HMAC=f"sha256={sig}",
+        )
+
+    def test_1_dynamic_multi_user_connection_and_isolation(self):
+        """Users 1, 2, 3 get independent deterministic sessions and connect unique numbers concurrently."""
+        from whatsapp.client import WAHAServiceError
+        fake_waha = MagicMock()
+        fake_waha.get_session_status.side_effect = WAHAServiceError("not found", status_code=404)
+        fake_waha.get_qr.return_value = {"qr": "data:image/png;base64,FAKEQR", "qrBase64": "data:image/png;base64,FAKEQR"}
+
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("whatsapp.services.get_waha_client", return_value=fake_waha):
+            sessions_by_user = {}
+            for idx, u in enumerate([self.user1, self.user2, self.user3], start=1):
+                self.client.force_authenticate(user=u)
+                resp = self.client.get("/api/whatsapp/qr/")
+                self.assertEqual(resp.status_code, status.HTTP_200_OK)
+                sname = resp.data.get("session_name")
+                self.assertTrue(sname.startswith(f"wa_u{u.id}_"))
+                self.assertNotEqual(sname, "default")
+                sessions_by_user[idx] = sname
+
+        self.assertEqual(len(set(sessions_by_user.values())), 3)
+
+        # Simulate WAHA session.connected webhooks with varied phone formats
+        phones = ["+919876500001", "919876500002", "+91 98765 00003"]
+        for idx, raw_phone in enumerate(phones, start=1):
+            res = self._post_signed_webhook({
+                "event": "session.connected",
+                "id": f"evt_conn_{idx}",
+                "session": sessions_by_user[idx],
+                "payload": {"me": {"phone": raw_phone}},
+            })
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        s1 = WhatsAppSession.objects.get(session_name=sessions_by_user[1])
+        s2 = WhatsAppSession.objects.get(session_name=sessions_by_user[2])
+        s3 = WhatsAppSession.objects.get(session_name=sessions_by_user[3])
+        self.assertEqual(s1.status, WhatsAppSession.Status.READY)
+        self.assertEqual(s1.owner, self.user1)
+        self.assertEqual(s1.phone_number, "+919876500001")
+        self.assertEqual(s2.phone_number, "+919876500002")
+        self.assertEqual(s3.phone_number, "+919876500003")
+
+    def test_2_persistence_dedup_media_reply_ack_and_contact_rename(self):
+        """Inbound/outbound messages persist with timestamps, media, reply context, name updates, and idempotency."""
+        from whatsapp.services import get_or_create_user_session
+        s1 = get_or_create_user_session(self.user1, create=True)
+        s1.status = WhatsAppSession.Status.READY
+        s1.phone_number = "+919876500001"
+        s1.save()
+
+        ts_in = 1710000100
+        inbound_payload = {
+            "event": "message",
+            "id": "evt_in_media_1",
+            "session": s1.session_name,
+            "payload": {
+                "id": "false_919811122233@c.us_MSG001",
+                "from": "919811122233@s.whatsapp.net",
+                "to": "919876500001@c.us",
+                "fromMe": False,
+                "timestamp": ts_in,
+                "pushName": "Alice Updated",
+                "body": "Please see attached brochure",
+                "hasMedia": True,
+                "mediaUrl": "/api/files/brochure.pdf",
+                "media": {"mimetype": "application/pdf", "filename": "brochure.pdf"},
+            },
+        }
+        self.assertEqual(self._post_signed_webhook(inbound_payload).status_code, status.HTTP_200_OK)
+        # Duplicate webhook with same payload id must not duplicate message
+        self.assertEqual(self._post_signed_webhook(inbound_payload).status_code, status.HTTP_200_OK)
+
+        conv = WhatsAppConversation.objects.get(
+            session=s1,
+            chat_id__in=["919811122233@c.us", "919811122233@s.whatsapp.net"],
+        )
+        self.assertEqual(conv.whatsapp_name, "Alice Updated")
+        self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv).count(), 1)
+        msg1 = WhatsAppMessage.objects.get(conversation=conv)
+        self.assertTrue(msg1.has_media)
+        self.assertEqual(msg1.media_mime_type, "application/pdf")
+        self.assertEqual(msg1.media_url, "/api/files/brochure.pdf")
+        self.assertEqual(int(msg1.waha_timestamp.timestamp()), ts_in)
+
+        # Outbound send -> WAHA echo webhook -> ACK update -> no duplicate outbound record
+        fake_waha = MagicMock()
+        fake_waha.send_text.return_value = {"id": "true_919811122233@c.us_OUT999"}
+        self.client.force_authenticate(user=self.user1)
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("whatsapp.services.get_waha_client", return_value=fake_waha):
+            send_resp = self.client.post("/api/whatsapp/send/", {
+                "prospect_contact_id": str(self.contact.id),
+                "message_body": "Thanks Alice, reviewing now.",
+            }, format="json")
+        self.assertEqual(send_resp.status_code, status.HTTP_201_CREATED)
+
+        echo_payload = {
+            "event": "message",
+            "id": "evt_echo_out_1",
+            "session": s1.session_name,
+            "payload": {
+                "id": "true_919811122233@c.us_OUT999",
+                "from": "919876500001@c.us",
+                "to": conv.chat_id,
+                "fromMe": True,
+                "timestamp": ts_in + 60,
+                "body": "Thanks Alice, reviewing now.",
+                "quotedMsgId": "false_919811122233@c.us_MSG001",
+            },
+        }
+        self.assertEqual(self._post_signed_webhook(echo_payload).status_code, status.HTTP_200_OK)
+        self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv, direction="OUTBOUND").count(), 1)
+
+        ack_payload = {
+            "event": "message.ack",
+            "id": "evt_ack_out_1",
+            "session": s1.session_name,
+            "payload": {
+                "id": "true_919811122233@c.us_OUT999",
+                "ack": 4,
+                "ackName": "READ",
+            },
+        }
+        self.assertEqual(self._post_signed_webhook(ack_payload).status_code, status.HTTP_200_OK)
+        out_msg = WhatsAppMessage.objects.get(conversation=conv, direction="OUTBOUND")
+        self.assertEqual(out_msg.status, WhatsAppMessage.Status.READ)
+
+    def test_3_logout_preserves_history_and_reconnect_same_number_syncs_missing(self):
+        """Scenario A & Scenario B: Logout keeps all history; reconnect same number restores and syncs delta."""
+        from whatsapp.services import get_or_create_user_session
+        s1 = get_or_create_user_session(self.user1, create=True)
+        s1.status = WhatsAppSession.Status.READY
+        s1.phone_number = "+919876500001"
+        s1.save()
+
+        conv = WhatsAppConversation.objects.create(
+            session=s1,
+            chat_id="919000011111@c.us",
+            phone_number="+919000011111",
+            account_phone="+919876500001",
+            whatsapp_name="Existing Client",
+            last_message_at=timezone.now(),
+        )
+        WhatsAppMessage.objects.create(
+            conversation=conv,
+            idempotency_key="orig-1",
+            waha_message_id="false_919000011111@c.us_OLD1",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            full_body="Message before logout",
+            body_preview="Message before logout",
+            waha_timestamp=timezone.now(),
+            sent_at=timezone.now(),
+        )
+
+        # Scenario A: Logout via API preserves session.owner, session.phone_number, convs & messages
+        fake_waha = MagicMock()
+        fake_waha.logout_session.return_value = {"status": "DISCONNECTED"}
+        self.client.force_authenticate(user=self.user1)
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("whatsapp.services.get_waha_client", return_value=fake_waha):
+            logout_resp = self.client.post("/api/whatsapp/session/logout/", {"session_name": s1.session_name}, format="json")
+        self.assertEqual(logout_resp.status_code, status.HTTP_200_OK)
+
+        s1.refresh_from_db()
+        self.assertEqual(s1.status, WhatsAppSession.Status.DISCONNECTED)
+        self.assertEqual(s1.owner, self.user1)
+        self.assertEqual(s1.phone_number, "+919876500001")
+        self.assertEqual(WhatsAppConversation.objects.filter(session=s1).count(), 1)
+        self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv).count(), 1)
+
+        # Scenario B: Reconnect same number without leading '+' via webhook
+        self._post_signed_webhook({
+            "event": "session.connected",
+            "id": "evt_reconn_same",
+            "session": s1.session_name,
+            "payload": {"me": {"phone": "919876500001"}},
+        })
+        s1.refresh_from_db()
+        self.assertTrue(s1.is_active)
+        self.assertEqual(s1.status, WhatsAppSession.Status.READY)
+        self.assertEqual(s1.phone_number, "+919876500001")
+
+        # Sync history: WAHA returns duplicate OLD1 plus NEW2 (offline missing message)
+        now_ts = int(timezone.now().timestamp())
+        fake_sync_waha = MagicMock()
+        fake_sync_waha.get_recent_messages_from_stats.return_value = []
+        fake_sync_waha.get_chats.return_value = [{"id": "919000011111@c.us", "name": "Existing Client"}]
+        fake_sync_waha.get_messages_paginated.return_value = [
+            {
+                "id": "false_919000011111@c.us_OLD1",
+                "from": "919000011111@c.us",
+                "to": "919876500001@c.us",
+                "fromMe": False,
+                "body": "Message before logout",
+                "timestamp": now_ts - 120,
+            },
+            {
+                "id": "false_919000011111@c.us_NEW2",
+                "from": "919000011111@c.us",
+                "to": "919876500001@c.us",
+                "fromMe": False,
+                "body": "Offline missed message",
+                "timestamp": now_ts - 30,
+            },
+        ]
+        fake_sync_waha.get_groups.return_value = []
+        with patch("whatsapp.client.get_waha_client", return_value=fake_sync_waha):
+            sync_resp = self.client.post("/api/whatsapp/sync-history/", {"days": 2}, format="json")
+            self.assertEqual(sync_resp.status_code, status.HTTP_200_OK)
+            self.assertEqual(sync_resp.data["synced"], 1)
+            self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv).count(), 2)
+
+            list_resp = self.client.get("/api/whatsapp/conversations/")
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_resp.data), 1)
+        msgs_resp = self.client.get(f"/api/whatsapp/conversations/{conv.id}/messages/")
+        bodies = [m["full_body"] for m in msgs_resp.data["messages"]]
+        self.assertEqual(bodies, ["Message before logout", "Offline missed message"])
+
+    def test_4_reconnect_different_number_preserves_old_history_without_merging(self):
+        """Scenario C: Reconnecting a different WhatsApp number archives old session & keeps histories separate."""
+        from whatsapp.services import get_or_create_user_session
+        s_old = get_or_create_user_session(self.user1, create=True)
+        s_old.status = WhatsAppSession.Status.READY
+        s_old.phone_number = "+919876500001"
+        s_old.save()
+
+        conv_old = WhatsAppConversation.objects.create(
+            session=s_old,
+            chat_id="919000022222@c.us",
+            phone_number="+919000022222",
+            account_phone="+919876500001",
+            whatsapp_name="Old Number Contact",
+            last_message_at=timezone.now(),
+        )
+        WhatsAppMessage.objects.create(
+            conversation=conv_old,
+            idempotency_key="old-acc-1",
+            waha_message_id="false_919000022222@c.us_M1",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            full_body="Secret old number history",
+            body_preview="Secret old number history",
+        )
+
+        # User 1 connects a different number on next login
+        self._post_signed_webhook({
+            "event": "session.connected",
+            "id": "evt_switch_new",
+            "session": s_old.session_name,
+            "payload": {"me": {"phone": "+919999900099"}},
+        })
+
+        s_old.refresh_from_db()
+        self.assertFalse(s_old.is_active)
+        self.assertEqual(s_old.phone_number, "+919876500001")
+        # Old history must NOT be deleted!
+        self.assertEqual(WhatsAppConversation.objects.filter(session=s_old).count(), 1)
+        self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv_old).count(), 1)
+
+        s_new = WhatsAppSession.objects.get(owner=self.user1, is_active=True)
+        self.assertNotEqual(s_new.id, s_old.id)
+        self.assertEqual(s_new.phone_number, "+919999900099")
+        self.assertEqual(s_new.status, WhatsAppSession.Status.READY)
+
+        # New active account does not merge old number's conversations
+        self.client.force_authenticate(user=self.user1)
+        fake_waha = MagicMock()
+        fake_waha.get_groups.return_value = []
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha):
+            convs_new = self.client.get("/api/whatsapp/conversations/")
+        self.assertEqual(convs_new.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(convs_new.data), 0)
+
+    def test_5_cross_session_lid_isolation_and_calling_routes_intact(self):
+        """@lid resolution must not leak across sessions; unowned 'default' webhook is rejected; calling routes work."""
+        from whatsapp.services import get_or_create_user_session
+        s1 = get_or_create_user_session(self.user1, create=True)
+        s1.status = WhatsAppSession.Status.READY
+        s1.phone_number = "+919876500001"
+        s1.save()
+
+        s2 = get_or_create_user_session(self.user2, create=True)
+        s2.status = WhatsAppSession.Status.READY
+        s2.phone_number = "+919876500002"
+        s2.save()
+
+        WhatsAppConversation.objects.create(
+            session=s1,
+            chat_id="919811122233@c.us",
+            prospect_contact=self.contact,
+            prospect=self.prospect,
+            metadata={"lid_chat_id": "2262000111222@lid"},
+        )
+
+        # Same @lid arrives on User 2's session -> must NOT match User 1's conversation/prospect via @lid
+        res_u2 = self._post_signed_webhook({
+            "event": "message",
+            "id": "evt_lid_u2",
+            "session": s2.session_name,
+            "payload": {
+                "id": "false_2262000111222@lid_L1",
+                "from": "2262000111222@lid",
+                "fromMe": False,
+                "body": "Hello User 2",
+                "timestamp": int(timezone.now().timestamp()),
+            },
+        })
+        self.assertEqual(res_u2.status_code, status.HTTP_200_OK)
+        self.assertTrue(WhatsAppConversation.objects.filter(session=s2, chat_id="2262000111222@lid").exists())
+        u2_conv = WhatsAppConversation.objects.get(session=s2, chat_id="2262000111222@lid")
+        self.assertIsNone(u2_conv.prospect_contact)
+
+        # Unowned "default" webhook must not create data
+        self._post_signed_webhook({
+            "event": "message",
+            "id": "evt_unowned_default",
+            "session": "default",
+            "payload": {
+                "id": "false_919999988888@c.us_X1",
+                "from": "919999988888@c.us",
+                "fromMe": False,
+                "body": "Should never persist under unowned default",
+            },
+        })
+        self.assertFalse(WhatsAppMessage.objects.filter(full_body="Should never persist under unowned default").exists())
+
+        # Regression: Calling endpoints remain operational and untouched
+        self.client.force_authenticate(user=self.user1)
+        rec_resp = self.client.get("/api/whatsapp/calls/recordings/")
+        self.assertEqual(rec_resp.status_code, status.HTTP_200_OK)
+        call_status_resp = self.client.get("/api/whatsapp/calls/status/")
+        self.assertEqual(call_status_resp.status_code, status.HTTP_200_OK)
+
+        # Contact info (with linked prospect colleagues) & anonymous <img> profile-pic SVG fallback
+        info_resp = self.client.get("/api/whatsapp/contact-info/919811122233@c.us/")
+        self.assertEqual(info_resp.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(info_resp.data.get("members", [])), 1)
+
+        self.client.force_authenticate(user=None)
+        anon_pic_resp = self.client.get("/api/whatsapp/profile-pic/120363413990423012@g.us/")
+        self.assertEqual(anon_pic_resp.status_code, status.HTTP_200_OK)
+
 
 
 

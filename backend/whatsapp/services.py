@@ -97,6 +97,65 @@ def _phone_digits(value: str) -> str:
     return re.sub(r"\D+", "", value or "")
 
 
+def _is_lid_identifier(value: str) -> bool:
+    if not value:
+        return False
+    raw = str(value).strip()
+    if raw.endswith("@lid"):
+        return True
+    digits = re.sub(r"\D+", "", raw.split("@")[0].split(":")[0])
+    return len(digits) > 13 or digits.startswith(("7658", "2262", "2167"))
+
+
+def normalize_phone_digits(value: str) -> str:
+    """
+    Extract normalized phone digits (7-15 digits) from a raw phone or WhatsApp JID.
+    Returns '' for @lid identifiers or invalid lengths.
+    """
+    if not value:
+        return ""
+    raw = str(value).strip()
+    if "@g.us" in raw or _is_lid_identifier(raw):
+        return ""
+    if "@" in raw:
+        raw = raw.split("@")[0].split(":")[0]
+    digits = re.sub(r"\D+", "", raw)
+    if 7 <= len(digits) <= 15:
+        return digits
+    return ""
+
+
+def normalize_phone_number(value: str) -> Optional[str]:
+    """Normalize a phone number or JID to canonical '+<digits>' format."""
+    digits = normalize_phone_digits(value)
+    return f"+{digits}" if digits else None
+
+
+def generate_user_session_name(user) -> str:
+    """
+    Generate a deterministic, unique, non-guessable WAHA session name
+    tied securely to the authenticated Market Intel user.
+    """
+    import hmac as _hmac
+    from django.conf import settings as _settings
+    secret = (getattr(_settings, "SECRET_KEY", None) or "market-intel-wa-session").encode("utf-8")
+    msg = f"wa_user_session:{user.id}".encode("utf-8")
+    digest = _hmac.new(secret, msg, hashlib.sha256).hexdigest()[:12]
+    return f"wa_u{user.id}_{digest}"
+
+
+def verify_deterministic_session_name(session_name: str, user_id: int) -> bool:
+    """Verify whether `session_name` matches the HMAC-derived session ID for `user_id`."""
+    import hmac as _hmac
+    from django.conf import settings as _settings
+    if not session_name or not user_id:
+        return False
+    secret = (getattr(_settings, "SECRET_KEY", None) or "market-intel-wa-session").encode("utf-8")
+    msg = f"wa_user_session:{user_id}".encode("utf-8")
+    expected = f"wa_u{user_id}_{_hmac.new(secret, msg, hashlib.sha256).hexdigest()[:12]}"
+    return _hmac.compare_digest(session_name, expected)
+
+
 def _chat_id_from_phone(phone: str) -> str:
     """Convert a phone number to a WhatsApp chat ID."""
     digits = _phone_digits(phone)
@@ -115,12 +174,181 @@ def _get_config() -> WhatsAppConfiguration:
     return config
 
 
-def _get_or_create_session(session_name: str = "default") -> WhatsAppSession:
-    """Return the WhatsApp session record, creating it if needed."""
+def _get_or_create_session(session_name: str = "default", owner=None) -> WhatsAppSession:
+    """
+    Return the WhatsApp session record, creating it ONLY when an explicit owner
+    or an already-registered session exists. Never assigns ownership casually.
+    """
+    session = WhatsAppSession.objects.filter(session_name=session_name).first()
+    if session:
+        return session
+    if owner is None and session_name == "default":
+        raise WhatsAppAuthorizationError("Shared 'default' WhatsApp session cannot be used without an owner.")
     session, _created = WhatsAppSession.objects.get_or_create(
         session_name=session_name,
+        defaults={"owner": owner, "status": WhatsAppSession.Status.DISCONNECTED, "is_active": True},
     )
     return session
+
+
+def get_or_create_user_session(user, create: bool = True) -> Optional[WhatsAppSession]:
+    """
+    Resolve the isolated active WhatsAppSession belonging to `user`.
+    Creates a deterministic, secure per-user session if none exists and `create=True`.
+    """
+    import uuid as _uuid
+    if not user or not user.is_authenticated:
+        return None
+
+    active = (
+        WhatsAppSession.objects.filter(owner=user, is_active=True)
+        .order_by("-last_used_at", "-updated_at", "-id")
+        .first()
+    )
+    if active:
+        return active
+
+    if not create:
+        return None
+
+    # If user has no active session, check if there is an un-switched disconnected session
+    # (only reactivate if there's one without a phone number or if none is archived)
+    det_name = generate_user_session_name(user)
+    conflict = WhatsAppSession.objects.filter(session_name=det_name).first()
+    if conflict:
+        if conflict.owner_id == user.id:
+            conflict.is_active = True
+            conflict.save(update_fields=["is_active"])
+            return conflict
+        if conflict.owner_id is None:
+            conflict.owner = user
+            conflict.is_active = True
+            conflict.save(update_fields=["owner", "is_active"])
+            return conflict
+        det_name = f"wa_u{user.id}_{_uuid.uuid4().hex[:12]}"
+
+    session = WhatsAppSession.objects.create(
+        session_name=det_name,
+        owner=user,
+        status=WhatsAppSession.Status.DISCONNECTED,
+        is_active=True,
+    )
+    return session
+
+
+def reconcile_connected_session(
+    session_obj: WhatsAppSession,
+    raw_phone: str,
+    source: str = "webhook",
+) -> tuple[WhatsAppSession, bool, Optional[str]]:
+    """
+    Reconcile a WAHA connection event against the database WhatsAppSession.
+
+    Handles:
+      - First-time connection: normalizes & saves phone_number, marks READY.
+      - Scenario B (same number reconnect): keeps existing session identity and
+        all persisted conversations/messages intact, marks READY.
+      - Scenario C (different number connected): preserves the old account's
+        session & conversation history untouched (archived with is_active=False),
+        and activates/creates a separate session for the new phone number.
+
+    Returns (active_session, account_switched, previous_phone).
+    """
+    import uuid as _uuid
+
+    norm_phone = normalize_phone_number(raw_phone)
+    new_digits = normalize_phone_digits(raw_phone)
+
+    with transaction.atomic():
+        locked = WhatsAppSession.objects.select_for_update().get(pk=session_obj.pk)
+        old_phone = locked.phone_number
+        old_digits = normalize_phone_digits(old_phone or "")
+        was_ready = locked.status == WhatsAppSession.Status.READY
+
+        # Same number or first-time phone binding
+        if not new_digits or not old_digits or old_digits == new_digits:
+            update_fields = []
+            if locked.status != WhatsAppSession.Status.READY:
+                locked.status = WhatsAppSession.Status.READY
+                update_fields.append("status")
+            if not locked.is_active:
+                locked.is_active = True
+                update_fields.append("is_active")
+            if norm_phone and locked.phone_number != norm_phone:
+                locked.phone_number = norm_phone
+                update_fields.append("phone_number")
+            if not was_ready:
+                locked.started_at = timezone.now()
+                locked.reconnect_count = (locked.reconnect_count or 0) + 1
+                update_fields.extend(["started_at", "reconnect_count"])
+            if update_fields:
+                locked.save(update_fields=list(set(update_fields)))
+            return locked, False, None
+
+        # Scenario C: Different WhatsApp number authenticated on this user's WAHA slot.
+        # Preserve the old session & its entire conversation/message history untouched!
+        live_session_name = locked.session_name
+        owner = locked.owner
+
+        logger.warning(
+            "WhatsApp account switch detected on session %s (owner=%s): %s -> %s (%s). "
+            "Archiving previous account history without deletion.",
+            live_session_name,
+            getattr(owner, "username", owner),
+            old_phone,
+            norm_phone,
+            source,
+        )
+
+        # Look for an existing historical session owned by the same user for `new_digits`
+        existing_target = None
+        if owner is not None:
+            for cand in WhatsAppSession.objects.filter(owner=owner).exclude(pk=locked.pk).order_by("-updated_at"):
+                if normalize_phone_digits(cand.phone_number or "") == new_digits:
+                    existing_target = cand
+                    break
+
+        # Archive the old account session (preserving its conversations & messages!)
+        archive_suffix = _uuid.uuid4().hex[:6]
+        locked.is_active = False
+        locked.status = WhatsAppSession.Status.DISCONNECTED
+        locked.stopped_at = timezone.now()
+        locked.session_name = f"hist_u{owner.id if owner else 0}_{old_digits}_{archive_suffix}"[:100]
+        locked.save(update_fields=["is_active", "status", "stopped_at", "session_name", "updated_at"])
+
+        if existing_target:
+            existing_target.session_name = live_session_name
+            existing_target.phone_number = norm_phone
+            existing_target.status = WhatsAppSession.Status.READY
+            existing_target.is_active = True
+            existing_target.started_at = timezone.now()
+            existing_target.reconnect_count = (existing_target.reconnect_count or 0) + 1
+            existing_target.save(update_fields=[
+                "session_name", "phone_number", "status", "is_active",
+                "started_at", "reconnect_count", "updated_at",
+            ])
+            new_session = existing_target
+        else:
+            new_session = WhatsAppSession.objects.create(
+                owner=owner,
+                session_name=live_session_name,
+                phone_number=norm_phone,
+                status=WhatsAppSession.Status.READY,
+                is_active=True,
+                started_at=timezone.now(),
+                reconnect_count=1,
+            )
+
+        _write_audit_log(
+            action=WhatsAppAuditLog.Action.SESSION_CONNECTED,
+            performed_by=owner,
+            session_name=live_session_name,
+            success=True,
+            result_code="ACCOUNT_SWITCHED",
+            result_detail=f"Switched active WhatsApp number from {old_phone} to {norm_phone}; previous history preserved.",
+        )
+
+        return new_session, True, old_phone
 
 
 def _write_audit_log(
@@ -205,8 +433,14 @@ def _trigger_safety_stop(reason: str, session: WhatsAppSession, user=None):
 # Session management
 # ---------------------------------------------------------------------------
 
-def start_session(performed_by=None, session_name: str = "default") -> dict:
+def start_session(performed_by=None, session_name: str = "") -> dict:
     """Start the WAHA WhatsApp session."""
+    if not session_name:
+        user_sess = get_or_create_user_session(performed_by, create=True) if performed_by else None
+        if not user_sess:
+            raise WhatsAppAuthorizationError("Cannot start WhatsApp session without an authenticated user or session name.")
+        session_name = user_sess.session_name
+
     client = get_waha_client()
 
     _write_audit_log(
@@ -217,9 +451,10 @@ def start_session(performed_by=None, session_name: str = "default") -> dict:
 
     try:
         result = client.start_session(session_name)
-        session = _get_or_create_session(session_name)
+        session = _get_or_create_session(session_name, owner=performed_by)
         session.started_at = timezone.now()
-        session.status = WhatsAppSession.Status.STARTING
+        if session.status != WhatsAppSession.Status.READY:
+            session.status = WhatsAppSession.Status.STARTING
         session.save(update_fields=["started_at", "status"])
         return result
     except WAHAServiceError as exc:
@@ -227,8 +462,14 @@ def start_session(performed_by=None, session_name: str = "default") -> dict:
         raise WhatsAppError(str(exc), "WA_START_FAILED") from exc
 
 
-def stop_session(performed_by=None, session_name: str = "default") -> dict:
+def stop_session(performed_by=None, session_name: str = "") -> dict:
     """Stop the WAHA session without logging out WhatsApp."""
+    if not session_name:
+        user_sess = get_or_create_user_session(performed_by, create=False) if performed_by else None
+        if not user_sess:
+            raise WhatsAppAuthorizationError("Cannot stop WhatsApp session without an owned session.")
+        session_name = user_sess.session_name
+
     client = get_waha_client()
 
     _write_audit_log(
@@ -239,7 +480,7 @@ def stop_session(performed_by=None, session_name: str = "default") -> dict:
 
     try:
         result = client.stop_session(session_name)
-        session = _get_or_create_session(session_name)
+        session = _get_or_create_session(session_name, owner=performed_by)
         session.status = WhatsAppSession.Status.STOPPED
         session.stopped_at = timezone.now()
         session.save(update_fields=["status", "stopped_at"])
@@ -249,8 +490,23 @@ def stop_session(performed_by=None, session_name: str = "default") -> dict:
         raise WhatsAppError(str(exc), "WA_STOP_FAILED") from exc
 
 
-def logout_session(performed_by=None, session_name: str = "default") -> dict:
-    """Logout from WhatsApp (clears the session)."""
+def logout_session(performed_by=None, session_name: str = "") -> dict:
+    """
+    Logout from WhatsApp (disconnects the WAHA runtime session).
+
+    Scenario A lifecycle invariant:
+      - Updates existing session status to DISCONNECTED and sets stopped_at.
+      - Preserves session owner.
+      - Preserves connected phone_number as historical identity information.
+      - Preserves ALL conversations, messages, and media references in PostgreSQL.
+      - Never deletes database records or reassigns conversations.
+    """
+    if not session_name:
+        user_sess = get_or_create_user_session(performed_by, create=False) if performed_by else None
+        if not user_sess:
+            raise WhatsAppAuthorizationError("No active WhatsApp session found to disconnect.")
+        session_name = user_sess.session_name
+
     client = get_waha_client()
 
     logger.info(
@@ -263,34 +519,49 @@ def logout_session(performed_by=None, session_name: str = "default") -> dict:
         action=WhatsAppAuditLog.Action.SESSION_STOPPED,
         performed_by=performed_by,
         session_name=session_name,
-        result_detail="logout",
+        result_detail="logout_preserving_history",
     )
 
     try:
-        result = client.logout_session(session_name)
-        session = _get_or_create_session(session_name)
-        session.status = WhatsAppSession.Status.DISCONNECTED
-        session.phone_number = None
-        session.stopped_at = timezone.now()
-        session.save(update_fields=["status", "phone_number", "stopped_at"])
+        try:
+            result = client.logout_session(session_name)
+        except WAHAServiceError as exc:
+            # If WAHA already lost/stopped the runtime session (404), still update local DB cleanly.
+            if getattr(exc, "status_code", None) == 404:
+                result = {"status": "DISCONNECTED", "detail": "WAHA session not active"}
+            else:
+                raise
 
-        # Isolate session data: delete old conversations and messages on logout so future connections start clean
-        from .models import WhatsAppMessage, WhatsAppConversation
-        WhatsAppMessage.objects.filter(conversation__session=session).delete()
-        WhatsAppConversation.objects.filter(session=session).delete()
+        session = _get_or_create_session(session_name, owner=performed_by)
+        session.status = WhatsAppSession.Status.DISCONNECTED
+        session.stopped_at = timezone.now()
+        # Preserve session.owner, session.phone_number, and all conversations/messages/media!
+        session.save(update_fields=["status", "stopped_at"])
 
         return result
     except WAHAServiceError as exc:
         raise WhatsAppError(str(exc), "WA_LOGOUT_FAILED") from exc
 
 
-def get_session_status(session_name: str = "default") -> dict:
+def get_session_status(session_name: str = "") -> dict:
     """Get WAHA session status (from WAHA, plus local tracking data)."""
+    if not session_name:
+        return {
+            "session_name": "",
+            "waha_status": {},
+            "local_status": WhatsAppSession.Status.DISCONNECTED,
+        }
     client = get_waha_client()
 
     try:
         waha_status = client.get_session_status(session_name)
-        local_session = _get_or_create_session(session_name)
+        local_session = WhatsAppSession.objects.filter(session_name=session_name).first()
+        if not local_session:
+            return {
+                "session_name": session_name,
+                "waha_status": waha_status,
+                "local_status": WhatsAppSession.Status.DISCONNECTED,
+            }
 
         return {
             "session_name": session_name,
@@ -303,10 +574,12 @@ def get_session_status(session_name: str = "default") -> dict:
             "last_successful_message_at": local_session.last_successful_message_at,
         }
     except WAHAServiceError as exc:
+        local_session = WhatsAppSession.objects.filter(session_name=session_name).first()
         return {
             "session_name": session_name,
             "waha_status": {"error": str(exc)},
-            "local_status": WhatsAppSession.Status.DISCONNECTED,
+            "local_status": local_session.status if local_session else WhatsAppSession.Status.DISCONNECTED,
+            "phone_number": local_session.phone_number if local_session else None,
         }
 
 
@@ -460,6 +733,18 @@ def send_whatsapp_message(
             code="WA_INVALID_CHAT_ID",
         )
 
+    # Resolve user's owned session early so safety counters & cooldowns are scoped properly
+    if not session_name or session_name == "default":
+        session = get_or_create_user_session(performed_by, create=True)
+        session_name = session.session_name
+    else:
+        session = WhatsAppSession.objects.filter(session_name=session_name).first()
+        if not session:
+            session = get_or_create_user_session(performed_by, create=True)
+            session_name = session.session_name
+        elif not is_superuser and session.owner_id != performed_by.id:
+            raise WhatsAppAuthorizationError("You are not authorized to send via this WhatsApp session.")
+
     # ------------------------------------------------------------------
     # GUARD 6: Opt-out check
     # ------------------------------------------------------------------
@@ -474,8 +759,7 @@ def send_whatsapp_message(
             opt_out.save(update_fields=["is_active", "reversed_by", "reversed_at", "reversal_reason"])
             opt_out = None
         else:
-            session = _get_or_create_session(session_name)
-            session.opt_out_count = models_f("opt_out_count") + 1 if hasattr(session, "_counter") else session.opt_out_count + 1
+            session.opt_out_count = (session.opt_out_count or 0) + 1
             session.save(update_fields=["opt_out_count"])
 
             WhatsAppSafetyEvent.objects.create(
@@ -511,6 +795,7 @@ def send_whatsapp_message(
         cooldown_cutoff = timezone.now() - timedelta(minutes=cooldown_minutes)
 
         recent_to_recipient = WhatsAppMessage.objects.filter(
+            conversation__session=session,
             conversation__chat_id=chat_id,
             direction=WhatsAppMessage.Direction.OUTBOUND,
             status__in=[WhatsAppMessage.Status.SENT, WhatsAppMessage.Status.DELIVERED, WhatsAppMessage.Status.READ],
@@ -518,7 +803,6 @@ def send_whatsapp_message(
         ).exists()
 
         if recent_to_recipient:
-            session = _get_or_create_session(session_name)
             session.cooldown_block_count += 1
             session.save(update_fields=["cooldown_block_count"])
 
@@ -643,7 +927,16 @@ def send_whatsapp_message(
     # ------------------------------------------------------------------
     # Resolve the session object before creating the conversation.
     # The session MUST be owned by performed_by for the ownership chain.
-    session = _get_or_create_session(session_name)
+    if not session_name or session_name == "default":
+        session = get_or_create_user_session(performed_by, create=True)
+        session_name = session.session_name
+    else:
+        session = WhatsAppSession.objects.filter(session_name=session_name).first()
+        if not session:
+            session = get_or_create_user_session(performed_by, create=True)
+            session_name = session.session_name
+        elif not is_superuser and session.owner_id != performed_by.id:
+            raise WhatsAppAuthorizationError("You are not authorized to send via this WhatsApp session.")
 
     alt_chat_id = None
     if chat_id.endswith("@s.whatsapp.net"):
@@ -714,6 +1007,7 @@ def send_whatsapp_message(
             direction=WhatsAppMessage.Direction.OUTBOUND,
             status=WhatsAppMessage.Status.PENDING,
             body_preview=body[:500],
+            full_body=body,
             body_hash=body_hash,
             message_type="chat",
         )
@@ -879,9 +1173,7 @@ def admin_reset_safety_stop(performed_by, reason: str = "") -> None:
         config.safety_stop_at = None
         config.save(update_fields=["safety_stop_active", "safety_stop_reason", "safety_stop_at"])
 
-        session = _get_or_create_session()
-        session.consecutive_failed_sends = 0
-        session.save(update_fields=["consecutive_failed_sends"])
+        WhatsAppSession.objects.filter(is_active=True).update(consecutive_failed_sends=0)
 
         WhatsAppSafetyEvent.objects.create(
             event_type=WhatsAppSafetyEvent.EventType.SAFETY_STOP_RESET,
@@ -990,9 +1282,10 @@ def register_opt_out(
             success=True,
         )
 
-        session = _get_or_create_session()
-        session.opt_out_count += 1
-        session.save(update_fields=["opt_out_count"])
+        active_sess = WhatsAppSession.objects.filter(is_active=True).first()
+        if active_sess:
+            active_sess.opt_out_count += 1
+            active_sess.save(update_fields=["opt_out_count"])
 
     return opt_out
 

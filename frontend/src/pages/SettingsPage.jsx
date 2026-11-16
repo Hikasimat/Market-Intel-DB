@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
-import { Mail, PenLine, Inbox, Video } from 'lucide-react';
+import { Mail, PenLine, Inbox, Video, FolderOpen } from 'lucide-react';
 import EmailTemplateList from '../components/settings/EmailTemplateList';
 import SignatureTemplateList from '../components/settings/SignatureTemplateList';
 import EmailTemplateEditor from '../components/settings/EmailTemplateEditor';
 import SignatureTemplateEditor from '../components/settings/SignatureTemplateEditor';
 import MailboxSettings from '../components/settings/MailboxSettings';
 import MeetingPlatformSettings from '../components/settings/MeetingPlatformSettings';
+import AttachmentLibraryManager from '../components/email/AttachmentLibraryManager';
 
 const TABS = [
   { key: 'mailbox', label: 'Mailbox & Gmail', icon: Inbox },
   { key: 'meetings', label: 'Meeting Platforms', icon: Video },
   { key: 'email', label: 'Email Templates', icon: Mail },
   { key: 'signature', label: 'Signatures', icon: PenLine },
+  { key: 'attachments', label: 'Attachment Library', icon: FolderOpen },
 ];
 
 
@@ -73,13 +75,15 @@ const SettingsPage = () => {
               onCreateHtml={() => setEditing({ kind: 'email', id: null, isHtml: true })}
               onEdit={(id, isHtml) => setEditing({ kind: 'email', id, isHtml })}
             />
-          ) : (
+          ) : tab === 'signature' ? (
             <SignatureTemplateList
               refreshKey={refreshKey}
               onCreate={() => setEditing({ kind: 'signature', id: null, isCustom: false })}
               onCreateCustom={() => setEditing({ kind: 'signature', id: null, isCustom: true })}
               onEdit={(id, isCustom) => setEditing({ kind: 'signature', id, isCustom })}
             />
+          ) : (
+            <AttachmentLibraryManager isModal={false} />
           )}
 
         </>

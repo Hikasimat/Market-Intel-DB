@@ -200,6 +200,7 @@ class WhatsAppSession(models.Model):
 
     started_at = models.DateTimeField(null=True, blank=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -319,6 +320,9 @@ class WhatsAppConversation(models.Model):
     last_message_at = models.DateTimeField(null=True, blank=True)
     last_message_preview = models.CharField(max_length=200, blank=True, null=True)
     last_message_from_me = models.BooleanField(null=True, blank=True)
+
+    # Structured metadata (e.g. group participants, session-scoped LID map).
+    metadata = models.JSONField(default=dict, blank=True)
 
     # Soft-delete support.
     # When deleted, conversation is hidden from user but data is preserved.

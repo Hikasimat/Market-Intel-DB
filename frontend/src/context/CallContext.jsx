@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { useSelector } from 'react-redux';
 import api from '../services/api';
 import {
   Phone,
@@ -116,6 +117,7 @@ registerProcessor("playback-processor", PlaybackProcessor);
 `;
 
 export const CallProvider = ({ children }) => {
+  const authUser = useSelector((state) => state.auth?.user);
   const [callState, setCallState] = useState({
     active: false,
     status: 'idle', // 'calling' | 'connected' | 'ended'
@@ -321,10 +323,12 @@ export const CallProvider = ({ children }) => {
   }, [callState.active, callState.callId, callState.status, cleanupCallSession]);
 
   useEffect(() => {
+    // Only poll when logged in; polling while logged out causes 401/refresh/429 loops.
+    if (!authUser) return undefined;
     checkCallingStatus();
     const interval = setInterval(checkCallingStatus, 1200);
     return () => clearInterval(interval);
-  }, [checkCallingStatus]);
+  }, [checkCallingStatus, authUser]);
 
   // Audible Ringing Chime for Incoming WhatsApp Calls
   useEffect(() => {

@@ -4,7 +4,7 @@ import {
   Building2, Reply, Edit3, X, Download, BarChart2, Eye, Activity, Zap, TrendingUp, Clock,
   Star, FileText, Trash2, MailOpen, ShieldAlert, Undo2, Save, Search,
   Users, User, Sparkles, ExternalLink, Archive, MoreVertical, Tag, Pencil, ChevronDown, Plus,
-  Menu, PanelLeftClose, PanelLeftOpen, Smartphone, Laptop, Radio, CheckCircle2, ShieldCheck
+  Menu, PanelLeftClose, PanelLeftOpen, Smartphone, Laptop, Radio, CheckCircle2, ShieldCheck, FolderOpen
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useDispatch, useSelector } from 'react-redux';
@@ -13,6 +13,7 @@ import api from '../services/api';
 import TemplatePicker from '../components/lq/TemplatePicker';
 import OpenTrackingToggle from '../components/email/OpenTrackingToggle';
 import BulkCampaignModal from '../components/email/BulkCampaignModal';
+import AttachmentLibraryModal from '../components/email/AttachmentLibraryModal';
 import {
   setEmails,
   setInboxLoading,
@@ -76,6 +77,7 @@ const InboxPage = () => {
   const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [showAttachmentLibrary, setShowAttachmentLibrary] = useState(false);
   const [showCc, setShowCc] = useState(false);
   const [showBcc, setShowBcc] = useState(false);
   const [senderMailStatus, setSenderMailStatus] = useState(null);
@@ -227,6 +229,32 @@ const InboxPage = () => {
   const removeAttachment = (index) => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
     setAttachmentError('');
+  };
+
+  const handleAttachFromLibrary = (newFiles) => {
+    setAttachmentError('');
+    let currentTotalSize = attachments.reduce((sum, f) => sum + f.size, 0);
+    const validFiles = [];
+
+    for (const file of newFiles) {
+      if (attachments.some(a => a.name === file.name && Math.abs(a.size - file.size) < 100)) {
+        continue;
+      }
+      if (attachments.length + validFiles.length >= 5) {
+        setAttachmentError('Maximum of 5 attachments reached.');
+        break;
+      }
+      if (currentTotalSize + file.size > 25 * 1024 * 1024) {
+        setAttachmentError(`Adding ${file.name} exceeds the total 25MB attachment limit.`);
+        break;
+      }
+      validFiles.push(file);
+      currentTotalSize += file.size;
+    }
+
+    if (validFiles.length > 0) {
+      setAttachments(prev => [...prev, ...validFiles]);
+    }
   };
 
   const handleCompose = () => {
@@ -2217,14 +2245,26 @@ const InboxPage = () => {
                   <span className="text-[11px] text-slate-400">Max 10MB per file, 25MB total</span>
                 </div>
                 <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
-                  <input 
-                    type="file" 
-                    multiple 
-                    ref={fileInputRef}
-                    onChange={handleFileChange} 
-                    disabled={sendingEmail}
-                    className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer disabled:opacity-50"
-                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input 
+                      type="file" 
+                      multiple 
+                      ref={fileInputRef}
+                      onChange={handleFileChange} 
+                      disabled={sendingEmail}
+                      className="text-xs text-slate-700 file:mr-2 file:py-1 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAttachmentLibrary(true)}
+                      disabled={sendingEmail || attachments.length >= 5}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition cursor-pointer disabled:opacity-50 shadow-2xs"
+                      title="Choose from your 5-file Attachment Library"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      <span>Choose from Library</span>
+                    </button>
+                  </div>
                   {attachmentError && (
                     <div className="text-red-600 text-[10px] font-medium">{attachmentError}</div>
                   )}
@@ -2779,6 +2819,15 @@ const InboxPage = () => {
           setShowBulkCampaign(false);
           handleOpenTrackingModal(tracking);
         }}
+      />
+
+      {/* Attachment Library Modal */}
+      <AttachmentLibraryModal
+        isOpen={showAttachmentLibrary}
+        onClose={() => setShowAttachmentLibrary(false)}
+        onAttachFiles={handleAttachFromLibrary}
+        existingAttachments={attachments}
+        maxAllowedToAttach={5}
       />
     </div>
   );

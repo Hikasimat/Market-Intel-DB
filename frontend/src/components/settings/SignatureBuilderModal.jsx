@@ -1,28 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import {
   PenTool, Upload, X, Check, Save, Star, Eye,
-  Globe, Phone, Mail,
+  Globe, Phone, Mail, Plus, Trash2, ExternalLink,
+  Image as ImageIcon, UserCheck, ShieldCheck, Link as LinkIcon,
+  Sparkles, AlertCircle
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { designApi, errorMessage } from '../../services/designApi';
 
-const LinkedInIcon = ({ className = 'w-3.5 h-3.5' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14m-.5 15.5v-5.3a3.26 3.26 0 0 0-3.26-3.26c-.85 0-1.84.52-2.28 1.3v-1.11h-2.79v8.37h2.79v-4.93c0-.77.62-1.4 1.39-1.4a1.4 1.4 0 0 1 1.4 1.4v4.93h2.75M6.88 8.56a1.68 1.68 0 0 0 1.68-1.68c0-.93-.75-1.69-1.68-1.69a1.69 1.69 0 0 0-1.69 1.69c0 .93.76 1.68 1.69 1.68m1.39 9.94v-8.37H5.5v8.37h2.77z"/>
-  </svg>
-);
-
-const TwitterIcon = ({ className = 'w-3.5 h-3.5' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-  </svg>
-);
-
-const FacebookIcon = ({ className = 'w-3.5 h-3.5' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c5.05-.5 9-4.76 9-9.95z"/>
-  </svg>
-);
+// High-compatibility public CDN social icon URLs (lightweight, ~2KB each, supported across all email clients including Outlook)
+export const SOCIAL_PLATFORMS = [
+  { id: 'linkedin', name: 'LinkedIn', icon: 'https://cdn-icons-png.flaticon.com/512/3536/3536505.png', placeholder: 'https://linkedin.com/in/... or company/...' },
+  { id: 'twitter', name: 'X (Twitter)', icon: 'https://cdn-icons-png.flaticon.com/512/5969/5969020.png', placeholder: 'https://x.com/...' },
+  { id: 'facebook', name: 'Facebook', icon: 'https://cdn-icons-png.flaticon.com/512/5968/5968764.png', placeholder: 'https://facebook.com/...' },
+  { id: 'instagram', name: 'Instagram', icon: 'https://cdn-icons-png.flaticon.com/512/3955/3955024.png', placeholder: 'https://instagram.com/...' },
+  { id: 'youtube', name: 'YouTube', icon: 'https://cdn-icons-png.flaticon.com/512/3670/3670147.png', placeholder: 'https://youtube.com/@...' },
+  { id: 'whatsapp', name: 'WhatsApp', icon: 'https://cdn-icons-png.flaticon.com/512/3670/3670051.png', placeholder: 'https://wa.me/...' },
+  { id: 'github', name: 'GitHub', icon: 'https://cdn-icons-png.flaticon.com/512/733/733553.png', placeholder: 'https://github.com/...' },
+];
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -38,6 +33,14 @@ const safeUrl = (u) => {
 
 /**
  * Builds clean, table-based email signature HTML
+ * Fully compliant with signature proportion standards:
+ * - Total border option (bounding container border)
+ * - 300px to 600px width limit, 70px to 200px height (~3:1 to 4:1 aspect ratio)
+ * - Hyperlinks: tel:, mailto:, safeUrl(website)
+ * - Multiple websites support
+ * - Multiple logos / headshots / badges (horizontal: 200-320px, square/headshot: 60-100px)
+ * - Call to Action (CTA) redirecting button
+ * - Social icons: 20-28px, icon-only with hyperlink (NO text, NO raw URL)
  */
 export const buildSignatureHtml = (fields) => {
   const color = esc(fields.accentColor || '#1e3a8a');
@@ -45,39 +48,157 @@ export const buildSignatureHtml = (fields) => {
   const font = esc(fields.font || 'Arial, Helvetica, sans-serif');
   const align = ['left', 'center', 'right'].includes(fields.align) ? fields.align : 'left';
   const size = Number(fields.size) || 13;
-  const layout = fields.layout || 'side-by-side'; // 'side-by-side' or 'stacked'
+  const layout = fields.layout || 'side-by-side';
+  const iconSize = Math.max(20, Math.min(28, Number(fields.socialIconSize) || 24));
 
-  const link = (u, label) => {
-    const s = safeUrl(u);
-    return s ? `<a href="${s}" target="_blank" rel="noopener noreferrer" style="color:${color};text-decoration:none;margin-right:10px;font-weight:600;font-size:${size - 1}px;">${label}</a>` : '';
-  };
+  // 1. Social Links with Logo only, no text/url, pure hyperlink format
+  const activeSocials = [];
+  SOCIAL_PLATFORMS.forEach((p) => {
+    const isShown = fields[`show_${p.id}`] ?? fields[`show${p.id.charAt(0).toUpperCase() + p.id.slice(1)}`];
+    const url = fields[p.id] || fields[`${p.id}_url`];
+    if (isShown && url) {
+      const href = safeUrl(url);
+      if (href) {
+        activeSocials.push(`
+          <a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;text-decoration:none;margin-right:8px;vertical-align:middle;">
+            <img src="${p.icon}" alt="${esc(p.name)}" width="${iconSize}" height="${iconSize}" style="width:${iconSize}px;height:${iconSize}px;display:inline-block;border:0;vertical-align:middle;" />
+          </a>
+        `.trim());
+      }
+    }
+  });
 
-  const socials = [
-    fields.showLinkedin && fields.linkedin && link(fields.linkedin, 'LinkedIn'),
-    fields.showTwitter && fields.twitter && link(fields.twitter, 'X / Twitter'),
-    fields.showFacebook && fields.facebook && link(fields.facebook, 'Facebook'),
-  ].filter(Boolean).join(' ');
+  const socialsHtml = activeSocials.length > 0 
+    ? `<div style="margin-top:10px;line-height:1;">${activeSocials.join(' ')}</div>` 
+    : '';
 
+  // 2. Websites list (Primary website + multiple secondary websites)
+  const websiteItems = [];
+  if (fields.showWebsite && fields.website) {
+    websiteItems.push({
+      url: fields.website,
+      label: fields.websiteLabel || fields.website.replace(/^https?:\/\//i, '').replace(/\/$/, '')
+    });
+  }
+  if (Array.isArray(fields.websites)) {
+    fields.websites.forEach(w => {
+      if (w?.url && w.url.trim()) {
+        websiteItems.push({
+          url: w.url.trim(),
+          label: w.label ? w.label.trim() : w.url.replace(/^https?:\/\//i, '').replace(/\/$/, '')
+        });
+      }
+    });
+  }
+
+  const websitesHtml = websiteItems.length > 0 ? (
+    `<div style="font-size:${size - 1}px;margin-top:2px;">` +
+    `🌐 ` +
+    websiteItems.map(site => (
+      `<a href="${safeUrl(site.url)}" target="_blank" rel="noopener noreferrer" style="color:${color};text-decoration:none;font-weight:600;">${esc(site.label)}</a>`
+    )).join(` <span style="color:#cbd5e1;margin:0 4px;">•</span> `) +
+    `</div>`
+  ) : '';
+
+  // 3. Clean telephone link
+  const cleanPhone = String(fields.phone || '').replace(/[^0-9+]/g, '');
+  const phoneHtml = (fields.showPhone && fields.phone) ? (
+    `<div style="font-size:${size - 1}px;margin-top:2px;">` +
+    `📞 <a href="tel:${cleanPhone}" style="color:${textColor};text-decoration:none;">${esc(fields.phone)}</a>` +
+    `</div>`
+  ) : '';
+
+  // 4. Clean mailto link
+  const emailHtml = (fields.showEmail && fields.email) ? (
+    `<div style="font-size:${size - 1}px;margin-top:2px;">` +
+    `✉ <a href="mailto:${esc(fields.email)}" style="color:${color};text-decoration:none;font-weight:500;">${esc(fields.email)}</a>` +
+    `</div>`
+  ) : '';
+
+  // 5. Call To Action (CTA) Button
+  const ctaHtml = (fields.showCta && fields.ctaText && fields.ctaUrl) ? `
+    <table cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;margin-bottom:2px;">
+      <tr>
+        <td align="center" style="background-color:${color};border-radius:6px;padding:6px 14px;mso-padding-alt:0;">
+          <a href="${safeUrl(fields.ctaUrl)}" target="_blank" rel="noopener noreferrer" style="color:#ffffff;font-size:${size}px;font-weight:700;text-decoration:none;display:inline-block;font-family:${font};">
+            ${esc(fields.ctaText)} &rarr;
+          </a>
+        </td>
+      </tr>
+    </table>
+  `.trim() : '';
+
+  // Contact details block
   const contactRows = [
-    fields.name && `<div style="font-size:${size + 3}px;font-weight:700;color:${color};margin-bottom:2px;">${esc(fields.name)}</div>`,
+    fields.name && `<div style="font-size:${size + 3}px;font-weight:700;color:${color};margin-bottom:2px;letter-spacing:-0.2px;">${esc(fields.name)}</div>`,
     fields.designation && `<div style="color:#64748b;font-size:${size}px;margin-bottom:2px;">${esc(fields.designation)}</div>`,
     fields.company && `<div style="font-weight:700;color:#0f172a;font-size:${size}px;margin-bottom:4px;">${esc(fields.company)}</div>`,
-    fields.showPhone && fields.phone && `<div style="font-size:${size - 1}px;margin-top:2px;">📞 <span style="color:${textColor};">${esc(fields.phone)}</span></div>`,
-    fields.showEmail && fields.email && `<div style="font-size:${size - 1}px;margin-top:2px;">✉ <a href="mailto:${esc(fields.email)}" style="color:${color};text-decoration:none;">${esc(fields.email)}</a></div>`,
-    fields.showWebsite && fields.website && `<div style="font-size:${size - 1}px;margin-top:2px;">🌐 <a href="${safeUrl(fields.website)}" target="_blank" rel="noopener noreferrer" style="color:${color};text-decoration:none;">${esc(fields.website)}</a></div>`,
-    socials && `<div style="margin-top:8px;">${socials}</div>`,
+    phoneHtml,
+    emailHtml,
+    websitesHtml,
+    ctaHtml,
+    socialsHtml,
   ].filter(Boolean).join('\n');
 
-  const logoImg = (fields.showLogo && fields.logo) ? `
-    <img src="${safeUrl(fields.logo)}" alt="${esc(fields.company || 'Logo')}" width="${Number(fields.logoWidth) || 80}" style="max-width:100%;height:auto;display:block;border:0;border-radius:${fields.logoRadius || 0}px;" />
-  ` : '';
+  // 6. Multiple Logos & Headshots
+  // Collect primary logo and secondary headshot/badge
+  const renderedLogos = [];
 
-  const borderStyle = fields.showBorder ? `border-top:2px solid ${color};padding-top:10px;margin-top:12px;` : '';
+  // Primary Company Logo
+  if (fields.showLogo && fields.logo) {
+    const w = Number(fields.logoWidth) || 100;
+    const r = Number(fields.logoRadius) || 0;
+    const imgTag = `<img src="${safeUrl(fields.logo)}" alt="${esc(fields.company || 'Company Logo')}" width="${w}" style="max-width:${w}px;width:${w}px;height:auto;display:block;border:0;border-radius:${r}px;" />`;
+    const wrapped = fields.logoLink ? `<a href="${safeUrl(fields.logoLink)}" target="_blank" rel="noopener noreferrer" style="display:block;text-decoration:none;">${imgTag}</a>` : imgTag;
+    renderedLogos.push(wrapped);
+  }
 
-  if (layout === 'stacked' || !logoImg) {
+  // Secondary Headshot / Badge / Logo
+  if (fields.showSecondaryLogo && fields.secondaryLogo) {
+    const sw = Number(fields.secondaryLogoWidth) || 70;
+    const sr = Number(fields.secondaryLogoRadius) || (fields.secondaryLogoType === 'headshot' ? 50 : 6);
+    const imgTag = `<img src="${safeUrl(fields.secondaryLogo)}" alt="Badge or Headshot" width="${sw}" style="max-width:${sw}px;width:${sw}px;height:auto;display:block;border:0;border-radius:${sr}px;" />`;
+    const wrapped = fields.secondaryLogoLink ? `<a href="${safeUrl(fields.secondaryLogoLink)}" target="_blank" rel="noopener noreferrer" style="display:block;text-decoration:none;">${imgTag}</a>` : imgTag;
+    renderedLogos.push(wrapped);
+  }
+
+  // Extra logos from array if added
+  if (Array.isArray(fields.extraLogos)) {
+    fields.extraLogos.forEach((el, idx) => {
+      if (el?.url) {
+        const ew = Number(el.width) || 70;
+        const er = Number(el.radius) || 0;
+        const imgTag = `<img src="${safeUrl(el.url)}" alt="${esc(el.alt || `Logo ${idx + 2}`)}" width="${ew}" style="max-width:${ew}px;width:${ew}px;height:auto;display:block;border:0;border-radius:${er}px;" />`;
+        const wrapped = el.link ? `<a href="${safeUrl(el.link)}" target="_blank" rel="noopener noreferrer" style="display:block;text-decoration:none;">${imgTag}</a>` : imgTag;
+        renderedLogos.push(wrapped);
+      }
+    });
+  }
+
+  const logosHtml = renderedLogos.length > 0 ? (
+    `<div style="display:flex;flex-direction:column;gap:10px;align-items:${align === 'center' ? 'center' : 'flex-start'};">` +
+    renderedLogos.join('\n') +
+    `</div>`
+  ) : '';
+
+  // 7. Border Style & Proportion (Total border, top line, left accent, none)
+  const borderMode = fields.borderStyle || (fields.showBorder ? 'total-border' : 'none');
+  let containerStyle = `max-width:600px;width:100%;font-family:${font};font-size:${size}px;color:${textColor};line-height:1.45;box-sizing:border-box;`;
+
+  if (borderMode === 'total-border') {
+    containerStyle += `border:1px solid #e2e8f0;border-radius:10px;padding:14px 18px;background-color:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.04);`;
+  } else if (borderMode === 'top-line') {
+    containerStyle += `border-top:2px solid ${color};padding-top:10px;margin-top:10px;`;
+  } else if (borderMode === 'left-accent') {
+    containerStyle += `border-left:3px solid ${color};padding-left:14px;`;
+  } else {
+    containerStyle += `padding:4px 0;`;
+  }
+
+  if (layout === 'stacked' || renderedLogos.length === 0) {
     return `
-      <table cellpadding="0" cellspacing="0" border="0" align="${align}" style="font-family:${font};font-size:${size}px;color:${textColor};${borderStyle}line-height:1.5;">
-        ${logoImg ? `<tr><td align="${align}" style="padding-bottom:8px;">${logoImg}</td></tr>` : ''}
+      <table cellpadding="0" cellspacing="0" border="0" align="${align}" style="${containerStyle}">
+        ${logosHtml ? `<tr><td align="${align}" style="padding-bottom:10px;">${logosHtml}</td></tr>` : ''}
         <tr>
           <td align="${align}" style="text-align:${align};">
             ${contactRows || '&nbsp;'}
@@ -87,12 +208,12 @@ export const buildSignatureHtml = (fields) => {
     `.trim();
   }
 
-  // Side-by-side layout: Logo on left, Contact on right
+  // Side-by-side layout: Logo(s) on left, Contact on right with neat separator
   return `
-    <table cellpadding="0" cellspacing="0" border="0" align="${align}" style="font-family:${font};font-size:${size}px;color:${textColor};${borderStyle}line-height:1.5;">
+    <table cellpadding="0" cellspacing="0" border="0" align="${align}" style="${containerStyle}">
       <tr>
         <td valign="top" style="padding-right:16px;vertical-align:top;">
-          ${logoImg}
+          ${logosHtml}
         </td>
         <td valign="top" style="vertical-align:top;border-left:1px solid #e2e8f0;padding-left:16px;">
           ${contactRows || '&nbsp;'}
@@ -102,7 +223,7 @@ export const buildSignatureHtml = (fields) => {
   `.trim();
 };
 
-const DEFAULT_SIGNATURE_FIELDS = {
+export const DEFAULT_SIGNATURE_FIELDS = {
   signatureName: '',
   name: '{{sender_name}}',
   designation: 'Managing Partner',
@@ -110,25 +231,58 @@ const DEFAULT_SIGNATURE_FIELDS = {
   phone: '+971 4 123 4567',
   email: '{{sender_email}}',
   website: 'https://example.com',
+  websiteLabel: '',
+  websites: [], // [{ id, url, label }]
   showPhone: true,
   showEmail: true,
   showWebsite: true,
+
+  // Primary Company Logo
   showLogo: false,
   logo: '',
-  logoWidth: 80,
+  logoWidth: 120, // 200-320px for horizontal, 60-100px for square
   logoRadius: 0,
+  logoLink: '',
+
+  // Secondary Image / Headshot / Badge
+  showSecondaryLogo: false,
+  secondaryLogo: '',
+  secondaryLogoType: 'headshot', // 'headshot' | 'badge' | 'logo'
+  secondaryLogoWidth: 70,
+  secondaryLogoRadius: 50,
+  secondaryLogoLink: '',
+  extraLogos: [],
+
+  // Social Links
   showLinkedin: true,
   linkedin: 'https://linkedin.com/company/example',
   showTwitter: false,
   twitter: '',
   showFacebook: false,
   facebook: '',
+  showInstagram: false,
+  instagram: '',
+  showYoutube: false,
+  youtube: '',
+  showWhatsapp: false,
+  whatsapp: '',
+  showGithub: false,
+  github: '',
+  socialIconSize: 24, // 20 - 28 px
+
+  // Call to Action (CTA) Button
+  showCta: false,
+  ctaText: 'Schedule a Meeting',
+  ctaUrl: 'https://example.com/meeting',
+
+  // Appearance & Proportion Rules
   accentColor: '#1e3a8a',
   textColor: '#334155',
   font: 'Arial, Helvetica, sans-serif',
   size: 13,
   align: 'left',
   layout: 'side-by-side',
+  borderStyle: 'total-border', // 'total-border' | 'top-line' | 'left-accent' | 'none'
   showBorder: true,
   is_default: false,
 };
@@ -173,19 +327,33 @@ const SignatureBuilderModal = ({
 
   const update = (k, v) => setFields((p) => ({ ...p, [k]: v }));
 
-  const handleUploadLogo = async (e) => {
-    const file = e.target.files?.[0];
+  const handleUploadImage = async (fieldKey, showKey, file) => {
     if (!file) return;
     try {
       const res = await designApi.uploadImage('signature', file);
       if (res.url) {
-        update('logo', res.url);
-        update('showLogo', true);
-        toast.success('Logo uploaded!');
+        update(fieldKey, res.url);
+        if (showKey) update(showKey, true);
+        toast.success('Image uploaded successfully!');
       }
     } catch (err) {
-      toast.error('Failed to upload logo.');
+      toast.error('Failed to upload image.');
     }
+  };
+
+  // Additional websites helpers
+  const addWebsiteRow = () => {
+    const newSite = { id: `site-${Date.now()}`, url: '', label: '' };
+    update('websites', [...(fields.websites || []), newSite]);
+  };
+
+  const updateWebsiteRow = (id, key, val) => {
+    const list = (fields.websites || []).map(s => s.id === id ? { ...s, [key]: val } : s);
+    update('websites', list);
+  };
+
+  const removeWebsiteRow = (id) => {
+    update('websites', (fields.websites || []).filter(s => s.id !== id));
   };
 
   const handleSave = async (makeDefault = false) => {
@@ -232,19 +400,19 @@ const SignatureBuilderModal = ({
 
   return (
     <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[90vh] flex flex-col overflow-hidden border border-slate-200">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[92vh] flex flex-col overflow-hidden border border-slate-200">
         {/* Modal Top Bar */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50">
-          <div className="flex items-center gap-2">
-            <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl">
+        <div className="flex items-center justify-between p-4 px-6 border-b border-slate-200 bg-linear-to-r from-slate-50 via-white to-indigo-50/40">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl shadow-xs">
               <PenTool className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-black text-slate-800">
-                {initialId ? 'Edit Email Signature' : 'Create Professional Signature'}
+                {initialId ? 'Edit Professional Signature' : 'Create Professional Signature'}
               </h2>
               <p className="text-xs text-slate-500">
-                Simple visual builder — fill fields and see live preview instantly.
+                Standard signature template with total border, multiple logos, websites, CTA &amp; hyperlinked social icons.
               </p>
             </div>
           </div>
@@ -263,9 +431,9 @@ const SignatureBuilderModal = ({
             {/* Steps Navigation Tabs */}
             <div className="flex border-b border-slate-200 bg-slate-50/50 text-xs font-bold">
               {[
-                { id: 'basic', label: '1. Basic Info' },
-                { id: 'media', label: '2. Logo & Social' },
-                { id: 'appearance', label: '3. Appearance' },
+                { id: 'basic', label: '1. Basic Info & Links' },
+                { id: 'media', label: '2. Logos & Social Icons' },
+                { id: 'appearance', label: '3. Proportions & Border' },
               ].map((t) => (
                 <button
                   key={t.id}
@@ -273,7 +441,7 @@ const SignatureBuilderModal = ({
                   onClick={() => setActiveTab(t.id)}
                   className={`flex-1 py-3 text-center border-b-2 transition cursor-pointer ${
                     activeTab === t.id
-                      ? 'border-indigo-600 text-indigo-600 bg-white'
+                      ? 'border-indigo-600 text-indigo-600 bg-white shadow-2xs'
                       : 'border-transparent text-slate-500 hover:text-slate-800'
                   }`}
                 >
@@ -284,9 +452,9 @@ const SignatureBuilderModal = ({
 
             {/* Scrollable Form Content */}
             <div className="flex-1 overflow-y-auto p-5 space-y-4 text-xs">
-              {/* STEP 1: BASIC INFO */}
+              {/* STEP 1: BASIC INFO & LINKS */}
               {activeTab === 'basic' && (
-                <div className="space-y-3">
+                <div className="space-y-3.5">
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
                       Signature Template Name *
@@ -295,8 +463,8 @@ const SignatureBuilderModal = ({
                       type="text"
                       value={fields.signatureName}
                       onChange={(e) => update('signatureName', e.target.value)}
-                      placeholder="e.g. Default Corporate Signature"
-                      className="w-full p-2.5 border border-slate-200 rounded-xl bg-white text-xs font-medium focus:ring-2 focus:ring-indigo-100"
+                      placeholder="e.g. Executive Corporate Signature"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl bg-white text-xs font-semibold focus:ring-2 focus:ring-indigo-100"
                     />
                   </div>
 
@@ -334,9 +502,12 @@ const SignatureBuilderModal = ({
                     />
                   </div>
 
-                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                  {/* Phone with tel: hyperlink */}
+                  <div className="space-y-1.5 pt-2 border-t border-slate-100">
                     <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Phone Number</span>
+                      <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                        <Phone className="w-3.5 h-3.5 text-indigo-600" /> Phone Number (tel: hyperlink)
+                      </span>
                       <label className="flex items-center gap-1.5 text-[11px] text-slate-500 cursor-pointer">
                         <input
                           type="checkbox"
@@ -358,9 +529,12 @@ const SignatureBuilderModal = ({
                     )}
                   </div>
 
-                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                  {/* Email with mailto: hyperlink */}
+                  <div className="space-y-1.5 pt-2 border-t border-slate-100">
                     <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Email Address</span>
+                      <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                        <Mail className="w-3.5 h-3.5 text-indigo-600" /> Email Address (mailto: hyperlink)
+                      </span>
                       <label className="flex items-center gap-1.5 text-[11px] text-slate-500 cursor-pointer">
                         <input
                           type="checkbox"
@@ -382,9 +556,12 @@ const SignatureBuilderModal = ({
                     )}
                   </div>
 
+                  {/* Websites (Supports 2 or more websites) */}
                   <div className="space-y-2 pt-2 border-t border-slate-100">
                     <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Website URL</span>
+                      <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                        <Globe className="w-3.5 h-3.5 text-indigo-600" /> Website URLs (Clickable Hyperlinks)
+                      </span>
                       <label className="flex items-center gap-1.5 text-[11px] text-slate-500 cursor-pointer">
                         <input
                           type="checkbox"
@@ -395,26 +572,121 @@ const SignatureBuilderModal = ({
                         <span>Enable</span>
                       </label>
                     </div>
+
                     {fields.showWebsite && (
-                      <input
-                        type="text"
-                        value={fields.website}
-                        onChange={(e) => update('website', e.target.value)}
-                        placeholder="https://example.com"
-                        className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
-                      />
+                      <div className="space-y-2">
+                        {/* Primary Website */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            type="text"
+                            value={fields.website}
+                            onChange={(e) => update('website', e.target.value)}
+                            placeholder="https://example.com"
+                            className="p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                          />
+                          <input
+                            type="text"
+                            value={fields.websiteLabel}
+                            onChange={(e) => update('websiteLabel', e.target.value)}
+                            placeholder="Display Label (e.g. Website)"
+                            className="p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                          />
+                        </div>
+
+                        {/* Additional Websites */}
+                        {(fields.websites || []).map((site) => (
+                          <div key={site.id} className="grid grid-cols-5 gap-2 items-center">
+                            <input
+                              type="text"
+                              value={site.url}
+                              onChange={(e) => updateWebsiteRow(site.id, 'url', e.target.value)}
+                              placeholder="https://portal.example.com"
+                              className="col-span-3 p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                            />
+                            <input
+                              type="text"
+                              value={site.label}
+                              onChange={(e) => updateWebsiteRow(site.id, 'label', e.target.value)}
+                              placeholder="Label (e.g. Portal)"
+                              className="col-span-1 p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeWebsiteRow(site.id)}
+                              className="col-span-1 p-2 text-slate-400 hover:text-rose-600 rounded-xl hover:bg-rose-50 transition cursor-pointer flex justify-center"
+                              title="Remove website"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+
+                        <button
+                          type="button"
+                          onClick={addWebsiteRow}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 transition cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Another Website</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Call to Action Button */}
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-indigo-600" /> Call to Action Button (Redirecting Button)
+                      </span>
+                      <label className="flex items-center gap-1.5 text-[11px] text-slate-500 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={fields.showCta}
+                          onChange={(e) => update('showCta', e.target.checked)}
+                          className="rounded accent-indigo-600"
+                        />
+                        <span>Enable CTA</span>
+                      </label>
+                    </div>
+
+                    {fields.showCta && (
+                      <div className="grid grid-cols-2 gap-2 p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <div>
+                          <label className="block text-[11px] text-slate-500 font-semibold mb-1">Button Text</label>
+                          <input
+                            type="text"
+                            value={fields.ctaText}
+                            onChange={(e) => update('ctaText', e.target.value)}
+                            placeholder="e.g. Schedule a Meeting"
+                            className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-500 font-semibold mb-1">Redirect URL</label>
+                          <input
+                            type="text"
+                            value={fields.ctaUrl}
+                            onChange={(e) => update('ctaUrl', e.target.value)}
+                            placeholder="https://calendly.com/... or website"
+                            className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                          />
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
               )}
 
-              {/* STEP 2: LOGO & SOCIAL */}
+              {/* STEP 2: LOGOS & SOCIAL ICONS */}
               {activeTab === 'media' && (
                 <div className="space-y-4">
-                  {/* Company Logo Section */}
+                  {/* Primary Company Logo Section */}
                   <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-800">Company Logo</span>
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <ImageIcon className="w-4 h-4 text-indigo-600" /> Primary Company Logo
+                      </span>
                       <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
                         <input
                           type="checkbox"
@@ -435,11 +707,11 @@ const SignatureBuilderModal = ({
                             <input
                               type="file"
                               accept="image/*"
-                              onChange={handleUploadLogo}
+                              onChange={(e) => handleUploadImage('logo', 'showLogo', e.target.files?.[0])}
                               className="hidden"
                             />
                           </label>
-                          <span className="text-[11px] text-slate-400">or paste URL below</span>
+                          <span className="text-[11px] text-slate-400">or paste image URL below</span>
                         </div>
 
                         <input
@@ -450,15 +722,23 @@ const SignatureBuilderModal = ({
                           className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
                         />
 
-                        <div className="flex items-center gap-4">
+                        <input
+                          type="text"
+                          value={fields.logoLink}
+                          onChange={(e) => update('logoLink', e.target.value)}
+                          placeholder="Logo Click URL (e.g. https://yourcompany.com)"
+                          className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                        />
+
+                        <div className="flex items-center gap-4 pt-1">
                           <div className="flex-1">
                             <span className="text-[11px] text-slate-500 font-semibold block mb-1">
-                              Width: {fields.logoWidth}px
+                              Width: {fields.logoWidth}px (Rule: 200–320px horizontal, 60–100px square)
                             </span>
                             <input
                               type="range"
                               min="40"
-                              max="160"
+                              max="320"
                               step="5"
                               value={fields.logoWidth}
                               onChange={(e) => update('logoWidth', Number(e.target.value))}
@@ -472,7 +752,7 @@ const SignatureBuilderModal = ({
                             <select
                               value={fields.logoRadius}
                               onChange={(e) => update('logoRadius', Number(e.target.value))}
-                              className="p-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                              className="p-1.5 border border-slate-200 rounded-lg text-xs bg-white cursor-pointer"
                             >
                               <option value={0}>Square (0px)</option>
                               <option value={6}>Rounded (6px)</option>
@@ -484,88 +764,236 @@ const SignatureBuilderModal = ({
                     )}
                   </div>
 
-                  {/* Social Links */}
-                  <div className="space-y-3">
-                    <span className="font-bold text-slate-800 block">Social Links</span>
-
-                    {/* LinkedIn */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-600 font-semibold flex items-center gap-1.5">
-                          <LinkedInIcon className="w-3.5 h-3.5 text-blue-600" /> LinkedIn
-                        </span>
+                  {/* Secondary Image: Headshot or Certification Badge */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <UserCheck className="w-4 h-4 text-emerald-600" /> Secondary Image (Headshot / Cert Badge)
+                      </span>
+                      <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={fields.showLinkedin}
-                          onChange={(e) => update('showLinkedin', e.target.checked)}
-                          className="rounded accent-indigo-600 cursor-pointer"
+                          checked={fields.showSecondaryLogo}
+                          onChange={(e) => update('showSecondaryLogo', e.target.checked)}
+                          className="rounded accent-indigo-600"
                         />
-                      </div>
-                      {fields.showLinkedin && (
-                        <input
-                          type="text"
-                          value={fields.linkedin}
-                          onChange={(e) => update('linkedin', e.target.value)}
-                          placeholder="https://linkedin.com/..."
-                          className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
-                        />
-                      )}
+                        <span>Include Secondary</span>
+                      </label>
                     </div>
 
-                    {/* X / Twitter */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-600 font-semibold flex items-center gap-1.5">
-                          <TwitterIcon className="w-3.5 h-3.5 text-slate-700" /> X (Twitter)
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={fields.showTwitter}
-                          onChange={(e) => update('showTwitter', e.target.checked)}
-                          className="rounded accent-indigo-600 cursor-pointer"
-                        />
-                      </div>
-                      {fields.showTwitter && (
+                    {fields.showSecondaryLogo && (
+                      <div className="space-y-2 pt-2 border-t border-slate-200">
+                        <div className="flex items-center gap-3">
+                          <select
+                            value={fields.secondaryLogoType}
+                            onChange={(e) => update('secondaryLogoType', e.target.value)}
+                            className="p-1.5 border border-slate-200 rounded-lg text-xs bg-white cursor-pointer"
+                          >
+                            <option value="headshot">Profile Headshot (Photo)</option>
+                            <option value="badge">Certification / ISO Badge</option>
+                            <option value="logo">Partner / Secondary Logo</option>
+                          </select>
+
+                          <label className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg font-bold cursor-pointer transition flex items-center gap-1.5">
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>Upload Image</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleUploadImage('secondaryLogo', 'showSecondaryLogo', e.target.files?.[0])}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+
                         <input
                           type="text"
-                          value={fields.twitter}
-                          onChange={(e) => update('twitter', e.target.value)}
-                          placeholder="https://x.com/..."
+                          value={fields.secondaryLogo}
+                          onChange={(e) => update('secondaryLogo', e.target.value)}
+                          placeholder="https://example.com/headshot.jpg"
                           className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
                         />
-                      )}
+
+                        <input
+                          type="text"
+                          value={fields.secondaryLogoLink}
+                          onChange={(e) => update('secondaryLogoLink', e.target.value)}
+                          placeholder="Redirect Link URL (optional)"
+                          className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                        />
+
+                        <div className="flex items-center gap-4 pt-1">
+                          <div className="flex-1">
+                            <span className="text-[11px] text-slate-500 font-semibold block mb-1">
+                              Width: {fields.secondaryLogoWidth}px (Rule: 60–100px square/headshot)
+                            </span>
+                            <input
+                              type="range"
+                              min="40"
+                              max="120"
+                              step="5"
+                              value={fields.secondaryLogoWidth}
+                              onChange={(e) => update('secondaryLogoWidth', Number(e.target.value))}
+                              className="w-full accent-indigo-600 cursor-pointer"
+                            />
+                          </div>
+                          <div>
+                            <span className="text-[11px] text-slate-500 font-semibold block mb-1">
+                              Shape
+                            </span>
+                            <select
+                              value={fields.secondaryLogoRadius}
+                              onChange={(e) => update('secondaryLogoRadius', Number(e.target.value))}
+                              className="p-1.5 border border-slate-200 rounded-lg text-xs bg-white cursor-pointer"
+                            >
+                              <option value={50}>Circle (50%)</option>
+                              <option value={8}>Rounded (8px)</option>
+                              <option value={0}>Square (0px)</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Social Links (With Logo Only, No URL, Pure Hyperlink Format) */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-slate-800 block">
+                          Social Media Links (Icon Logos Only &bull; Hyperlinked)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Renders crisp 24px icon logos with no raw text or URL displayed.
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-slate-500 font-semibold">Size:</span>
+                        <select
+                          value={fields.socialIconSize || 24}
+                          onChange={(e) => update('socialIconSize', Number(e.target.value))}
+                          className="p-1 border border-slate-200 rounded text-xs bg-white cursor-pointer"
+                        >
+                          <option value={20}>20 px</option>
+                          <option value={24}>24 px (Default)</option>
+                          <option value={28}>28 px</option>
+                        </select>
+                      </div>
                     </div>
 
-                    {/* Facebook */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-600 font-semibold flex items-center gap-1.5">
-                          <FacebookIcon className="w-3.5 h-3.5 text-blue-700" /> Facebook
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={fields.showFacebook}
-                          onChange={(e) => update('showFacebook', e.target.checked)}
-                          className="rounded accent-indigo-600 cursor-pointer"
-                        />
-                      </div>
-                      {fields.showFacebook && (
-                        <input
-                          type="text"
-                          value={fields.facebook}
-                          onChange={(e) => update('facebook', e.target.value)}
-                          placeholder="https://facebook.com/..."
-                          className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
-                        />
-                      )}
+                    <div className="space-y-2.5 pt-2 border-t border-slate-200">
+                      {SOCIAL_PLATFORMS.map((p) => {
+                        const showKey = `show_${p.id}`;
+                        const isChecked = fields[showKey] ?? fields[`show${p.id.charAt(0).toUpperCase() + p.id.slice(1)}`];
+                        const val = fields[p.id] || fields[`${p.id}_url`] || '';
+
+                        return (
+                          <div key={p.id} className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-slate-700 font-semibold flex items-center gap-2">
+                                <img src={p.icon} alt={p.name} className="w-4 h-4 object-contain" />
+                                <span>{p.name}</span>
+                              </span>
+                              <input
+                                type="checkbox"
+                                checked={!!isChecked}
+                                onChange={(e) => {
+                                  update(showKey, e.target.checked);
+                                  update(`show${p.id.charAt(0).toUpperCase() + p.id.slice(1)}`, e.target.checked);
+                                }}
+                                className="rounded accent-indigo-600 cursor-pointer"
+                              />
+                            </div>
+                            {isChecked && (
+                              <input
+                                type="text"
+                                value={val}
+                                onChange={(e) => update(p.id, e.target.value)}
+                                placeholder={p.placeholder}
+                                className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* STEP 3: APPEARANCE */}
+              {/* STEP 3: PROPORTIONS & BORDER */}
               {activeTab === 'appearance' && (
                 <div className="space-y-4">
+                  {/* Border Style Choice (Total Border rule) */}
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1.5">Signature Border Style</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          update('borderStyle', 'total-border');
+                          update('showBorder', true);
+                        }}
+                        className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                          fields.borderStyle === 'total-border' || (!fields.borderStyle && fields.showBorder)
+                            ? 'border-indigo-600 bg-indigo-50/50 text-indigo-900 ring-2 ring-indigo-500/20'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="font-bold block text-xs">Total Border (Full Box)</span>
+                        <span className="text-[10px] text-slate-500">Neat bounding card border with rounded corners</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          update('borderStyle', 'top-line');
+                          update('showBorder', true);
+                        }}
+                        className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                          fields.borderStyle === 'top-line'
+                            ? 'border-indigo-600 bg-indigo-50/50 text-indigo-900 ring-2 ring-indigo-500/20'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="font-bold block text-xs">Top Divider Line</span>
+                        <span className="text-[10px] text-slate-500">Accent separator line above signature</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          update('borderStyle', 'left-accent');
+                          update('showBorder', true);
+                        }}
+                        className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                          fields.borderStyle === 'left-accent'
+                            ? 'border-indigo-600 bg-indigo-50/50 text-indigo-900 ring-2 ring-indigo-500/20'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="font-bold block text-xs">Left Accent Bar</span>
+                        <span className="text-[10px] text-slate-500">Vertical colored brand strip</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          update('borderStyle', 'none');
+                          update('showBorder', false);
+                        }}
+                        className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                          fields.borderStyle === 'none'
+                            ? 'border-indigo-600 bg-indigo-50/50 text-indigo-900 ring-2 ring-indigo-500/20'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="font-bold block text-xs">No Border</span>
+                        <span className="text-[10px] text-slate-500">Clean borderless layout</span>
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Layout Style Choice */}
                   <div>
                     <label className="block font-bold text-slate-700 mb-1.5">Layout Style</label>
@@ -580,7 +1008,7 @@ const SignatureBuilderModal = ({
                         }`}
                       >
                         <span className="font-bold block text-xs">Side-by-Side</span>
-                        <span className="text-[10px] text-slate-500">Logo on left, details on right</span>
+                        <span className="text-[10px] text-slate-500">Logos on left, details on right</span>
                       </button>
 
                       <button
@@ -601,7 +1029,7 @@ const SignatureBuilderModal = ({
                   {/* Colors */}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block font-semibold text-slate-600 mb-1">Accent Color</label>
+                      <label className="block font-semibold text-slate-600 mb-1">Brand Accent Color</label>
                       <div className="flex items-center gap-2">
                         <input
                           type="color"
@@ -634,7 +1062,7 @@ const SignatureBuilderModal = ({
                       <select
                         value={fields.font}
                         onChange={(e) => update('font', e.target.value)}
-                        className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                        className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs cursor-pointer"
                       >
                         <option value="Arial, Helvetica, sans-serif">Arial</option>
                         <option value="Georgia, serif">Georgia</option>
@@ -648,7 +1076,7 @@ const SignatureBuilderModal = ({
                       <select
                         value={fields.align}
                         onChange={(e) => update('align', e.target.value)}
-                        className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs"
+                        className="w-full p-2 border border-slate-200 rounded-xl bg-white text-xs cursor-pointer"
                       >
                         <option value="left">Left</option>
                         <option value="center">Center</option>
@@ -657,15 +1085,19 @@ const SignatureBuilderModal = ({
                     </div>
                   </div>
 
-                  {/* Top Divider Line Toggle */}
-                  <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                    <span className="font-semibold text-slate-700">Top Divider Line</span>
-                    <input
-                      type="checkbox"
-                      checked={fields.showBorder}
-                      onChange={(e) => update('showBorder', e.target.checked)}
-                      className="rounded accent-indigo-600 cursor-pointer"
-                    />
+                  {/* Sizing & Proportion Rules Reference Card */}
+                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5 text-[11px] text-slate-600">
+                    <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Signature Sizing Standards Enforced</span>
+                    </div>
+                    <ul className="list-disc list-inside space-y-0.5 text-slate-500 text-[10px]">
+                      <li><strong>Max Width:</strong> Kept strictly under 600px (Desktop ~3:1 ratio, 150–200px height)</li>
+                      <li><strong>Mobile View:</strong> Auto-scales to 320px with zero horizontal scrolling</li>
+                      <li><strong>Horizontal Logos:</strong> 200–320px wide × 40–60px tall</li>
+                      <li><strong>Square Logos &amp; Headshots:</strong> 60–100px</li>
+                      <li><strong>Social Icons:</strong> 20–28px &bull; Icon-only &bull; Hyperlinked</li>
+                    </ul>
                   </div>
                 </div>
               )}
@@ -682,7 +1114,7 @@ const SignatureBuilderModal = ({
               <button
                 type="button"
                 onClick={() => setPreviewSample(!previewSample)}
-                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800"
+                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
               >
                 {previewSample ? 'Show Smart Tags' : 'Fill Sample Data'}
               </button>
@@ -704,14 +1136,14 @@ const SignatureBuilderModal = ({
               />
 
               <div className="mt-8 text-[11px] text-slate-400 text-center">
-                This signature will render cleanly across all major email clients including Outlook & Gmail.
+                This signature will render cleanly across all major email clients including Outlook, Apple Mail &amp; Gmail.
               </div>
             </div>
           </div>
         </div>
 
         {/* Modal Bottom Bar / Actions */}
-        <div className="flex items-center justify-between p-4 border-t border-slate-200 bg-white">
+        <div className="flex items-center justify-between p-4 px-6 border-t border-slate-200 bg-white">
           <button
             type="button"
             onClick={onClose}
@@ -725,17 +1157,17 @@ const SignatureBuilderModal = ({
               type="button"
               disabled={saving}
               onClick={() => handleSave(true)}
-              className="px-4 py-2 text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-xl transition flex items-center gap-1.5 cursor-pointer"
+              className="px-4 py-2 text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
             >
               <Star className="w-3.5 h-3.5 text-amber-600" />
-              <span>Save & Set as Default</span>
+              <span>Save &amp; Set as Default</span>
             </button>
 
             <button
               type="button"
               disabled={saving}
               onClick={() => handleSave(false)}
-              className="px-5 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+              className="px-5 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
               <span>{saving ? 'Saving...' : 'Save Signature'}</span>

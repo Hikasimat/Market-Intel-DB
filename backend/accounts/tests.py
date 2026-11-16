@@ -1,6 +1,6 @@
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 from django.contrib.auth.models import User
 from accounts.models import UserProfile, MailAccount
 from utils.encryption import decrypt_password
@@ -124,7 +124,7 @@ class AccountsTestCase(APITestCase):
         self.assertEqual(resp_pre.status_code, status.HTTP_204_NO_CONTENT)
 
         # Manager CANNOT delete superuser
-        url_admin = f'/api/auth/users/{self.admin_user.id}/'
+        url_admin = f'/api/auth/users/{self.superuser.id}/'
         resp_admin = self.client.delete(url_admin)
         self.assertEqual(resp_admin.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -258,3 +258,104 @@ class AccountsTestCase(APITestCase):
             self.assertIn('report.pdf', attachment_names)
             self.assertIn('chart.png', attachment_names)
             self.assertIn('notes.txt', attachment_names)
+
+
+class EmailAttachmentLibraryTests(APITestCase):
+    def setUp(self):
+        self.user1 = User.objects.create_user(username='alice', password='password123', email='alice@example.com')
+        self.user2 = User.objects.create_user(username='bob', password='password123', email='bob@example.com')
+
+        self.client1 = APIClient()
+        self.client1.force_authenticate(user=self.user1)
+
+        self.client2 = APIClient()
+        self.client2.force_authenticate(user=self.user2)
+
+    def test_empty_library(self):
+        res = self.client1.get('/api/auth/attachment-library/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertEqual(len(results), 0)
+
+    def test_upload_library_file_success(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from accounts.models import EmailAttachmentLibraryItem
+        file = SimpleUploadedFile("brochure.pdf", b"Dummy PDF content", content_type="application/pdf")
+        res = self.client1.post('/api/auth/attachment-library/', {'file': file, 'name': 'Company Brochure'}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['name'], 'Company Brochure')
+        self.assertEqual(res.data['file_size'], len(b"Dummy PDF content"))
+        self.assertTrue(EmailAttachmentLibraryItem.objects.filter(user=self.user1, name='Company Brochure').exists())
+
+    def test_max_five_files_enforced(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from accounts.models import EmailAttachmentLibraryItem
+        for i in range(1, 6):
+            f = SimpleUploadedFile(f"file_{i}.pdf", b"data", content_type="application/pdf")
+            res = self.client1.post('/api/auth/attachment-library/', {'file': f}, format='multipart')
+            self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        self.assertEqual(EmailAttachmentLibraryItem.objects.filter(user=self.user1).count(), 5)
+
+        # 6th upload must fail
+        f6 = SimpleUploadedFile("file_6.pdf", b"data", content_type="application/pdf")
+        res6 = self.client1.post('/api/auth/attachment-library/', {'file': f6}, format='multipart')
+        self.assertEqual(res6.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('limit reached', res6.data['error'])
+
+    def test_blocked_file_type(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        f = SimpleUploadedFile("malware.exe", b"MZ...", content_type="application/octet-stream")
+        res = self.client1.post('/api/auth/attachment-library/', {'file': f}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('.exe is not allowed', res.data['error'])
+
+    def test_file_size_limit(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        oversized = SimpleUploadedFile("large.pdf", b"X" * (11 * 1024 * 1024), content_type="application/pdf")
+        res = self.client1.post('/api/auth/attachment-library/', {'file': oversized}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('exceeds the 10MB limit', res.data['error'])
+
+    def test_delete_frees_slot(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from accounts.models import EmailAttachmentLibraryItem
+        item_ids = []
+        for i in range(5):
+            f = SimpleUploadedFile(f"file_{i}.pdf", b"content", content_type="application/pdf")
+            r = self.client1.post('/api/auth/attachment-library/', {'file': f}, format='multipart')
+            item_ids.append(r.data['id'])
+
+        del_res = self.client1.delete(f'/api/auth/attachment-library/{item_ids[0]}/')
+        self.assertEqual(del_res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(EmailAttachmentLibraryItem.objects.filter(user=self.user1).count(), 4)
+
+        new_f = SimpleUploadedFile("file_new.pdf", b"new content", content_type="application/pdf")
+        res = self.client1.post('/api/auth/attachment-library/', {'file': new_f}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(EmailAttachmentLibraryItem.objects.filter(user=self.user1).count(), 5)
+
+    def test_user_isolation(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        f = SimpleUploadedFile("alice_doc.pdf", b"Alice secret", content_type="application/pdf")
+        r = self.client1.post('/api/auth/attachment-library/', {'file': f}, format='multipart')
+        alice_file_id = r.data['id']
+
+        bob_list = self.client2.get('/api/auth/attachment-library/')
+        bob_results = bob_list.data if isinstance(bob_list.data, list) else bob_list.data.get('results', [])
+        self.assertEqual(len(bob_results), 0)
+
+        bob_del = self.client2.delete(f'/api/auth/attachment-library/{alice_file_id}/')
+        self.assertEqual(bob_del.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_download_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        f = SimpleUploadedFile("presentation.pdf", b"Slide 1 2 3", content_type="application/pdf")
+        r = self.client1.post('/api/auth/attachment-library/', {'file': f}, format='multipart')
+        item_id = r.data['id']
+
+        down_res = self.client1.get(f'/api/auth/attachment-library/{item_id}/download/')
+        self.assertEqual(down_res.status_code, status.HTTP_200_OK)
+        content = b"".join(down_res.streaming_content) if down_res.streaming else down_res.content
+        self.assertEqual(content, b"Slide 1 2 3")
+

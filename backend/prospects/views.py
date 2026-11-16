@@ -1,3 +1,4 @@
+import logging
 import os
 import mimetypes
 import uuid
@@ -823,7 +824,35 @@ class MeetingViewSet(viewsets.ModelViewSet):
                     validate_email(candidate)
                     attendees.append(candidate)
                 except DjangoValidationError:
-                    pass  # invalid contact email: schedule without attendee
+                    pass
+
+        # Add selected participants from the key person dropdown (or all contacts if requested)
+        participant_ids = request.data.get('participant_contact_ids') or request.data.get('participant_contacts') or []
+        if isinstance(participant_ids, str):
+            import json
+            try:
+                participant_ids = json.loads(participant_ids)
+            except Exception:
+                participant_ids = [p.strip() for p in participant_ids.split(',') if p.strip()]
+
+        if participant_ids:
+            for c in ProspectContact.objects.filter(prospect=prospect, pk__in=participant_ids).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
+        elif request.data.get('include_all_contacts') in (True, 'true', '1', 1):
+            for c in ProspectContact.objects.filter(prospect=prospect).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
 
         # Only the requesting user's own Calendar credentials are ever used.
         creds = cal.get_calendar_credentials(user)
@@ -933,6 +962,34 @@ class MeetingViewSet(viewsets.ModelViewSet):
                     attendees.append(candidate)
                 except DjangoValidationError:
                     pass
+
+        # Add selected participants from the key person dropdown (or all contacts if requested)
+        participant_ids = request.data.get('participant_contact_ids') or request.data.get('participant_contacts') or []
+        if isinstance(participant_ids, str):
+            import json
+            try:
+                participant_ids = json.loads(participant_ids)
+            except Exception:
+                participant_ids = [p.strip() for p in participant_ids.split(',') if p.strip()]
+
+        if participant_ids:
+            for c in ProspectContact.objects.filter(prospect=prospect, pk__in=participant_ids).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
+        elif request.data.get('include_all_contacts') in (True, 'true', '1', 1):
+            for c in ProspectContact.objects.filter(prospect=prospect).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
 
         zoom_creds = zoom.get_zoom_credentials(user)
         if not zoom_creds:
@@ -1103,6 +1160,34 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 except DjangoValidationError:
                     pass
 
+        # Add selected participants from the key person dropdown (or all contacts if requested)
+        participant_ids = request.data.get('participant_contact_ids') or request.data.get('participant_contacts') or []
+        if isinstance(participant_ids, str):
+            import json
+            try:
+                participant_ids = json.loads(participant_ids)
+            except Exception:
+                participant_ids = [p.strip() for p in participant_ids.split(',') if p.strip()]
+
+        if participant_ids:
+            for c in ProspectContact.objects.filter(prospect=prospect, pk__in=participant_ids).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
+        elif request.data.get('include_all_contacts') in (True, 'true', '1', 1):
+            for c in ProspectContact.objects.filter(prospect=prospect).exclude(official_email__isnull=True).exclude(official_email__exact=''):
+                cand = (c.official_email or '').strip()
+                if cand and cand not in attendees:
+                    try:
+                        validate_email(cand)
+                        attendees.append(cand)
+                    except DjangoValidationError:
+                        pass
+
         ms_creds = ms.get_microsoft_credentials(user)
         if not ms_creds:
             return self._meet_error(
@@ -1198,6 +1283,73 @@ class MeetingViewSet(viewsets.ModelViewSet):
         http_status = status.HTTP_200_OK if result['status'] == 'READY' else (
             status.HTTP_202_ACCEPTED if result['status'] == 'PENDING' else status.HTTP_502_BAD_GATEWAY)
         return Response(self.get_serializer(meeting).data, status=http_status)
+
+    @action(detail=True, methods=['post', 'get'], url_path='sync-recording')
+    def sync_recording(self, request, pk=None):
+        """Use Google Meet REST API v2 to check and download meeting audio/video recording into Market Intel DB."""
+        from accounts.google_meet_service import GoogleMeetRestService
+
+        meeting = self.get_object()
+        if meeting.meeting_provider != 'GOOGLE_MEET':
+            return self._meet_error(
+                f'Only Google Meet meetings support Google Meet REST API recording download (current provider: {meeting.meeting_provider}).',
+                'not_google_meet',
+                status.HTTP_400_BAD_REQUEST
+            )
+
+        if not meeting.meeting_link:
+            return self._meet_error('Meeting has no meeting link.', 'missing_link', status.HTTP_400_BAD_REQUEST)
+
+        # Host or manager/admin check
+        is_owner = meeting.google_calendar_owner_id == request.user.id or meeting.created_by_id == request.user.id
+        if not (is_owner or request.user.is_superuser or (hasattr(request.user, 'profile') and request.user.profile.role == 'MANAGER')):
+            raise PermissionDenied('Only the host who organized the meeting or a Manager can sync this recording.')
+
+        # If already downloaded and GET request, return data immediately
+        if meeting.recording_file and meeting.recording_status == 'COMPLETED' and request.method == 'GET':
+            data = self.get_serializer(meeting).data
+            data['sync_result'] = {
+                'success': True,
+                'status': 'COMPLETED',
+                'recording_url': meeting.recording_file.url,
+                'already_downloaded': True,
+            }
+            return Response(data, status=status.HTTP_200_OK)
+
+        result = GoogleMeetRestService.sync_meeting_recording(meeting)
+        data = self.get_serializer(meeting).data
+        data['sync_result'] = result
+
+        if result.get('success'):
+            return Response(data, status=status.HTTP_200_OK)
+        elif result.get('status') == 'PROCESSING':
+            return Response(data, status=status.HTTP_202_ACCEPTED)
+        elif result.get('status') in ('NOT_FOUND', 'INVALID_LINK'):
+            return Response(data, status=status.HTTP_200_OK)
+        else:
+            http_status = status.HTTP_400_BAD_REQUEST if result.get('status') == 'NOT_CONNECTED' else status.HTTP_502_BAD_GATEWAY
+            return Response(data, status=http_status)
+
+    @action(detail=False, methods=['post'], url_path='sync-all-recordings')
+    def sync_all_recordings(self, request):
+        """Sync recordings for all completed/past Google Meet meetings hosted by the user."""
+        from accounts.google_meet_service import GoogleMeetRestService
+        from django.db.models import Q
+
+        user = request.user
+        qs = Meeting.objects.filter(
+            meeting_provider='GOOGLE_MEET',
+            recording_file__isnull=True
+        )
+        if not user.is_superuser:
+            qs = qs.filter(Q(google_calendar_owner=user) | Q(created_by=user))
+
+        results = []
+        for meeting in qs[:10]:
+            res = GoogleMeetRestService.sync_meeting_recording(meeting)
+            results.append({'meeting_id': meeting.id, 'company_name': meeting.prospect.company_name, 'result': res})
+
+        return Response({'synced_count': len(results), 'results': results}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='pending')
     def pending(self, request):
@@ -1690,6 +1842,40 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
             prospect.lead_qualification.email_status = 'Waiting for Response'
             prospect.lead_qualification.save()
 
+        # Record normalized thread & schedule non-blocking summary
+        from .email_thread_service import (
+            compute_snippet,
+            record_outbound_email_in_thread,
+            update_outbound_send_result,
+        )
+        thread_to_list = [r.get('email_address') for r in recipients_data if (r.get('recipient_type', 'TO').upper() == 'TO') and r.get('email_address')]
+        thread_cc_list = [r.get('email_address') for r in recipients_data if (r.get('recipient_type', 'TO').upper() == 'CC') and r.get('email_address')]
+        if not thread_to_list:
+            thread_to_list = [r.get('email_address') for r in recipients_data if (r.get('recipient_type', 'TO').upper() != 'BCC') and r.get('email_address')]
+        att_meta = [
+            {"filename": f.name, "content_type": getattr(f, "content_type", "application/octet-stream"), "size": f.size}
+            for f in files
+        ]
+        _, thread_msg = record_outbound_email_in_thread(
+            owner=user,
+            from_email=sender_email,
+            sender_name=sender_display_name,
+            to_emails=thread_to_list,
+            cc_emails=thread_cc_list,
+            subject=subject,
+            body_text=compute_snippet(body_html=full_body, max_len=12000),
+            body_html=full_body,
+            source='OUTREACH',
+            status='SENT',
+            external_thread_id=outreach_email.thread_id or "",
+            rfc_message_id=msg_id,
+            prospect=prospect,
+            prospect_contact=primary_contact,
+            outreach_email=outreach_email,
+            attachments_metadata=att_meta,
+            sent_at=outreach_email.sent_at,
+        )
+
         def send_via_gmail():
             try:
                 from accounts.oauth_services import GmailOAuthService
@@ -1701,9 +1887,22 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
                         outreach_email.thread_id = res['threadId']
                         fields.append('thread_id')
                     outreach_email.save(update_fields=fields)
+                    if thread_msg:
+                        update_outbound_send_result(
+                            thread_msg.id,
+                            external_message_id=res.get('id', ''),
+                            external_thread_id=res.get('threadId', ''),
+                            status='SENT',
+                        )
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).error("Background Gmail outreach send failed: %s", e)
+                if thread_msg:
+                    update_outbound_send_result(
+                        thread_msg.id,
+                        status='FAILED',
+                        error_message=str(e),
+                    )
 
         # Start the background send (Gmail OAuth)
         import threading
@@ -1846,7 +2045,7 @@ class OutreachEmailViewSet(viewsets.ModelViewSet):
         from django.core.management import call_command
 
         try:
-            call_command('sync_imap')
+            call_command('sync_imap', user_id=request.user.id)
             return Response({'message': 'Email sync completed successfully.'}, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'error': f"Error running email sync: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -704,6 +704,16 @@ class GmailMailboxViewSet(viewsets.ViewSet):
                 category=category,
                 user=request.user
             )
+            if folder.upper() == 'INBOX' and res.get('messages'):
+                from django.db import connection
+                if not connection.in_atomic_block:
+                    import threading
+                    from prospects.email_thread_service import ingest_fetched_messages
+                    threading.Thread(
+                        target=ingest_fetched_messages,
+                        args=(google_creds, list(res.get('messages') or [])),
+                        daemon=True,
+                    ).start()
             return Response(res, status=status.HTTP_200_OK)
         except Exception as e:
             logging.getLogger(__name__).warning("Gmail fetch_messages error: %s", e)
@@ -1028,9 +1038,56 @@ class GmailMailboxViewSet(viewsets.ViewSet):
                 size=f.size
             )
 
+        from prospects.email_thread_service import (
+            compute_snippet,
+            record_outbound_email_in_thread,
+            update_outbound_send_result,
+        )
+        inbox_att_meta = [
+            {
+                "filename": f.name,
+                "content_type": getattr(f, 'content_type', None) or mimetypes.guess_type(f.name)[0] or 'application/octet-stream',
+                "size": f.size,
+            }
+            for f in files
+        ]
+        _, inbox_thread_msg = record_outbound_email_in_thread(
+            owner=user,
+            from_email=sender_email,
+            sender_name=sender_display_name,
+            to_emails=to_list,
+            cc_emails=cc_list,
+            subject=subject,
+            body_text=compute_snippet(body_html=body, max_len=12000),
+            body_html=body,
+            source='INBOX',
+            status='SENT',
+            external_thread_id=thread_id or "",
+            rfc_message_id=str(msg['Message-ID']),
+            prospect=matched_prospect,
+            prospect_contact=contact if (contact and matched_prospect and contact.prospect_id == matched_prospect.id) else None,
+            outreach_email=outreach_email,
+            attachments_metadata=inbox_att_meta,
+            sent_at=outreach_email.sent_at,
+        )
+
         def send_via_gmail():
             try:
-                GmailOAuthService.send_message(google_creds, raw_msg_bytes, thread_id=thread_id)
+                res = GmailOAuthService.send_message(google_creds, raw_msg_bytes, thread_id=thread_id)
+                if res and res.get('id'):
+                    upd_fields = ['message_id']
+                    outreach_email.message_id = res['id']
+                    if res.get('threadId'):
+                        outreach_email.thread_id = res['threadId']
+                        upd_fields.append('thread_id')
+                    outreach_email.save(update_fields=upd_fields)
+                    if inbox_thread_msg:
+                        update_outbound_send_result(
+                            inbox_thread_msg.id,
+                            external_message_id=res.get('id', ''),
+                            external_thread_id=res.get('threadId', ''),
+                            status='SENT',
+                        )
                 if draft_id:
                     try:
                         GmailOAuthService.delete_draft(google_creds, draft_id)
@@ -1039,6 +1096,12 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).error("Background Gmail send failed: %s", e)
+                if inbox_thread_msg:
+                    update_outbound_send_result(
+                        inbox_thread_msg.id,
+                        status='FAILED',
+                        error_message=str(e),
+                    )
 
         import threading
         t = threading.Thread(target=send_via_gmail)
@@ -1287,8 +1350,19 @@ class GmailMailboxViewSet(viewsets.ViewSet):
             unseen = GmailOAuthService.get_unread_count(google_creds, folder='INBOX')
             messages = []
             if unseen > 0:
-                unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=5)
-                messages = [m for m in unread_res.get('messages', []) if m.get('is_unread')]
+                unread_res = GmailOAuthService.fetch_messages(google_creds, folder='INBOX', limit=10)
+                fetched_inbox = unread_res.get('messages', []) or []
+                messages = [m for m in fetched_inbox if m.get('is_unread')]
+                if fetched_inbox:
+                    from django.db import connection
+                    if not connection.in_atomic_block:
+                        import threading
+                        from prospects.email_thread_service import ingest_fetched_messages
+                        threading.Thread(
+                            target=ingest_fetched_messages,
+                            args=(google_creds, list(fetched_inbox)),
+                            daemon=True,
+                        ).start()
             cat_counts = {}
             try:
                 cat_counts = GmailOAuthService.get_category_counts(google_creds)

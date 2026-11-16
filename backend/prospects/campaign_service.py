@@ -432,6 +432,33 @@ def send_single_campaign_recipient(recipient_id: uuid.UUID) -> bool:
             recipient.outreach_email = outreach_email
             recipient.save(update_fields=['status', 'sent_at', 'error_message', 'outreach_email'])
 
+            from .email_thread_service import compute_snippet, record_outbound_email_in_thread
+            camp_atts = [
+                {"filename": a.original_filename, "content_type": a.mime_type, "size": a.size, "attachment_id": str(a.id)}
+                for a in campaign.attachments.all()
+            ]
+            record_outbound_email_in_thread(
+                owner=campaign.created_by,
+                from_email=outreach_email.from_email,
+                sender_name=outreach_email.from_name or "",
+                to_emails=[recipient.email_address],
+                subject=campaign.subject,
+                body_text=compute_snippet(body_html=outreach_email.body, max_len=12000),
+                body_html=outreach_email.body,
+                source='CAMPAIGN',
+                status='SENT',
+                external_thread_id=(gmail_resp.get('threadId') if gmail_resp else "") or "",
+                external_message_id=(gmail_resp.get('id') if gmail_resp else "") or "",
+                rfc_message_id=str(mime_msg['Message-ID']),
+                prospect=recipient.prospect,
+                prospect_contact=recipient.prospect_contact,
+                outreach_email=outreach_email,
+                campaign_recipient=recipient,
+                attachments_metadata=camp_atts,
+                sent_at=completed_at,
+                dedup_key=f"campaign:{recipient.id}",
+            )
+
             if recipient.prospect:
                 CommunicationActivity.objects.create(
                     prospect=recipient.prospect,
@@ -473,6 +500,25 @@ def send_single_campaign_recipient(recipient_id: uuid.UUID) -> bool:
                 recipient.status = EmailCampaignRecipient.Status.FAILED
                 recipient.error_message = error_detail or "Failed to send email."
                 recipient.save(update_fields=['status', 'error_message'])
+
+                try:
+                    from .email_thread_service import record_outbound_email_in_thread
+                    record_outbound_email_in_thread(
+                        owner=campaign.created_by,
+                        from_email=getattr(google_creds, 'email', '') or '',
+                        to_emails=[recipient.email_address],
+                        subject=campaign.subject,
+                        body_text=campaign.body or '',
+                        source='CAMPAIGN',
+                        status='FAILED',
+                        prospect=recipient.prospect,
+                        prospect_contact=recipient.prospect_contact,
+                        campaign_recipient=recipient,
+                        sent_at=completed_at,
+                        dedup_key=f"campaign:{recipient.id}",
+                    )
+                except Exception:
+                    pass
 
                 # Advance next recipient after preserving provider pacing
                 next_time = completed_at + timedelta(seconds=campaign.interval_seconds)

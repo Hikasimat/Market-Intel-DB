@@ -104,9 +104,13 @@ from .services import (
     WhatsAppError,
     admin_reset_safety_stop,
     admin_set_outbound_enabled,
+    get_or_create_user_session,
     get_qr,
     get_session_status,
     logout_session,
+    normalize_phone_digits,
+    normalize_phone_number,
+    reconcile_connected_session,
     send_whatsapp_message,
     start_session,
     stop_session,
@@ -170,57 +174,11 @@ def _validate_session_name(name: str) -> tuple[bool, str]:
 
 def _get_user_session(user, create=True) -> WhatsAppSession:
     """
-    Resolve the isolated active WhatsApp session for this specific user.
-    Each user has their own distinct WAHA session (e.g. 'user_1', 'user_2').
+    Resolve the isolated active WhatsApp session for this specific user using the
+    deterministic per-user HMAC session naming and strict ownership boundary.
     Session ownership is strictly immutable: no session can ever be reassigned.
     """
-    if not user or not user.is_authenticated:
-        return None
-
-    # 1. First check if the user already has an active session owned by them
-    user_sess = WhatsAppSession.objects.filter(owner=user, is_active=True).first()
-    if user_sess:
-        return user_sess
-
-    if not create:
-        return None
-
-    # 2. Check for an inactive session owned by them to reactivate
-    existing_inactive = WhatsAppSession.objects.filter(owner=user).first()
-    if existing_inactive:
-        existing_inactive.is_active = True
-        existing_inactive.save(update_fields=["is_active"])
-        return existing_inactive
-
-    # 3. Create a collision-resistant per-user session
-    base_session_name = f"user_{user.id}"
-    conflict = WhatsAppSession.objects.filter(session_name=base_session_name).first()
-    if conflict and conflict.owner != user:
-        session_name = f"user_{user.id}_{uuid.uuid4().hex[:8]}"
-    else:
-        session_name = base_session_name
-
-    session, _ = WhatsAppSession.objects.get_or_create(
-        session_name=session_name,
-        defaults={
-            "owner": user,
-            "status": WhatsAppSession.Status.DISCONNECTED,
-            "is_active": True,
-        }
-    )
-    # Strictly preserve ownership: never overwrite another user's session
-    if session.owner is None:
-        session.owner = user
-        session.save(update_fields=["owner"])
-    elif session.owner != user:
-        unique_name = f"user_{user.id}_{uuid.uuid4().hex[:8]}"
-        session = WhatsAppSession.objects.create(
-            session_name=unique_name,
-            owner=user,
-            status=WhatsAppSession.Status.DISCONNECTED,
-            is_active=True,
-        )
-    return session
+    return get_or_create_user_session(user, create=create)
 
 
 def _get_owned_session(request, session_id=None, session_name=None):
@@ -379,7 +337,7 @@ class WhatsAppSessionListView(APIView):
             sessions_to_sync = (
                 list(WhatsAppSession.objects.filter(is_active=True))
                 if request.user.is_superuser
-                else [user_session]
+                else ([user_session] if user_session else [])
             )
             for s in sessions_to_sync:
                 waha_session_data = next((ws for ws in waha_sessions if ws.get("name") == s.session_name), None)
@@ -390,8 +348,10 @@ class WhatsAppSessionListView(APIView):
                     w_status = str(waha_session_data.get("status") or "").upper()
                     if s.status == WhatsAppSession.Status.READY:
                         if w_status in ("LOGGED_OUT", "UNPAIRED"):
+                            # Scenario A: preserve phone_number and all history on logout
                             new_status = "DISCONNECTED"
-                            s.phone_number = None
+                            s.stopped_at = timezone.now()
+                            s.disconnect_count = (s.disconnect_count or 0) + 1
                         else:
                             new_status = "READY"
                             if w_status in ("FAILED", "STOPPED", "NOT_FOUND"):
@@ -412,21 +372,30 @@ class WhatsAppSessionListView(APIView):
                     if w_status == "WORKING":
                         me_info = waha_session_data.get("me") or {}
                         phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
-                        if phone and s.phone_number != phone:
-                            s.phone_number = phone
+                        if phone:
+                            reconciled, _, _ = reconcile_connected_session(
+                                s, phone, source="session_list"
+                            )
+                            s = reconciled
+                            new_status = s.status
 
                 update_fields = []
                 if s.status != new_status:
                     s.status = new_status
-                    update_fields.append('status')
-                if s.phone_number and 'phone_number' not in update_fields:
-                    update_fields.append('phone_number')
+                    update_fields.append("status")
+                    if new_status == "DISCONNECTED":
+                        if not s.stopped_at:
+                            s.stopped_at = timezone.now()
+                        update_fields.extend(["stopped_at", "disconnect_count"])
 
                 if update_fields:
-                    s.save(update_fields=update_fields)
+                    s.save(update_fields=list(set(update_fields)))
 
         except Exception as e:
             logger.error(f"Failed to sync sessions from WAHA: {e}")
+
+        # Re-read active user session in case account-switch reconciliation activated another session
+        user_session = _get_user_session(request.user, create=False) or user_session
 
         # Non-superusers see strictly their own session
         if request.user.is_superuser and request.query_params.get("all") == "true":
@@ -461,9 +430,18 @@ class WhatsAppStatusView(APIView):
         except Exception:
             status_data = {"status": target_session.status}
 
+        historical_sessions = []
+        if request.user and request.user.is_authenticated:
+            hist_qs = WhatsAppSession.objects.filter(
+                owner=request.user,
+                is_active=False,
+            ).order_by("-stopped_at", "-updated_at")[:10]
+            historical_sessions = WhatsAppSessionListSerializer(hist_qs, many=True).data
+
         return Response({
             "session": WhatsAppSessionListSerializer(target_session).data,
             "sessions": WhatsAppSessionListSerializer([target_session], many=True).data,
+            "historical_sessions": historical_sessions,
             "waha_status": status_data.get("waha_status", {}),
             "status": status_data.get("status") or target_session.status,
             "phone_number": target_session.phone_number,
@@ -477,9 +455,8 @@ class WhatsAppStatusView(APIView):
 class WhatsAppQRView(APIView):
     """
     Get live QR code or connection status for WhatsApp authentication.
-    Strictly isolated per user:
-    - User 15 (LQ 1) manages their session (e.g. 'default').
-    - User 19 (LQ 2) manages their own session (e.g. 'user_19').
+    Strictly isolated per user via deterministic per-user session IDs:
+    - Each user manages only their own owned WhatsAppSession.
     - Auto-starts WAHA session and streams live QR code.
     """
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
@@ -497,7 +474,8 @@ class WhatsAppQRView(APIView):
         # 1. Explicit forced restart requested by user (e.g. clicked Reload QR Code)
         if force_restart:
             clear_cached_qr(session_name)
-            # Only delete session files if not already authenticated to prevent accidental logout
+            # Only delete runtime WAHA session files if not already authenticated to prevent accidental logout;
+            # never delete PostgreSQL conversations or messages.
             if session_obj.status != WhatsAppSession.Status.READY or not session_obj.phone_number:
                 try:
                     client.delete_session(session_name)
@@ -511,6 +489,9 @@ class WhatsAppQRView(APIView):
         # 1.5. If already authenticated (READY), never log out or show QR!
         if session_obj.status == WhatsAppSession.Status.READY and not force_restart:
             clear_cached_qr(session_name)
+            switched = False
+            previous_phone = None
+            me_info = {}
             # Ensure WAHA session is running; if stopped or failed, recover it seamlessly
             try:
                 waha_info = client.get_session_status(session_name)
@@ -519,20 +500,11 @@ class WhatsAppQRView(APIView):
                     client.start_session(session_name)
                 me_info = waha_info.get("me") or {}
                 live_phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
-                clean_live = re.sub(r"\D+", "", str(live_phone or ""))
-                clean_saved = re.sub(r"\D+", "", str(session_obj.phone_number or ""))
-                if clean_live and clean_saved and clean_live != clean_saved:
-                    logger.warning(
-                        "WhatsApp account switch detected in READY session %s: %s -> %s. Purging old session data.",
-                        session_name, clean_saved, clean_live
+                if live_phone:
+                    session_obj, switched, previous_phone = reconcile_connected_session(
+                        session_obj, live_phone, source="qr_poll"
                     )
-                    WhatsAppMessage.objects.filter(conversation__session=session_obj).delete()
-                    WhatsAppConversation.objects.filter(session=session_obj).delete()
-                    session_obj.phone_number = live_phone
-                    session_obj.save(update_fields=["phone_number"])
-                elif live_phone and not session_obj.phone_number:
-                    session_obj.phone_number = live_phone
-                    session_obj.save(update_fields=["phone_number"])
+                    session_name = session_obj.session_name
             except Exception:
                 me_info = {}
 
@@ -541,8 +513,14 @@ class WhatsAppQRView(APIView):
                 "connected": True,
                 "session_name": session_name,
                 "phone_number": session_obj.phone_number,
+                "account_switched": switched,
+                "previous_phone_number": previous_phone,
                 "me": me_info,
-                "message": "WhatsApp is connected and ready.",
+                "message": (
+                    f"Switched to {session_obj.phone_number}. Previous account ({previous_phone}) history preserved."
+                    if switched
+                    else "WhatsApp is connected and ready."
+                ),
             })
 
         # 2. Check cached QR first!
@@ -572,6 +550,7 @@ class WhatsAppQRView(APIView):
                 "status": "SCAN_QR_CODE",
                 "connected": False,
                 "session_name": session_name,
+                "phone_number": session_obj.phone_number,
                 "qr": cached_qr.get("qr") or cached_qr.get("value") or qr_base64,
                 "qrBase64": qr_base64,
                 "value": cached_qr.get("value") or cached_qr.get("qr") or qr_base64,
@@ -603,6 +582,7 @@ class WhatsAppQRView(APIView):
                         "status": "SCAN_QR_CODE",
                         "connected": False,
                         "session_name": session_name,
+                        "phone_number": session_obj.phone_number,
                         "qr": cached_qr.get("qr") or cached_qr.get("value"),
                         "qrBase64": qr_base64,
                         "value": cached_qr.get("value") or cached_qr.get("qr"),
@@ -611,41 +591,59 @@ class WhatsAppQRView(APIView):
                     "status": "STARTING",
                     "connected": False,
                     "session_name": session_name,
+                    "phone_number": session_obj.phone_number,
                     "message": "Connecting to WhatsApp service...",
                 })
 
         # 4. If session is already authenticated and WORKING
-        if waha_status == "WORKING":
+        if str(waha_status or "").upper() in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
             clear_cached_qr(session_name)
             phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
-            clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
-            clean_old_phone = re.sub(r"\D+", "", str(session_obj.phone_number or ""))
+            was_ready = session_obj.status == WhatsAppSession.Status.READY
 
-            # Account isolation: if a different WhatsApp account connects, purge previous account data
-            if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
-                logger.warning(
-                    "WhatsApp account switch detected for session %s: %s -> %s. Purging old session data.",
-                    session_name, clean_old_phone, clean_new_phone
+            if phone:
+                session_obj, switched, previous_phone = reconcile_connected_session(
+                    session_obj, phone, source="qr_poll"
                 )
-                WhatsAppMessage.objects.filter(conversation__session=session_obj).delete()
-                WhatsAppConversation.objects.filter(session=session_obj).delete()
+                session_name = session_obj.session_name
+            else:
+                switched = False
+                previous_phone = None
+                if session_obj.status != WhatsAppSession.Status.READY:
+                    session_obj.status = WhatsAppSession.Status.READY
+                    session_obj.started_at = timezone.now()
+                    session_obj.save(update_fields=["status", "started_at"])
 
-            if session_obj.status != "READY" or (phone and session_obj.phone_number != phone):
-                session_obj.status = WhatsAppSession.Status.READY
-                if phone:
-                    session_obj.phone_number = phone
-                session_obj.save(update_fields=["status", "phone_number"])
+            if not was_ready or switched:
+                try:
+                    from django.db import connection
+                    if not connection.in_atomic_block:
+                        import threading
+                        from .webhooks import sync_two_day_whatsapp_history
+                        threading.Thread(
+                            target=sync_two_day_whatsapp_history,
+                            kwargs={"session_name": session_name, "days": 2, "force": True},
+                            daemon=True,
+                        ).start()
+                except Exception:
+                    pass
 
             return Response({
                 "status": "WORKING",
                 "connected": True,
                 "session_name": session_name,
                 "phone_number": session_obj.phone_number,
+                "account_switched": switched,
+                "previous_phone_number": previous_phone,
                 "me": me_info,
-                "message": "WhatsApp is connected and ready.",
+                "message": (
+                    f"Connected new number {session_obj.phone_number}. Previous account ({previous_phone}) history preserved."
+                    if switched
+                    else "WhatsApp is connected and ready."
+                ),
             })
 
-        # 5. If NOT_FOUND, STOPPED, FAILED, or UNKNOWN, start the session in WAHA!
+        # 5. If NOT_FOUND, STOPPED, FAILED, or UNKNOWN, start the user's own session in WAHA!
         just_started = False
         if session_needs_start or waha_status in ("NOT_FOUND", "STOPPED", "FAILED", "UNKNOWN", None):
             try:
@@ -654,20 +652,14 @@ class WhatsAppQRView(APIView):
                 just_started = True
             except Exception as start_err:
                 logger.warning("Start WAHA session %s: %s", session_name, start_err)
-                if session_name != "default":
-                    try:
-                        client.start_session("default")
-                    except Exception:
-                        pass
 
         # If we just started the session, give WAHA's socket ~0.8s to initialize
         if just_started:
             time.sleep(0.8)
 
-        # 6. Fetch live QR from WAHA or cached QR pushed via webhook
+        # 6. Fetch live QR from WAHA or cached QR pushed via webhook (strictly for this user's session)
         for attempt in range(2):
-            # Check cached QR (received via webhook)
-            cached_qr = get_cached_qr(session_name) or (get_cached_qr("default") if session_name != "default" else None)
+            cached_qr = get_cached_qr(session_name)
             if cached_qr and (cached_qr.get("qr") or cached_qr.get("qrBase64") or cached_qr.get("data")):
                 qr_base64 = cached_qr.get("qrBase64") or cached_qr.get("data") or ""
                 if not qr_base64:
@@ -680,6 +672,7 @@ class WhatsAppQRView(APIView):
                     "status": "SCAN_QR_CODE",
                     "connected": False,
                     "session_name": session_name,
+                    "phone_number": session_obj.phone_number,
                     "qr": cached_qr.get("qr") or cached_qr.get("value") or qr_base64,
                     "qrBase64": qr_base64,
                     "value": cached_qr.get("value") or cached_qr.get("qr") or qr_base64,
@@ -688,13 +681,6 @@ class WhatsAppQRView(APIView):
             # Fetch live QR from WAHA if available
             try:
                 qr_data = client.get_qr(session_name)
-                if not (qr_data.get("qr") or qr_data.get("qrBase64") or qr_data.get("value") or qr_data.get("data")) and session_name != "default":
-                    try:
-                        default_qr = client.get_qr("default")
-                        if default_qr and (default_qr.get("qr") or default_qr.get("qrBase64") or default_qr.get("value") or default_qr.get("data")):
-                            qr_data = default_qr
-                    except Exception:
-                        pass
                 if not isinstance(qr_data, dict):
                     qr_data = {"qr": str(qr_data)}
 
@@ -713,6 +699,7 @@ class WhatsAppQRView(APIView):
                     qr_data["status"] = "SCAN_QR_CODE"
                     qr_data["connected"] = False
                     qr_data["session_name"] = session_name
+                    qr_data["phone_number"] = session_obj.phone_number
                     set_cached_qr(session_name, qr_data)
                     return Response(qr_data)
             except Exception as exc:
@@ -725,6 +712,7 @@ class WhatsAppQRView(APIView):
             "status": "STARTING",
             "connected": False,
             "session_name": session_name,
+            "phone_number": session_obj.phone_number,
             "message": "Generating WhatsApp QR code...",
         })
 
@@ -733,13 +721,26 @@ class WhatsAppPairingCodeView(APIView):
     """
     Request an 8-character pairing code to link WhatsApp by phone number instead of QR scanning.
     POST /api/whatsapp/pair-code/
-    Body: {"session_name": "default", "phone_number": "919003619221"}
+    Body: {"phone_number": "919003619221"}
     """
     permission_classes = [IsAuthenticated, CanManageOwnWhatsAppSession]
 
     def post(self, request):
-        user_sess = _get_user_session(request.user, create=True)
-        session_name = (request.data.get("session_name") or (user_sess.session_name if user_sess else "default")).strip()
+        requested_session = (request.data.get("session_name") or "").strip()
+        if requested_session:
+            session_obj = _get_owned_session(request, session_name=requested_session)
+            if not session_obj:
+                return Response(
+                    {"detail": "Session not found or not owned by you."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            session_obj = _get_user_session(request.user, create=True)
+
+        if not session_obj:
+            return Response({"detail": "No WhatsApp session available."}, status=status.HTTP_400_BAD_REQUEST)
+
+        session_name = session_obj.session_name
         phone_number = (request.data.get("phone_number") or "").strip()
         if not phone_number:
             return Response({"detail": "Phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -749,9 +750,10 @@ class WhatsAppPairingCodeView(APIView):
             return Response({"detail": "Valid phone number required."}, status=status.HTTP_400_BAD_REQUEST)
 
         from .client import get_waha_client
+        import time
         client = get_waha_client()
         try:
-            # Ensure WAHA session is active before requesting pairing code
+            # Ensure this user's own WAHA session is active before requesting pairing code
             try:
                 status_info = client.get_session_status(session_name)
                 if status_info.get("status") in ("STOPPED", "FAILED", "UNKNOWN", None):
@@ -764,22 +766,12 @@ class WhatsAppPairingCodeView(APIView):
                 except Exception:
                     pass
 
-            try:
-                res = client.request_code(session_name, clean_phone)
-            except Exception as req_err:
-                if session_name != "default":
-                    try:
-                        client.start_session("default")
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-                    res = client.request_code("default", clean_phone)
-                else:
-                    raise req_err
+            res = client.request_code(session_name, clean_phone)
             if isinstance(res, dict):
                 code = res.get("code") or res.get("pairingCode") or res.get("raw")
                 if code:
                     res["code"] = str(code)
+                res["session_name"] = session_name
             return Response(res, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.error("Failed to request pairing code for %s: %s", session_name, exc)
@@ -793,11 +785,14 @@ class WhatsAppSessionStartView(APIView):
 
     def post(self, request):
         session_name = (request.data.get("session_name") or "").strip()
-        is_valid, err = _validate_session_name(session_name)
-        if not is_valid:
-            return Response({"detail": err}, status=status.HTTP_400_BAD_REQUEST)
+        if session_name:
+            is_valid, err = _validate_session_name(session_name)
+            if not is_valid:
+                return Response({"detail": err}, status=status.HTTP_400_BAD_REQUEST)
+            session_obj = _get_owned_session(request, session_name=session_name)
+        else:
+            session_obj = _get_user_session(request.user, create=True)
 
-        session_obj = _get_owned_session(request, session_name=session_name)
         if not session_obj:
             return Response({"detail": "Session not found or not owned by you."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -842,13 +837,22 @@ class WhatsAppSessionLogoutView(APIView):
         session_name = (request.data.get("session_name") or "").strip()
         if not session_name:
             user_session = _get_user_session(request.user, create=False)
-            session_name = user_session.session_name if user_session else "default"
+            if not user_session:
+                return Response(
+                    {"detail": "No active WhatsApp session found for your account."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            session_name = user_session.session_name
 
         is_valid, err = _validate_session_name(session_name)
         if not is_valid:
             return Response({"detail": err}, status=status.HTTP_400_BAD_REQUEST)
 
-        session_obj = _get_owned_session(request, session_name=session_name)
+        session_obj = (
+            WhatsAppSession.objects.filter(session_name=session_name).first()
+            if request.user.is_superuser
+            else _get_owned_session(request, session_name=session_name)
+        )
         if not session_obj:
             return Response({"detail": "Session not found or not owned by you."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -856,7 +860,7 @@ class WhatsAppSessionLogoutView(APIView):
             return Response({"detail": "You can only disconnect your own WhatsApp session."}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            result = logout_session(performed_by=request.user, session_name=session_name)
+            result = logout_session(performed_by=request.user, session_name=session_obj.session_name)
             return Response(result)
         except WhatsAppError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -930,7 +934,9 @@ class WhatsAppSendMessageView(APIView):
             import hashlib as _hashlib
             try:
                 user_session = _get_user_session(request.user, create=True)
-                actual_session_name = user_session.session_name if user_session else "default"
+                if not user_session:
+                    return Response({"detail": "No WhatsApp session available for this user."}, status=status.HTTP_400_BAD_REQUEST)
+                actual_session_name = user_session.session_name
 
                 clean_chat_id = re.sub(r":[0-9]+@", "@", raw_chat_id.strip())
                 alt_chat_id = None
@@ -1082,15 +1088,7 @@ class WhatsAppSendMessageView(APIView):
         user_session = _get_user_session(user, create=True)
         if user_session:
             return user_session.session_name
-
-        phone = re.sub(r"\D+", "", contact.phone_number or "")
-        if phone:
-            chat_id = f"{phone}@c.us"
-            conv = WhatsAppConversation.objects.filter(
-                chat_id=chat_id,
-                is_deleted=False,
-                session__owner=user,
-            ).select_related("session").first()
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1154,14 +1152,20 @@ class WhatsAppConversationsView(APIView):
                 except Exception as e:
                     logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
 
-        # Strictly scoped to current user's session and account phone number
-        clean_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
+        # Strictly scoped to current user's session and normalized account phone number
+        if not user_session:
+            return Response([])
+
+        clean_user_phone = normalize_phone_digits(user_session.phone_number or "")
+        norm_user_phone = normalize_phone_number(user_session.phone_number or "")
         qs = qs.filter(session=user_session, session__owner=user)
         if clean_user_phone:
             qs = qs.exclude(
-                ~Q(account_phone=clean_user_phone) &
-                ~Q(account_phone=user_session.phone_number) &
-                Q(account_phone__isnull=False)
+                ~Q(account_phone=clean_user_phone)
+                & ~Q(account_phone=norm_user_phone or clean_user_phone)
+                & ~Q(account_phone=user_session.phone_number)
+                & ~Q(account_phone="")
+                & Q(account_phone__isnull=False)
             )
 
         # Deduplicate conversations by canonical phone digits / contact / group ID and auto-merge duplicate threads
@@ -1424,11 +1428,25 @@ class WhatsAppTwoDaySyncView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def post(self, request):
-        user_session = _get_user_session(request.user, create=True)
-        session_name = (
-            request.data.get("session_name")
-            or (user_session.session_name if user_session else "default")
-        ).strip()
+        requested_session = (request.data.get("session_name") or "").strip()
+        if requested_session:
+            target_session = (
+                WhatsAppSession.objects.filter(session_name=requested_session).first()
+                if request.user.is_superuser
+                else _get_owned_session(request, session_name=requested_session)
+            )
+            if not target_session:
+                return Response(
+                    {"detail": "Session not found or not owned by you."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            target_session = _get_user_session(request.user, create=True)
+
+        if not target_session:
+            return Response({"detail": "No WhatsApp session available."}, status=status.HTTP_400_BAD_REQUEST)
+
+        session_name = target_session.session_name
         days = int(request.data.get("days") or request.query_params.get("days") or 2)
         chat_id = (request.data.get("chat_id") or "").strip() or None
 
@@ -1445,6 +1463,8 @@ class WhatsAppTwoDaySyncView(APIView):
                 "detail": f"Synchronized {synced_count} messages from the last {days} days.",
                 "synced": synced_count,
                 "checked": result.get("checked", 0),
+                "chats_checked": result.get("chats_checked", 0),
+                "last_synced_at": result.get("last_synced_at"),
                 "days": days,
                 "cutoff": result.get("cutoff"),
             }, status=status.HTTP_200_OK)
@@ -1562,6 +1582,10 @@ class WhatsAppMessageDeleteView(APIView):
                 "conversation", "conversation__session"
             ).get(pk=message_id)
         except WhatsAppMessage.DoesNotExist:
+            return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        conv_session = msg.conversation.session if msg.conversation else None
+        if not request.user.is_superuser and (not conv_session or conv_session.owner != request.user):
             return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if msg.is_deleted:
@@ -1930,7 +1954,9 @@ class WhatsAppMediaProxyView(APIView):
         elif raw_url.startswith("/"):
             target_url = f"{waha_base_url}{raw_url}"
         else:
-            session_name = msg.conversation.session.session_name if (msg.conversation and msg.conversation.session) else "default"
+            if not (msg.conversation and msg.conversation.session):
+                raise Http404("WhatsApp session not found for media.")
+            session_name = msg.conversation.session.session_name
             target_url = f"{waha_base_url}/api/files/{session_name}/{raw_url}"
 
         req = urllib.request.Request(target_url)
@@ -1974,9 +2000,14 @@ class WhatsAppSendMediaView(APIView):
         if not chat_id or not uploaded_file:
             return Response({"detail": "chat_id and file are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_conv = WhatsAppConversation.objects.filter(chat_id=chat_id, is_deleted=False).first()
         user_session = _get_user_session(request.user, create=True)
-        session_name = user_session.session_name if user_session else (existing_conv.session.session_name if existing_conv and existing_conv.session else "default")
+        if not user_session:
+            return Response({"detail": "No WhatsApp session available for this user."}, status=status.HTTP_400_BAD_REQUEST)
+        session_name = user_session.session_name
+
+        existing_conv = WhatsAppConversation.objects.filter(
+            session=user_session, chat_id=chat_id, is_deleted=False
+        ).first()
 
         is_grp_media = chat_id.endswith("@g.us")
         target_conv, _ = WhatsAppConversation.objects.get_or_create(
@@ -2155,14 +2186,34 @@ class WhatsAppProfilePicView(APIView):
 
         chat_id = urllib.parse.unquote(chat_id).strip()
 
-        # Check conversation record
-        conv = WhatsAppConversation.objects.filter(chat_id=chat_id).select_related(
-            "prospect_contact", "prospect"
-        ).first()
-        if not conv and "@" not in chat_id:
-            conv = WhatsAppConversation.objects.filter(chat_id__startswith=chat_id).select_related(
-                "prospect_contact", "prospect"
-            ).first()
+        # Resolve authenticated user safely when authentication_classes = [] (img tag requests may be anonymous)
+        resolved_user = request.user if (getattr(request, "user", None) and request.user.is_authenticated) else None
+        if resolved_user is None:
+            try:
+                raw_tok = request.query_params.get("token") or ""
+                jwt_auth = JWTAuthentication()
+                if raw_tok:
+                    validated = jwt_auth.get_validated_token(raw_tok)
+                    resolved_user = jwt_auth.get_user(validated)
+                else:
+                    auth_res = jwt_auth.authenticate(request)
+                    if auth_res:
+                        resolved_user = auth_res[0]
+            except Exception:
+                resolved_user = None
+
+        conv = None
+        if resolved_user is not None:
+            # Check conversation record strictly scoped to the authenticated user's session(s)
+            conv_qs = WhatsAppConversation.objects.select_related(
+                "prospect_contact", "prospect", "session"
+            )
+            if not resolved_user.is_superuser:
+                conv_qs = conv_qs.filter(session__owner=resolved_user)
+
+            conv = conv_qs.filter(chat_id=chat_id).first()
+            if not conv and "@" not in chat_id:
+                conv = conv_qs.filter(chat_id__startswith=chat_id).first()
 
         # 1. Custom avatar on conversation
         if conv and conv.custom_avatar_url:
@@ -2180,10 +2231,10 @@ class WhatsAppProfilePicView(APIView):
             elif raw_url.startswith("http://") or raw_url.startswith("https://") or raw_url.startswith("/media/"):
                 return HttpResponseRedirect(raw_url)
 
-        # 2. Try WAHA with a fast timeout (in case endpoint exists on custom engine)
+        # 2. Try WAHA with a fast timeout ONLY if request is authenticated to an owned session
         waha_url = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:3000")
         api_key = os.environ.get("WHATSAPP_SERVICE_API_KEY", "")
-        session_name = self._resolve_session_for_chat(request.user, chat_id)
+        session_name = self._resolve_session_for_chat(resolved_user, chat_id)
         if session_name:
             try:
                 url = f"{waha_url}/api/contacts/profile-picture?session={urllib.parse.quote(session_name)}&contactId={urllib.parse.quote(chat_id)}"
@@ -2214,17 +2265,17 @@ class WhatsAppProfilePicView(APIView):
         return response
 
     def _resolve_session_for_chat(self, user, chat_id: str) -> str:
-        """Resolve the WAHA session name for a chat_id."""
-        conv = WhatsAppConversation.objects.filter(chat_id=chat_id).select_related("session").first()
+        """Resolve the WAHA session name strictly owned by `user` for a chat_id."""
+        if not user or not getattr(user, "is_authenticated", False):
+            return ""
+        conv = WhatsAppConversation.objects.filter(
+            chat_id=chat_id, session__owner=user
+        ).select_related("session").first()
         if conv and conv.session:
             return conv.session.session_name
 
-        session = WhatsAppSession.objects.filter(status=WhatsAppSession.Status.READY, is_active=True).first()
-        if session:
-            return session.session_name
-
-        default_session = WhatsAppSession.objects.filter(session_name="default", is_active=True).first()
-        return default_session.session_name if default_session else "default"
+        session = _get_user_session(user, create=False)
+        return session.session_name if session else ""
 
 
 class WhatsAppContactInfoView(APIView):
@@ -2280,12 +2331,12 @@ class WhatsAppContactInfoView(APIView):
             members = []
             seen_member_phones = set()
 
-            sess_name = user_session.session_name if user_session else "default"
+            sess_name = user_session.session_name if user_session else ""
             current_user_phone = re.sub(r"\D+", "", user_session.phone_number or "") if user_session else ""
             current_user_name = (
                 request.user.get_full_name()
                 or request.user.first_name
-                or (user_session.whatsapp_name if user_session else "")
+                or request.user.username
                 or "You"
             )
 
@@ -2485,8 +2536,7 @@ class WhatsAppContactInfoView(APIView):
                 if prospect:
                     colleagues = ProspectContact.objects.filter(
                         prospect=prospect,
-                        is_deleted=False,
-                    ).order_by("-is_primary", "contact_name")
+                    ).order_by("contact_name")
 
                     for col in colleagues:
                         col_phone = re.sub(r"\D+", "", str(col.phone_number or ""))
@@ -2496,11 +2546,11 @@ class WhatsAppContactInfoView(APIView):
                             "chatId": f"{col_phone}@c.us" if col_phone else "",
                             "phoneNumber": col.phone_number or "",
                             "name": col.contact_name,
-                            "designation": col.designation or ("Key Person" if col.is_primary else ""),
+                            "designation": col.designation or "Key Person",
                             "official_email": col.official_email or "",
                             "company": prospect.company_name,
                             "is_admin": False,
-                            "is_primary": bool(col.is_primary),
+                            "is_primary": False,
                             "is_current": is_cur,
                         })
                 elif contact:
@@ -2829,7 +2879,9 @@ class WhatsAppGroupAddParticipantView(APIView):
 
     def post(self, request, chat_id):
         user_session = _get_user_session(request.user, create=True)
-        session_name = user_session.session_name if user_session else "default"
+        if not user_session:
+            return Response({"error": "No WhatsApp session available."}, status=status.HTTP_400_BAD_REQUEST)
+        session_name = user_session.session_name
 
         phones = request.data.get("participants") or []
         if isinstance(phones, str):
@@ -2863,8 +2915,6 @@ class WhatsAppGroupAddParticipantView(APIView):
         try:
             res = client.add_group_participants(session_name, chat_id, clean_phones)
             conv = WhatsAppConversation.objects.filter(chat_id=chat_id, session=user_session).first()
-            if not conv:
-                conv = WhatsAppConversation.objects.filter(chat_id=chat_id).first()
             if conv:
                 meta = conv.metadata if isinstance(conv.metadata, dict) else {}
                 parts = meta.get("participants") or []
@@ -2905,7 +2955,9 @@ class WhatsAppGroupRemoveParticipantView(APIView):
 
     def post(self, request, chat_id):
         user_session = _get_user_session(request.user, create=True)
-        session_name = user_session.session_name if user_session else "default"
+        if not user_session:
+            return Response({"error": "No WhatsApp session available."}, status=status.HTTP_400_BAD_REQUEST)
+        session_name = user_session.session_name
 
         phones = request.data.get("participants") or []
         if isinstance(phones, str):
@@ -2938,8 +2990,6 @@ class WhatsAppGroupRemoveParticipantView(APIView):
         try:
             res = client.remove_group_participants(session_name, chat_id, clean_phones)
             conv = WhatsAppConversation.objects.filter(chat_id=chat_id, session=user_session).first()
-            if not conv:
-                conv = WhatsAppConversation.objects.filter(chat_id=chat_id).first()
             if conv:
                 meta = conv.metadata if isinstance(conv.metadata, dict) else {}
                 parts = meta.get("participants") or []
@@ -2975,7 +3025,9 @@ class WhatsAppGroupInviteLinkView(APIView):
 
     def get(self, request, chat_id):
         user_session = _get_user_session(request.user, create=True)
-        session_name = user_session.session_name if user_session else "default"
+        if not user_session:
+            return Response({"error": "No WhatsApp session available.", "link": ""}, status=status.HTTP_400_BAD_REQUEST)
+        session_name = user_session.session_name
 
         if chat_id.startswith("crm_group_"):
             invite_link = request.build_absolute_uri(f"/whatsapp/groups/{chat_id}/join/")

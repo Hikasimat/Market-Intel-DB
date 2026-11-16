@@ -50,6 +50,10 @@ from .models import (
 from .services import (
     _write_audit_log,
     check_incoming_for_opt_out,
+    normalize_phone_digits,
+    normalize_phone_number,
+    reconcile_connected_session,
+    verify_deterministic_session_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -712,10 +716,7 @@ def _validate_event_schema(payload: dict) -> tuple[str, str, dict]:
             raise WebhookVerificationError(
                 f"Event {event_type!r} is missing its originating 'session' — rejected."
             )
-    session_name = raw_session if raw_session is not None else "default"
-    if not isinstance(session_name, str):
-        session_name = "default"
-    session_name = session_name.strip()[:100]
+    session_name = raw_session.strip()[:100] if isinstance(raw_session, str) else ""
 
     event_data = payload.get("payload") or payload.get("data") or {}
     if not isinstance(event_data, dict):
@@ -758,15 +759,34 @@ def _extract_phone_digits(chat_id: str) -> Optional[str]:
 def _resolve_originating_session(session_name: str) -> Optional[WhatsAppSession]:
     """
     Resolve the originating WhatsAppSession strictly by the exact WAHA session name.
-    Returns None when the session cannot be resolved reliably (caller must reject the event).
-    Only a registered `user_<id>` session whose owner exists may be lazily registered.
+    Returns None when the session cannot be resolved or has no owner (rejects unknown/unowned events).
+    Supports verified deterministic `wa_u<id>_<hmac>` or legacy `user_<id>` sessions whose owner exists.
     """
     session_name = (session_name or "").strip()
     if not session_name:
         return None
-    session_obj = WhatsAppSession.objects.filter(session_name=session_name).first()
+    session_obj = WhatsAppSession.objects.select_related("owner").filter(session_name=session_name).first()
     if session_obj:
+        # Reject unowned sessions to enforce ownership boundary
+        if session_obj.owner is None:
+            return None
         return session_obj
+    if session_name.startswith("wa_u"):
+        try:
+            parts = session_name.split("_")
+            u_id = int(parts[1][1:])  # strip leading 'u'
+            if verify_deterministic_session_name(session_name, u_id):
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                u = User.objects.filter(id=u_id, is_active=True).first()
+                if u:
+                    session_obj, _ = WhatsAppSession.objects.get_or_create(
+                        session_name=session_name,
+                        defaults={"owner": u, "status": WhatsAppSession.Status.STARTING, "is_active": True},
+                    )
+                    return session_obj
+        except Exception:
+            return None
     if session_name.startswith("user_"):
         try:
             from django.contrib.auth import get_user_model
@@ -776,7 +796,7 @@ def _resolve_originating_session(session_name: str) -> Optional[WhatsAppSession]
             if u:
                 session_obj, _ = WhatsAppSession.objects.get_or_create(
                     session_name=session_name,
-                    defaults={"owner": u, "status": WhatsAppSession.Status.STARTING},
+                    defaults={"owner": u, "status": WhatsAppSession.Status.STARTING, "is_active": True},
                 )
                 return session_obj
         except Exception:
@@ -904,6 +924,10 @@ def process_webhook_event(
 # ---------------------------------------------------------------------------
 
 def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
+    session_obj = _resolve_originating_session(session_name)
+    if not session_obj:
+        logger.warning("Ignoring auth.qr for unknown/unowned session %r", session_name)
+        return
     qr = event_data.get("qr") or event_data.get("value") or event_data.get("data")
     qr_base64 = event_data.get("qrBase64") or event_data.get("data") or ""
     if qr or qr_base64:
@@ -913,43 +937,71 @@ def _handle_auth_qr(event_data: dict, session_name: str, event_record: WhatsAppE
             "value": qr or qr_base64,
             "data": qr_base64,
         })
-        WhatsAppSession.objects.filter(session_name=session_name).update(
-            status=WhatsAppSession.Status.QR_REQUIRED
-        )
+        if session_obj.status != WhatsAppSession.Status.READY:
+            WhatsAppSession.objects.filter(pk=session_obj.pk).update(
+                status=WhatsAppSession.Status.QR_REQUIRED
+            )
         logger.info("Received and cached auth.qr for session: %s", session_name)
 
 
+def _schedule_history_sync_bg(session_name: str, days: int = 2, force: bool = True) -> None:
+    """
+    Launch background history sync after transaction commit.
+    Skipped cleanly when running inside an uncommitted atomic block (e.g. unit-test
+    transactions on SQLite) so background threads never lock the test DB.
+    """
+    from django.db import connection
+
+    def _run():
+        if connection.in_atomic_block:
+            return
+        import threading
+
+        def _worker():
+            try:
+                sync_two_day_whatsapp_history(session_name=session_name, days=days, force=force)
+            except Exception as exc:
+                logger.debug("Background history sync error for %s: %s", session_name, exc)
+            finally:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    try:
+        transaction.on_commit(_run)
+    except Exception:
+        _run()
+
+
 def _handle_session_connected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
+    session_obj = _resolve_originating_session(session_name)
+    if not session_obj:
+        logger.warning("Rejecting session.connected for unknown/unowned session %r", session_name)
+        return
+
     clear_cached_qr(session_name)
     me = event_data.get("me") or {}
     phone = me.get("phone") or (me.get("id", "").split(":")[0] if ":" in me.get("id", "") else me.get("id", "").split("@")[0])
     name = me.get("name") or ""
 
-    session, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-
-    # Detect account switch on the same session
-    clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
-    clean_old_phone = re.sub(r"\D+", "", str(session.phone_number or ""))
-    if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
-        logger.warning(
-            "WhatsApp account change detected on session %s: %s -> %s. Purging old session data.",
-            session_name, clean_old_phone, clean_new_phone
-        )
-        WhatsAppMessage.objects.filter(conversation__session=session).delete()
-        WhatsAppConversation.objects.filter(session=session).delete()
-
-    session.status = WhatsAppSession.Status.READY
-    if phone:
-        session.phone_number = phone
-    session.started_at = timezone.now()
-    session.reconnect_count += 1
-    session.save()
-    logger.info("Session %s connected successfully! Phone: %s Name: %s", session_name, phone, name)
+    old_status = session_obj.status
+    active_session, switched, prev_phone = reconcile_connected_session(
+        session_obj, phone, source="webhook_connected"
+    )
+    logger.info(
+        "Session %s connected! Phone: %s Name: %s Switched: %s (prev=%s)",
+        active_session.session_name, active_session.phone_number, name, switched, prev_phone,
+    )
+    if old_status != WhatsAppSession.Status.READY or switched:
+        _schedule_history_sync_bg(active_session.session_name, days=2, force=True)
 
 
 def _handle_session_disconnected(event_data: dict, session_name: str, event_record: WhatsAppEvent) -> None:
     is_logged_out = bool(event_data.get("isLoggedOut", False))
-    session = WhatsAppSession.objects.filter(session_name=session_name).first()
+    session = _resolve_originating_session(session_name)
     if not session:
         return
 
@@ -966,18 +1018,17 @@ def _handle_session_disconnected(event_data: dict, session_name: str, event_reco
 
     if is_logged_out:
         clear_cached_qr(session_name)
-        new_status = WhatsAppSession.Status.DISCONNECTED
-        session.phone_number = None
-        # Purge data for logged out account to prevent bleeding into next scan
-        WhatsAppMessage.objects.filter(conversation__session=session).delete()
-        WhatsAppConversation.objects.filter(session=session).delete()
+        # Scenario A: Preserve owner, historical phone_number, conversations, messages, and media!
+        session.status = WhatsAppSession.Status.DISCONNECTED
+        session.disconnect_count = (session.disconnect_count or 0) + 1
+        session.stopped_at = timezone.now()
+        session.save(update_fields=["status", "disconnect_count", "stopped_at"])
     else:
-        new_status = WhatsAppSession.Status.DISCONNECTED
+        session.status = WhatsAppSession.Status.DISCONNECTED
+        session.stopped_at = timezone.now()
+        session.save(update_fields=["status", "stopped_at"])
 
-    session.status = new_status
-    session.stopped_at = timezone.now()
-    session.save(update_fields=["status", "phone_number", "stopped_at"] if is_logged_out else ["status", "stopped_at"])
-    logger.warning("Session %s disconnected (logged_out=%s)", session_name, is_logged_out)
+    logger.warning("Session %s disconnected (logged_out=%s, history preserved)", session_name, is_logged_out)
 
 
 def _parse_waha_timestamp(event_data: dict):
@@ -1683,7 +1734,10 @@ def _handle_incoming_message(
         ).strip()
         if not resolved_phone and p_name:
             from prospects.models import ProspectContact
-            crm_match = ProspectContact.objects.filter(contact_name__iexact=p_name).first()
+            crm_qs = ProspectContact.objects.filter(contact_name__iexact=p_name)
+            if session_obj.owner:
+                crm_qs = crm_qs.filter(prospect__created_by=session_obj.owner.username)
+            crm_match = crm_qs.first()
             if crm_match and crm_match.phone_number:
                 resolved_phone = crm_match.phone_number
                 phone_digits = re.sub(r"\D+", "", resolved_phone)
@@ -1827,9 +1881,10 @@ def _handle_incoming_message(
         if len(d) >= 8:
             resolved_phone = f"+{d}"
 
-    # For @lid messages without sender_pn, inherit phone_number if previously saved
+    # For @lid messages without sender_pn, inherit phone_number ONLY within this session
     if not resolved_phone and target_chat_id.endswith("@lid"):
         existing_saved = WhatsAppConversation.objects.filter(
+            session=session_obj,
             chat_id=target_chat_id,
             phone_number__isnull=False
         ).exclude(phone_number="").first()
@@ -1867,9 +1922,15 @@ def _handle_incoming_message(
                     meta["lid_map"] = lid_map
                     conversation.metadata = meta
                     conv_updates.append("metadata")
-        elif extracted_name and (not conversation.whatsapp_name or conversation.whatsapp_name.startswith("+") or "@" in conversation.whatsapp_name):
-            conversation.whatsapp_name = extracted_name
-            conv_updates.append("whatsapp_name")
+        elif extracted_name and not _is_lid(extracted_name) and "@" not in extracted_name and extracted_name.lower() != "whatsapp contact":
+            if (
+                not conversation.whatsapp_name
+                or conversation.whatsapp_name.startswith("+")
+                or "@" in conversation.whatsapp_name
+                or (not conversation.prospect_contact and conversation.whatsapp_name != extracted_name)
+            ):
+                conversation.whatsapp_name = extracted_name
+                conv_updates.append("whatsapp_name")
             
         # If conversation exists but is unmatched, attempt to match against ProspectContact
         if not is_matched and search_digits and len(search_digits) >= 8:
@@ -2003,13 +2064,39 @@ def _handle_incoming_message(
         conversation__session=session_obj,
     ).first()
     if not existing_message and waha_message_id:
+        cand_mids = [waha_message_id]
+        if waha_message_id.count("_") >= 2 and waha_message_id.split("_", 1)[0] in ("true", "false"):
+            raw_mid = waha_message_id.split("_", 2)[2]
+            if raw_mid:
+                cand_mids.append(raw_mid)
+                cand_mids.append(f"true_{target_chat_id}_{raw_mid}")
+                cand_mids.append(f"false_{target_chat_id}_{raw_mid}")
+        else:
+            cand_mids.append(f"true_{target_chat_id}_{waha_message_id}")
+            cand_mids.append(f"false_{target_chat_id}_{waha_message_id}")
         existing_message = WhatsAppMessage.objects.filter(
             conversation=conversation,
-            waha_message_id=waha_message_id,
+            waha_message_id__in=cand_mids,
         ).first()
+    if not existing_message and is_from_me and body_hash:
+        from datetime import timedelta as _td
+        recent_out = WhatsAppMessage.objects.filter(
+            conversation=conversation,
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            body_hash=body_hash,
+            created_at__gte=(msg_dt - _td(minutes=2)),
+        ).order_by("-created_at").first()
+        if recent_out and (
+            not recent_out.waha_message_id
+            or not waha_message_id
+            or recent_out.waha_message_id == waha_message_id
+            or waha_message_id.endswith(f"_{recent_out.waha_message_id}")
+            or recent_out.waha_message_id.endswith(f"_{waha_message_id}")
+        ):
+            existing_message = recent_out
 
     if existing_message:
-        # Backfill original WhatsApp timestamp if missing on previously stored record
+        # Backfill original WhatsApp timestamp or waha_message_id if missing on previously stored record
         ts_updates = []
         if not existing_message.waha_timestamp and msg_dt:
             existing_message.waha_timestamp = msg_dt
@@ -2017,6 +2104,9 @@ def _handle_incoming_message(
         if not existing_message.sent_at and msg_dt:
             existing_message.sent_at = msg_dt
             ts_updates.append("sent_at")
+        if waha_message_id and not existing_message.waha_message_id:
+            existing_message.waha_message_id = waha_message_id
+            ts_updates.append("waha_message_id")
         if ts_updates:
             existing_message.save(update_fields=ts_updates)
         if event_record:
@@ -2360,11 +2450,12 @@ def _handle_session_status(
     """
     Handle a WAHA session status change event.
 
-    Updates the local WhatsAppSession record.
-    Triggers alerts for AUTH_FAILURE or abnormal disconnects.
+    Updates the local WhatsAppSession record without purging persisted history
+    or overwriting another account's data.
     """
     waha_status = str(event_data.get("status") or "")
-    phone = str(event_data.get("me", {}).get("phone") or "") if isinstance(event_data.get("me"), dict) else ""
+    me_obj = event_data.get("me") if isinstance(event_data.get("me"), dict) else {}
+    phone = str(me_obj.get("phone") or me_obj.get("id") or "")
 
     # Map WAHA status strings to our enum.
     raw_status_upper = waha_status.upper()
@@ -2379,66 +2470,83 @@ def _handle_session_status(
 
     mapped_status = STATUS_MAP.get(raw_status_upper, WhatsAppSession.Status.DISCONNECTED)
 
+    session = _resolve_originating_session(session_name)
+    if not session:
+        logger.warning(
+            "Ignoring session.status webhook for unregistered/unowned session '%s'.",
+            session_name,
+        )
+        return
+
+    old_status = session.status
+
     with transaction.atomic():
-        session, _ = WhatsAppSession.objects.get_or_create(session_name=session_name)
-
-        old_status = session.status
-
-        # If already READY, DO NOT disconnect automatically on transient blips!
-        if session.status == WhatsAppSession.Status.READY:
-            if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
-                session.status = WhatsAppSession.Status.READY
-            elif raw_status_upper in ("LOGGED_OUT", "UNPAIRED"):
-                session.status = WhatsAppSession.Status.DISCONNECTED
-                session.phone_number = None
-            elif raw_status_upper in ("FAILED", "STOPPED", "STARTING", "SCAN_QR_CODE", "CONNECTING", "RESUMING"):
-                # Preserve READY status and trigger seamless auto-recovery in WAHA
-                logger.info("Preserving READY status for session %s despite WAHA status: %s (auto-recovering)", session_name, waha_status)
-                from .client import get_waha_client
-                try:
-                    get_waha_client().start_session(session_name)
-                except Exception as rec_err:
-                    logger.debug("Auto-recover session %s: %s", session_name, rec_err)
-            else:
-                logger.info("Preserving READY status for session %s despite WAHA status: %s", session_name, waha_status)
+        if phone and raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
+            session, switched, _ = reconcile_connected_session(
+                session,
+                phone,
+                source="session_status",
+            )
+            if switched:
+                old_status = WhatsAppSession.Status.DISCONNECTED
         else:
-            if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
-                session.status = WhatsAppSession.Status.READY
-            elif mapped_status:
-                session.status = mapped_status
+            # If already READY, DO NOT disconnect automatically on transient blips!
+            if session.status == WhatsAppSession.Status.READY:
+                if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
+                    session.status = WhatsAppSession.Status.READY
+                elif raw_status_upper in ("LOGGED_OUT", "UNPAIRED"):
+                    # Scenario A: Preserve owner, phone_number, conversations, messages, media
+                    session.status = WhatsAppSession.Status.DISCONNECTED
+                    session.disconnect_count = (session.disconnect_count or 0) + 1
+                    session.stopped_at = timezone.now()
+                elif raw_status_upper in ("FAILED", "STOPPED", "STARTING", "SCAN_QR_CODE", "CONNECTING", "RESUMING"):
+                    logger.info(
+                        "Preserving READY status for session %s despite WAHA status: %s (auto-recovering)",
+                        session_name,
+                        waha_status,
+                    )
+                    from .client import get_waha_client
+                    try:
+                        get_waha_client().start_session(session.session_name)
+                    except Exception as rec_err:
+                        logger.debug("Auto-recover session %s: %s", session_name, rec_err)
+                else:
+                    logger.info("Preserving READY status for session %s despite WAHA status: %s", session_name, waha_status)
+            else:
+                if raw_status_upper in ("WORKING", "READY", "ONLINE", "AUTHENTICATED"):
+                    session.status = WhatsAppSession.Status.READY
+                elif mapped_status:
+                    session.status = mapped_status
 
-        if phone:
-            clean_new_phone = re.sub(r"\D+", "", str(phone or ""))
-            clean_old_phone = re.sub(r"\D+", "", str(session.phone_number or ""))
-            if clean_new_phone and clean_old_phone and clean_new_phone != clean_old_phone:
-                logger.warning(
-                    "WhatsApp account switch detected in session.status %s: %s -> %s. Purging old session data.",
-                    session_name, clean_old_phone, clean_new_phone
-                )
-                WhatsAppMessage.objects.filter(conversation__session=session).delete()
-                WhatsAppConversation.objects.filter(session=session).delete()
-            session.phone_number = phone
+            if phone and not session.phone_number:
+                from .services import normalize_phone_number
+                norm = normalize_phone_number(phone)
+                if norm:
+                    session.phone_number = norm
 
         qr = event_data.get("qr") or event_data.get("value")
         qr_base64 = event_data.get("qrBase64") or ""
         if (qr or qr_base64) and session.status != WhatsAppSession.Status.READY:
-            set_cached_qr(session_name, {
+            set_cached_qr(session.session_name, {
                 "qr": qr or qr_base64,
                 "qrBase64": qr_base64,
                 "value": qr or qr_base64,
             })
 
         if session.status == WhatsAppSession.Status.READY:
-            clear_cached_qr(session_name)
+            clear_cached_qr(session.session_name)
             if old_status != WhatsAppSession.Status.READY:
-                session.reconnect_count += 1
+                session.reconnect_count = (session.reconnect_count or 0) + 1
                 session.started_at = timezone.now()
 
         if session.status == WhatsAppSession.Status.DISCONNECTED and old_status == WhatsAppSession.Status.READY:
-            session.disconnect_count += 1
+            session.disconnect_count = (session.disconnect_count or 0) + 1
             session.stopped_at = timezone.now()
 
         session.save()
+
+    if session.status == WhatsAppSession.Status.READY and old_status != WhatsAppSession.Status.READY:
+        _schedule_history_sync_bg(session.session_name, days=2, force=True)
 
     logger.info(
         "Session status change: session=%s %s -> %s",
@@ -2463,17 +2571,6 @@ def _handle_session_status(
         result_detail=f"WAHA status: {waha_status}",
         success=mapped_status == WhatsAppSession.Status.READY,
     )
-
-    if mapped_status == WhatsAppSession.Status.READY and old_status != WhatsAppSession.Status.READY:
-        try:
-            import threading
-            threading.Thread(
-                target=sync_two_day_whatsapp_history,
-                kwargs={"session_name": session_name, "days": 2, "force": True},
-                daemon=True,
-            ).start()
-        except Exception as sync_err:
-            logger.debug("Auto 2-day history sync on session READY failed: %s", sync_err)
 
 
 # Compatibility shims for F() expressions (avoid importing at module level
@@ -2552,24 +2649,44 @@ def sync_recent_waha_messages(
 
 
 def sync_two_day_whatsapp_history(
-    session_name: str = "default",
+    session_name: str,
     chat_id: Optional[str] = None,
     days: int = 2,
     force: bool = False,
+    max_pages: int = 3,
+    page_size: int = 100,
 ) -> dict:
     """
     Synchronize WhatsApp chat history and messages from the last `days` days (default 2 days).
-    Fetches any missing chats or messages from WAHA / WAHA-NoWeb-Light, preserves original
-    message timestamps, and reconciles conversation ordering.
-    Strictly isolated to `session_name`.
+    Retrieves existing persisted conversations from PostgreSQL first, discovers chats via
+    WAHA where supported, fetches missing messages with pagination and retry handling,
+    preserves original timestamps, and updates session.last_synced_at.
+    Strictly isolated to the resolved `WhatsAppSession`.
     """
     from datetime import timedelta
     from .client import get_waha_client
 
-    client = get_waha_client()
     cutoff_dt = timezone.now() - timedelta(days=max(int(days or 2), 1))
+    session_obj = _resolve_originating_session(session_name)
+    if not session_obj:
+        logger.warning(
+            "History sync skipped: no owned WhatsAppSession found for '%s'",
+            session_name,
+        )
+        return {
+            "synced": 0,
+            "checked": 0,
+            "chats_checked": 0,
+            "days": days,
+            "cutoff": cutoff_dt.isoformat(),
+            "error": "unknown_or_unowned_session",
+        }
+
+    resolved_session_name = session_obj.session_name
+    client = get_waha_client()
     collected = []
     seen_ids = set()
+    sync_errors = []
 
     def _add_msg(m: dict, fallback_chat_id: str = "", trusted_session: bool = False):
         """
@@ -2580,7 +2697,7 @@ def sync_two_day_whatsapp_history(
         if not isinstance(m, dict):
             return
         m_sess = str(m.get("session") or "").strip()
-        if m_sess and m_sess != session_name:
+        if m_sess and m_sess != resolved_session_name:
             # Strictly ignore messages from any other session (including legacy "default")
             return
         if not m_sess and not trusted_session:
@@ -2589,10 +2706,10 @@ def sync_two_day_whatsapp_history(
         msg_copy = dict(m)
         if fallback_chat_id and not msg_copy.get("chatId"):
             msg_copy["chatId"] = fallback_chat_id
-        msg_copy["session"] = session_name
+        msg_copy["session"] = resolved_session_name
         m_id = str(msg_copy.get("id") or "")
         dedupe_key = (
-            session_name,
+            resolved_session_name,
             _normalize_chat_jid(msg_copy.get("chatId") or msg_copy.get("to") or msg_copy.get("from") or ""),
             m_id,
         )
@@ -2620,49 +2737,81 @@ def sync_two_day_whatsapp_history(
                     continue
             _add_msg(m)
     except Exception as e:
-        logger.debug("2-day sync stats fetch skipped: %s", e)
+        logger.debug("2-day sync stats fetch skipped for %s: %s", resolved_session_name, e)
 
-    # 2. Pull per-chat message history if WAHA engine supports /api/chats/{chat_id}/messages
+    # 2. Retrieve existing conversations from PostgreSQL first, then augment with WAHA chats list
     target_chat_ids = []
+    seen_chat_ids = set()
+
+    def _queue_chat_id(cid_val: str):
+        cid_clean = str(cid_val or "").strip()
+        if not cid_clean or cid_clean.startswith("crm_group_"):
+            return
+        norm_cid = _normalize_chat_jid(cid_clean)
+        if norm_cid and norm_cid not in seen_chat_ids:
+            seen_chat_ids.add(norm_cid)
+            target_chat_ids.append(cid_clean)
+
     if chat_id:
-        target_chat_ids.append(chat_id)
+        _queue_chat_id(chat_id)
     else:
         try:
             recent_convs = WhatsAppConversation.objects.filter(
-                session__session_name=session_name,
+                session=session_obj,
                 is_deleted=False,
-            ).order_by("-last_message_at", "-updated_at")[:25]
+            ).order_by("-last_message_at", "-updated_at")[:50]
             for c in recent_convs:
-                if c.chat_id and not c.chat_id.startswith("crm_group_"):
-                    target_chat_ids.append(c.chat_id)
-        except Exception:
-            pass
+                _queue_chat_id(c.chat_id)
+        except Exception as db_err:
+            logger.debug("DB conversation lookup failed during sync for %s: %s", resolved_session_name, db_err)
+
+        try:
+            if hasattr(client, "get_chats"):
+                waha_chats = client.get_chats(resolved_session_name, limit=100)
+                if isinstance(waha_chats, list):
+                    for ch in waha_chats:
+                        if isinstance(ch, dict):
+                            cid = ch.get("id") or ch.get("chatId")
+                            if isinstance(cid, dict):
+                                cid = cid.get("_serialized") or cid.get("user")
+                            _queue_chat_id(str(cid or ""))
+        except Exception as chat_err:
+            logger.debug("WAHA chat discovery skipped for %s: %s", resolved_session_name, chat_err)
 
     for cid in target_chat_ids:
         try:
-            chat_msgs = client.get_messages(session_name, cid, limit=200)
+            if hasattr(client, "get_messages_paginated"):
+                chat_msgs = client.get_messages_paginated(
+                    resolved_session_name,
+                    cid,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                )
+            else:
+                chat_msgs = client.get_messages(resolved_session_name, cid, limit=page_size)
             if isinstance(chat_msgs, list):
                 for cm in chat_msgs:
                     _add_msg(cm, fallback_chat_id=cid, trusted_session=True)
-        except Exception:
-            pass
+        except Exception as msg_err:
+            sync_errors.append(f"{cid}: {str(msg_err)[:120]}")
+            logger.debug("Per-chat history sync skipped for %s/%s: %s", resolved_session_name, cid, msg_err)
 
-    # 3. Filter to 2-day window, sort chronologically (oldest -> newest), and store missing messages
+    # 3. Filter to window, sort chronologically (oldest -> newest), and store missing messages idempotently
     synced_count = sync_recent_waha_messages(
         collected,
-        default_session_name=session_name,
+        default_session_name=resolved_session_name,
         days=days,
     )
 
     # 4. Reconcile conversation last_message_at & preview from actual latest message in DB
     try:
         conv_qs = WhatsAppConversation.objects.filter(
-            session__session_name=session_name,
+            session=session_obj,
             is_deleted=False,
         )
         if chat_id:
             conv_qs = conv_qs.filter(chat_id=chat_id)
-        for conv in conv_qs[:50]:
+        for conv in conv_qs[:100]:
             latest_msg = (
                 WhatsAppMessage.objects.filter(conversation=conv, is_deleted=False)
                 .order_by("-waha_timestamp", "-sent_at", "-created_at")
@@ -2684,11 +2833,20 @@ def sync_two_day_whatsapp_history(
     except Exception as rec_err:
         logger.debug("2-day sync conversation reconciliation warning: %s", rec_err)
 
+    now_ts = timezone.now()
+    try:
+        WhatsAppSession.objects.filter(pk=session_obj.pk).update(last_synced_at=now_ts)
+    except Exception:
+        pass
+
     return {
         "synced": synced_count,
         "checked": len(collected),
+        "chats_checked": len(target_chat_ids),
         "days": days,
         "cutoff": cutoff_dt.isoformat(),
+        "last_synced_at": now_ts.isoformat(),
+        "partial_errors": sync_errors,
     }
 
 

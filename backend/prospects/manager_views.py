@@ -20,9 +20,11 @@ from rest_framework import status
 from accounts.permissions import IsManagerOrSuperuser
 from .models import (
     Prospect, LeadQualification, CallActivity, CommunicationActivity,
-    OutreachEmail,
+    OutreachEmail, EmailThread, EmailThreadMessage,
 )
-from .serializers import ProspectSerializer
+from .serializers import (
+    ProspectSerializer, EmailThreadListSerializer, EmailThreadDetailSerializer,
+)
 
 User = get_user_model()
 
@@ -550,3 +552,300 @@ def manager_dashboard(request):
         'audit_samples': audit_samples,
         'user_activity': user_activity,
     })
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Manager Email Activity & AI Conversation Summaries (Part B)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _get_authorized_pre_users_for_manager(request_user):
+    """
+    Dynamically return active PRE/LQ users within the manager's authorized company scope.
+    Superusers can view all companies.
+    Managers with company assigned see only PRE/LQ users in that same company.
+    Managers without a company see PRE/LQ users without a company (backward compatibility).
+    Never uses hardcoded user IDs or fixed user counts.
+    """
+    qs = User.objects.filter(
+        is_active=True,
+        is_superuser=False,
+        profile__role__in=['PRE', 'LQ'],
+    ).select_related('profile').order_by('id')
+
+    if request_user.is_superuser:
+        return qs
+
+    mgr_company_id = getattr(getattr(request_user, 'profile', None), 'company_id', None)
+    if mgr_company_id is not None:
+        return qs.filter(profile__company_id=mgr_company_id)
+    return qs.filter(profile__company__isnull=True)
+
+
+def _parse_date_range_bounds(request):
+    """Parse optional ?date=YYYY-MM-DD or ?date_from=...&date_to=... into UTC aware datetimes."""
+    import datetime
+    single_date = (request.query_params.get('date') or '').strip()
+    date_from = (request.query_params.get('date_from') or '').strip()
+    date_to = (request.query_params.get('date_to') or '').strip()
+
+    tz = _get_report_tz()
+    start_dt = None
+    end_dt = None
+
+    if single_date:
+        try:
+            d = date_type.fromisoformat(single_date)
+            return _day_bounds(d)
+        except ValueError:
+            pass
+
+    if date_from:
+        try:
+            df = date_type.fromisoformat(date_from)
+            start_dt = timezone.datetime(df.year, df.month, df.day, 0, 0, 0, tzinfo=tz)
+        except ValueError:
+            pass
+
+    if date_to:
+        try:
+            dt = date_type.fromisoformat(date_to)
+            end_dt = timezone.datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=tz) + datetime.timedelta(days=1)
+        except ValueError:
+            pass
+
+    return start_dt, end_dt
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrSuperuser])
+def manager_email_activity_list(request):
+    """
+    GET /api/manager-dashboard/email-activity/
+    Returns paginated email conversation threads + AI summaries across all
+    authorized PRE/LQ users with filters (pre_user_id, date, date_from, date_to,
+    search, status, direction, match_status).
+    """
+    import sys
+    from .email_thread_service import (
+        backfill_outreach_emails_to_threads,
+        sync_authorized_mailboxes,
+    )
+    from .email_summarizer import schedule_thread_summary, _resolve_provider_and_key
+
+    authorized_users = list(_get_authorized_pre_users_for_manager(request.user))
+    authorized_ids = [u.id for u in authorized_users]
+
+    # Opportunistic idempotent backfill for legacy OutreachEmail records without threads
+    if authorized_ids and OutreachEmail.objects.filter(
+        created_by_id__in=authorized_ids,
+        thread_message__isnull=True,
+    ).exists():
+        try:
+            backfill_outreach_emails_to_threads(authorized_ids)
+        except Exception:
+            pass
+
+    base_qs = (
+        EmailThread.objects
+        .select_related('owner', 'owner__profile', 'prospect', 'prospect_contact')
+        .filter(owner_id__in=authorized_ids)
+    )
+
+    # Filter by specific PRE user (strictly within authorized scope)
+    pre_user_id = (request.query_params.get('pre_user_id') or '').strip()
+    filter_uid = None
+    if pre_user_id and pre_user_id.lower() != 'all':
+        try:
+            uid_int = int(pre_user_id)
+        except ValueError:
+            return Response({'detail': 'Invalid pre_user_id.'}, status=status.HTTP_400_BAD_REQUEST)
+        if uid_int not in authorized_ids:
+            # Distinguish out-of-tenant unauthorized user from nonexistent user cleanly
+            if User.objects.filter(pk=uid_int).exists():
+                return Response(
+                    {'detail': 'You are not authorized to access this PRE user.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            base_qs = base_qs.none()
+        else:
+            filter_uid = uid_int
+            base_qs = base_qs.filter(owner_id=uid_int)
+
+    # Sync incoming replies from authorized PRE Gmail mailboxes automatically
+    # (cooldown-throttled every 30s unless ?sync=true; skipped inside unit test runs unless ?sync=true)
+    sync_param = (request.query_params.get('sync') or '').strip().lower()
+    force_sync = sync_param in ('1', 'true', 'yes')
+    running_tests = ('test' in sys.argv)
+    if authorized_ids and (force_sync or not running_tests):
+        try:
+            sync_authorized_mailboxes(
+                authorized_ids,
+                pre_user_id=filter_uid,
+                force=force_sync,
+                limit=25,
+            )
+        except Exception:
+            pass
+
+    # Date range filter
+    start_dt, end_dt = _parse_date_range_bounds(request)
+    if start_dt is not None:
+        base_qs = base_qs.filter(
+            Q(last_message_at__gte=start_dt)
+            | Q(last_message_at__isnull=True, created_at__gte=start_dt)
+        )
+    if end_dt is not None:
+        base_qs = base_qs.filter(
+            Q(last_message_at__lt=end_dt)
+            | Q(last_message_at__isnull=True, created_at__lt=end_dt)
+        )
+
+    # Status / Direction / Match Status filters
+    status_filter = (request.query_params.get('status') or '').strip().upper()
+    if status_filter and status_filter != 'ALL':
+        base_qs = base_qs.filter(status=status_filter)
+
+    direction_filter = (request.query_params.get('direction') or '').strip().upper()
+    if direction_filter and direction_filter != 'ALL':
+        base_qs = base_qs.filter(last_direction=direction_filter)
+
+    match_filter = (request.query_params.get('match_status') or '').strip().upper()
+    if match_filter and match_filter != 'ALL':
+        base_qs = base_qs.filter(match_status=match_filter)
+
+    # Search filter (subject, correspondent, prospect, snippet, summary)
+    search_q = (request.query_params.get('search') or '').strip()
+    if search_q:
+        base_qs = base_qs.filter(
+            Q(subject__icontains=search_q)
+            | Q(correspondent_email__icontains=search_q)
+            | Q(correspondent_name__icontains=search_q)
+            | Q(mailbox_email__icontains=search_q)
+            | Q(prospect__company_name__icontains=search_q)
+            | Q(last_snippet__icontains=search_q)
+            | Q(summary_text__icontains=search_q)
+            | Q(owner__username__icontains=search_q)
+            | Q(owner__first_name__icontains=search_q)
+            | Q(owner__last_name__icontains=search_q)
+        )
+
+    # Aggregate counts before pagination
+    agg = base_qs.aggregate(
+        total=Count('id'),
+        waiting=Count('id', filter=Q(status=EmailThread.Status.WAITING_REPLY)),
+        replied=Count('id', filter=Q(status=EmailThread.Status.REPLIED)),
+        failed=Count('id', filter=Q(status=EmailThread.Status.FAILED)),
+        unmatched=Count('id', filter=Q(match_status=EmailThread.MatchStatus.UNMATCHED)),
+    )
+
+    # Dynamic list of authorized PRE users + per-user thread counts
+    per_user_counts = dict(
+        EmailThread.objects.filter(owner_id__in=authorized_ids)
+        .values('owner_id')
+        .annotate(c=Count('id'))
+        .values_list('owner_id', 'c')
+    )
+    pre_users_meta = [
+        {
+            'id': u.id,
+            'name': u.get_full_name() or u.username,
+            'username': u.username,
+            'email': u.email,
+            'role': getattr(getattr(u, 'profile', None), 'role', 'PRE'),
+            'thread_count': per_user_counts.get(u.id, 0),
+        }
+        for u in authorized_users
+    ]
+
+    # Pagination
+    try:
+        page = max(1, int(request.query_params.get('page') or 1))
+    except ValueError:
+        page = 1
+    try:
+        page_size = min(100, max(1, int(request.query_params.get('page_size') or 20)))
+    except ValueError:
+        page_size = 20
+
+    total_count = agg['total'] or 0
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    offset = (page - 1) * page_size
+
+    page_threads = list(base_qs.order_by('-last_message_at', '-updated_at')[offset:offset + page_size])
+
+    # Trigger non-blocking summary for any page thread still PENDING
+    for th in page_threads:
+        if th.summary_status == EmailThread.SummaryStatus.PENDING and th.message_count > 0:
+            schedule_thread_summary(th.id)
+
+    serializer = EmailThreadListSerializer(page_threads, many=True)
+    return Response({
+        'count': total_count,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': total_pages,
+        'pre_users': pre_users_meta,
+        'stats': {
+            'total_threads': total_count,
+            'waiting_reply': agg['waiting'] or 0,
+            'replied': agg['replied'] or 0,
+            'failed': agg['failed'] or 0,
+            'unmatched': agg['unmatched'] or 0,
+        },
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrSuperuser])
+def manager_email_activity_detail(request, thread_id):
+    """
+    GET /api/manager-dashboard/email-activity/<uuid:thread_id>/
+    Returns chronological full email thread messages & safe metadata for the manager.
+    """
+    authorized_ids = list(
+        _get_authorized_pre_users_for_manager(request.user).values_list('id', flat=True)
+    )
+    thread = (
+        EmailThread.objects
+        .select_related('owner', 'owner__profile', 'prospect', 'prospect_contact')
+        .prefetch_related('messages')
+        .filter(pk=thread_id)
+        .first()
+    )
+    if not thread:
+        return Response({'detail': 'Email thread not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if thread.owner_id not in authorized_ids and not request.user.is_superuser:
+        return Response({'detail': 'You are not authorized to view this email thread.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if thread.summary_status == EmailThread.SummaryStatus.PENDING and thread.message_count > 0:
+        from .email_summarizer import schedule_thread_summary
+        schedule_thread_summary(thread.id)
+
+    serializer = EmailThreadDetailSerializer(thread)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsManagerOrSuperuser])
+def manager_email_summary_refresh(request, thread_id):
+    """
+    POST /api/manager-dashboard/email-activity/<uuid:thread_id>/refresh-summary/
+    Forces regeneration of the AI conversation summary for the given thread.
+    """
+    from .email_summarizer import summarize_email_thread
+
+    authorized_ids = list(
+        _get_authorized_pre_users_for_manager(request.user).values_list('id', flat=True)
+    )
+    thread = EmailThread.objects.filter(pk=thread_id).first()
+    if not thread:
+        return Response({'detail': 'Email thread not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if thread.owner_id not in authorized_ids and not request.user.is_superuser:
+        return Response({'detail': 'You are not authorized to refresh this thread summary.'}, status=status.HTTP_403_FORBIDDEN)
+
+    result = summarize_email_thread(thread.id, force=True)
+    thread.refresh_from_db()
+    data = EmailThreadListSerializer(thread).data
+    data['refresh_result'] = result
+    return Response(data, status=status.HTTP_200_OK)

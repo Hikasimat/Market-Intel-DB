@@ -11,6 +11,7 @@ class UserProfile(models.Model):
     )
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='PRE')
+    company = models.ForeignKey('companies.Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='user_profiles')
     timezone = models.CharField(max_length=64, default='UTC')
     mail_account = models.ForeignKey('MailAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_users')
     whatsapp_sessions = models.ManyToManyField('whatsapp.WhatsAppSession', blank=True, related_name='assigned_profiles')
@@ -203,4 +204,66 @@ class MicrosoftCalendarCredentials(models.Model):
         return f"MicrosoftCalendar({self.email}) for {self.user.username}"
 
 
+class EmailAttachmentLibraryItem(models.Model):
+    """
+    User-managed attachment library items (up to 5 per user).
+    Allows quick re-attachment of standard collaterals, brochures, pitch decks, etc.
+    """
+    id = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='attachment_library_items')
+    name = models.CharField(max_length=255)
+    file = models.FileField(upload_to='attachment_library/%Y/%m/')
+    file_size = models.PositiveIntegerField(default=0)
+    content_type = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = 'Email Attachment Library Item'
+        verbose_name_plural = 'Email Attachment Library Items'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.user.username})"
+
+
+
+
+
+
+class CalendarEventRecording(models.Model):
+    """Meet recording for a Google Calendar event that has no linked prospect Meeting.
+
+    Mirrors the recording fields of prospects.Meeting so GoogleMeetRestService can
+    treat both the same way.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='calendar_event_recordings')
+    event_id = models.CharField(max_length=255)
+    meeting_link = models.CharField(max_length=512, blank=True, default='')
+    recording_file = models.FileField(upload_to='meeting_recordings/%Y/%m/', null=True, blank=True)
+    recording_status = models.CharField(max_length=50, blank=True, default='NONE')
+    recording_downloaded_at = models.DateTimeField(null=True, blank=True)
+    recording_file_size = models.BigIntegerField(null=True, blank=True)
+    recording_mime_type = models.CharField(max_length=100, blank=True, default='')
+    google_conference_record_id = models.CharField(max_length=255, blank=True, default='')
+    google_recording_id = models.CharField(max_length=255, blank=True, default='')
+    recording_drive_file_id = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'event_id')
+
+    # Duck-typing so GoogleMeetRestService.sync_meeting_recording works unchanged.
+    meeting_provider = 'GOOGLE_MEET'
+
+    @property
+    def google_calendar_owner(self):
+        return self.user
+
+    @property
+    def created_by(self):
+        return self.user
+
+    def __str__(self):
+        return f"Recording for event {self.event_id} ({self.user_id})"

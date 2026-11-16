@@ -200,6 +200,10 @@ class GmailOAuthService:
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/meetings.space.readonly",
+        "https://www.googleapis.com/auth/meetings.space.created",
+        "https://www.googleapis.com/auth/meetings.space.settings",
+        "https://www.googleapis.com/auth/drive.readonly",
     ]
     STATE_MAX_AGE = 600
 
@@ -670,7 +674,7 @@ class GmailOAuthService:
                 matcher = None
 
         def _fetch_meta(msg_id):
-            msg_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID"
+            msg_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=In-Reply-To&metadataHeaders=References"
             for _attempt in range(3):
                 try:
                     m_req = urllib.request.Request(
@@ -698,8 +702,11 @@ class GmailOAuthService:
             subject = headers.get('subject', '')
             from_hdr = headers.get('from', '')
             to_hdr = headers.get('to', '')
+            cc_hdr = headers.get('cc', '')
             date_hdr = headers.get('date', '')
             msg_id_hdr = headers.get('message-id', '')
+            in_reply_to_hdr = headers.get('in-reply-to', '')
+            references_hdr = headers.get('references', '')
             label_ids = m_data.get('labelIds', [])
             is_unread = 'UNREAD' in label_ids
             is_starred = 'STARRED' in label_ids
@@ -780,7 +787,10 @@ class GmailOAuthService:
                 'subject': subject,
                 'from': from_hdr,
                 'to': to_hdr,
+                'cc': cc_hdr,
                 'date': date_hdr,
+                'in_reply_to': in_reply_to_hdr,
+                'references': references_hdr,
                 'snippet': m_data.get('snippet', ''),
                 'is_unread': is_unread,
                 'is_starred': is_starred,

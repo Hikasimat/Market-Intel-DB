@@ -3,7 +3,8 @@ from rest_framework import serializers
 from .models import (
     Prospect, ProspectOffering, ProspectContact, AuditReverificationRequest,
     ProspectShareholding, GovernmentEntity, ProspectAcquisition,
-    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment
+    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment,
+    EmailThread, EmailThreadMessage
 )
 
 class ProspectOfferingSerializer(serializers.ModelSerializer):
@@ -493,13 +494,19 @@ class MeetingSerializer(serializers.ModelSerializer):
             'meeting_provider', 'conference_status', 'status',
             'provider_meeting_id', 'calendar_event_id', 'calendar_type',
             'created_by', 'created_by_username',
+            'recording_file', 'recording_status', 'recording_downloaded_at',
+            'recording_file_size', 'recording_mime_type',
+            'google_conference_record_id', 'google_recording_id', 'recording_drive_file_id',
             'notified_1h', 'notified_30m', 'notified_15m',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'conference_status',
             'provider_meeting_id', 'calendar_event_id', 'calendar_type',
-            'created_by', 'created_by_username'
+            'created_by', 'created_by_username',
+            'recording_file', 'recording_status', 'recording_downloaded_at',
+            'recording_file_size', 'recording_mime_type',
+            'google_conference_record_id', 'google_recording_id', 'recording_drive_file_id'
         ]
 
     def get_key_person_name(self, obj):
@@ -765,4 +772,116 @@ class EmailCampaignDetailSerializer(EmailCampaignSerializer):
 
     class Meta(EmailCampaignSerializer.Meta):
         fields = EmailCampaignSerializer.Meta.fields + ['body', 'template_id', 'signature_id', 'recipients', 'attachments']
+
+
+class EmailThreadMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailThreadMessage
+        fields = [
+            'id',
+            'direction',
+            'source',
+            'status',
+            'external_message_id',
+            'sender_email',
+            'sender_name',
+            'to_emails',
+            'cc_emails',
+            'subject',
+            'body_text',
+            'body_html',
+            'snippet',
+            'attachments_metadata',
+            'error_message',
+            'sent_at',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class EmailThreadListSerializer(serializers.ModelSerializer):
+    pre_user = serializers.SerializerMethodField()
+    prospect_name = serializers.SerializerMethodField()
+    prospect_contact_name = serializers.SerializerMethodField()
+    latest_sender_email = serializers.SerializerMethodField()
+    latest_recipient_email = serializers.SerializerMethodField()
+
+    def get_pre_user(self, obj):
+        owner = obj.owner
+        if not owner:
+            return None
+        profile = getattr(owner, 'profile', None)
+        return {
+            'id': owner.id,
+            'name': owner.get_full_name() or owner.username,
+            'username': owner.username,
+            'email': owner.email,
+            'role': getattr(profile, 'role', 'PRE'),
+        }
+
+    def get_prospect_name(self, obj):
+        if obj.prospect:
+            return obj.prospect.company_name
+        return None
+
+    def get_prospect_contact_name(self, obj):
+        if obj.prospect_contact:
+            return obj.prospect_contact.contact_name
+        return obj.correspondent_name or None
+
+    def get_latest_sender_email(self, obj):
+        if obj.last_direction == EmailThread.Direction.OUTBOUND:
+            return obj.mailbox_email
+        return obj.correspondent_email
+
+    def get_latest_recipient_email(self, obj):
+        if obj.last_direction == EmailThread.Direction.OUTBOUND:
+            return obj.correspondent_email
+        return obj.mailbox_email
+
+    class Meta:
+        model = EmailThread
+        fields = [
+            'id',
+            'pre_user',
+            'mailbox_email',
+            'correspondent_email',
+            'correspondent_name',
+            'latest_sender_email',
+            'latest_recipient_email',
+            'prospect',
+            'prospect_name',
+            'prospect_contact',
+            'prospect_contact_name',
+            'external_thread_id',
+            'subject',
+            'match_status',
+            'status',
+            'last_direction',
+            'last_message_at',
+            'last_snippet',
+            'message_count',
+            'unread_count',
+            'summary_text',
+            'next_action',
+            'summary_status',
+            'summary_provider',
+            'summary_model',
+            'summary_error',
+            'summary_generated_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class EmailThreadDetailSerializer(EmailThreadListSerializer):
+    messages = serializers.SerializerMethodField()
+
+    def get_messages(self, obj):
+        ordered = obj.messages.all().order_by('sent_at', 'created_at')
+        return EmailThreadMessageSerializer(ordered, many=True).data
+
+    class Meta(EmailThreadListSerializer.Meta):
+        fields = EmailThreadListSerializer.Meta.fields + ['messages']
 

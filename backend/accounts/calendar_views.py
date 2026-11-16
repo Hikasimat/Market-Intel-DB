@@ -150,6 +150,31 @@ class CalendarEventsView(_CalendarBase):
 
         try:
             events = list_events(creds, time_min=time_min, time_max=time_max)
+            # Annotate events with Market Intel DB Meeting recording information
+            from prospects.models import Meeting
+            meet_urls = [e['meet_url'] for e in events if e.get('meet_url')]
+            event_ids = [e['id'] for e in events if e.get('id')]
+            meetings_by_link = {m.meeting_link: m for m in Meeting.objects.filter(meeting_link__in=meet_urls)}
+            meetings_by_event = {m.google_event_id: m for m in Meeting.objects.filter(google_event_id__in=event_ids)}
+            from .models import CalendarEventRecording
+            standalone_by_event = {
+                r.event_id: r for r in CalendarEventRecording.objects.filter(user=request.user, event_id__in=event_ids)
+            }
+
+            for e in events:
+                m = meetings_by_event.get(e.get('id')) or meetings_by_link.get(e.get('meet_url'))
+                if not (m and m.recording_file):
+                    standalone = standalone_by_event.get(e.get('id'))
+                    if standalone:
+                        m = standalone
+                if m:
+                    if isinstance(m, Meeting):
+                        e['meeting_id'] = m.id
+                    e['recording_file'] = m.recording_file.url if m.recording_file else None
+                    e['recording_status'] = m.recording_status
+                    e['recording_file_size'] = m.recording_file_size
+                    e['recording_downloaded_at'] = m.recording_downloaded_at.isoformat() if m.recording_downloaded_at else None
+
             return Response({
                 "is_connected": True,
                 "email": creds.email,
@@ -272,4 +297,53 @@ class CalendarEventsView(_CalendarBase):
                 return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({'success': True, 'deleted': event_id}, status=status.HTTP_200_OK)
+
+
+class GoogleCalendarSyncRecordingView(_CalendarBase):
+    """Sync Google Meet audio recording for a calendar event or meet URL."""
+
+    def post(self, request):
+        from accounts.google_meet_service import GoogleMeetRestService, extract_meeting_code
+        from prospects.models import Meeting, Prospect
+        from django.utils import timezone
+
+        meeting_id = request.data.get('meeting_id')
+        event_id = request.data.get('event_id')
+        meet_url = request.data.get('meet_url')
+
+        meeting = None
+        if meeting_id:
+            meeting = Meeting.objects.filter(id=meeting_id).first()
+        if not meeting and event_id:
+            meeting = Meeting.objects.filter(google_event_id=event_id).first()
+        if not meeting and meet_url:
+            code = extract_meeting_code(meet_url)
+            if code:
+                meeting = Meeting.objects.filter(meeting_link__icontains=code).first()
+
+        if not meeting:
+            if not (event_id and meet_url):
+                return Response({'error': 'No meeting found for this event or URL.'}, status=status.HTTP_404_NOT_FOUND)
+            from .models import CalendarEventRecording
+            meeting, _ = CalendarEventRecording.objects.get_or_create(
+                user=request.user, event_id=event_id,
+                defaults={'meeting_link': meet_url},
+            )
+            if not meeting.meeting_link:
+                meeting.meeting_link = meet_url
+                meeting.save(update_fields=['meeting_link', 'updated_at'])
+        elif meeting.google_calendar_owner_id not in (None, request.user.id) and meeting.created_by_id != request.user.id \
+                and not request.user.is_superuser:
+            return Response({'error': 'Only the meeting host can sync this recording.'}, status=status.HTTP_403_FORBIDDEN)
+
+        res = GoogleMeetRestService.sync_meeting_recording(meeting)
+        return Response({
+            'success': res.get('success', False),
+            'status': res.get('status'),
+            'recording_url': meeting.recording_file.url if meeting.recording_file else None,
+            'meeting_id': meeting.id if isinstance(meeting, Meeting) else None,
+            'detail': res.get('detail') or res.get('error'),
+            'file_size': meeting.recording_file_size,
+        }, status=status.HTTP_200_OK if res.get('success') else (status.HTTP_202_ACCEPTED if res.get('status') == 'PROCESSING' else status.HTTP_200_OK))
+
 

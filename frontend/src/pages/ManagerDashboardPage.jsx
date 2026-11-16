@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchManagerDashboard } from '../features/manager/managerSlice';
+import ManagerEmailActivitySection from '../components/ManagerEmailActivitySection';
 import {
   BarChart2, Calendar, Users, CheckCircle, XCircle, Activity,
   Search, ChevronDown, ChevronUp, Eye, TrendingUp, Shield, Zap,
@@ -346,6 +347,9 @@ const ManagerDashboardPage = () => {
 
           {/* Audit */}
           <AuditSection />
+
+          {/* PRE Email Activity & Conversation Summaries */}
+          <ManagerEmailActivitySection selectedDate={selectedDate} />
 
         </div>
       )}

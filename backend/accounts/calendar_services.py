@@ -110,6 +110,10 @@ class GoogleCalendarOAuthService:
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/calendar",
         CALENDAR_EVENTS_SCOPE,
+        "https://www.googleapis.com/auth/meetings.space.readonly",
+        "https://www.googleapis.com/auth/meetings.space.created",
+        "https://www.googleapis.com/auth/meetings.space.settings",
+        "https://www.googleapis.com/auth/drive.readonly",
     ]
 
     # ── Authorization ────────────────────────────────────────────────────────
@@ -404,6 +408,14 @@ def create_meet_event(creds, *, summary, description, start_dt, tz_name, attende
     if status == 'FAILED':
         delete_event(creds, event_id)  # avoid an orphan event with no Meet link
         raise CalendarConferenceError("Google could not generate a Meet link for this event. Please retry.")
+
+    if status == 'READY' and url:
+        try:
+            from .google_meet_service import GoogleMeetRestService
+            GoogleMeetRestService.enable_auto_recording_on_space(creds, url)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Auto-recording space config skipped: %s", exc)
+
     return {'event_id': event_id, 'status': status, 'meet_url': url}
 
 
