@@ -1326,6 +1326,21 @@ class WhatsAppDynamicSyncAndLifecycleTestCase(APITestCase):
         with self.assertRaises(WAHAServiceError):
             client_inst.create_group("default", "Test Group", ["919811122233"])
 
+        # 4. Status endpoint dynamically reconciles WORKING + new scanned phone from QR_REQUIRED
+        curr_u1 = WhatsAppSession.objects.get(owner=self.user1, is_active=True)
+        curr_u1.status = WhatsAppSession.Status.QR_REQUIRED
+        curr_u1.save(update_fields=["status"])
+        fake_waha.get_session_status.return_value = {
+            "status": "WORKING",
+            "me": {"id": "919360239398@c.us", "phone": "+919360239398"},
+        }
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("whatsapp.services.get_waha_client", return_value=fake_waha):
+            switched_status = self.client.get("/api/whatsapp/status/")
+        self.assertEqual(switched_status.status_code, status.HTTP_200_OK)
+        self.assertEqual(switched_status.data["status"], WhatsAppSession.Status.READY)
+        self.assertEqual(switched_status.data["phone_number"], "+919360239398")
+
 
 
 

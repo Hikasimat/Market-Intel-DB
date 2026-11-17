@@ -320,6 +320,58 @@ class WhatsAppSessionRegisterView(APIView):
         return Response(WhatsAppSessionListSerializer(session_obj).data, status=status.HTTP_201_CREATED)
 
 
+def _sync_session_from_waha_payload(session_obj, waha_session_data, source="status", client=None):
+    """Synchronize a local WhatsAppSession record from a live WAHA session status payload."""
+    if not session_obj or not isinstance(waha_session_data, dict):
+        return session_obj
+    w_status = str(waha_session_data.get("status") or "").upper()
+    if not w_status:
+        return session_obj
+
+    new_status = session_obj.status
+    if session_obj.status == WhatsAppSession.Status.READY:
+        if w_status in ("LOGGED_OUT", "UNPAIRED"):
+            new_status = WhatsAppSession.Status.DISCONNECTED
+        else:
+            new_status = WhatsAppSession.Status.READY
+            if client and w_status in ("FAILED", "STOPPED", "NOT_FOUND"):
+                try:
+                    client.start_session(session_obj.session_name)
+                except Exception:
+                    pass
+    else:
+        if w_status == "WORKING":
+            new_status = WhatsAppSession.Status.READY
+        elif w_status == "SCAN_QR_CODE":
+            new_status = WhatsAppSession.Status.QR_REQUIRED
+        elif w_status in ("STARTING", "CONNECTING", "RESUMING"):
+            new_status = WhatsAppSession.Status.STARTING
+        elif w_status in ("FAILED", "STOPPED", "LOGGED_OUT", "UNPAIRED", "DISCONNECTED"):
+            new_status = WhatsAppSession.Status.STOPPED if w_status == "STOPPED" else WhatsAppSession.Status.DISCONNECTED
+
+    if w_status == "WORKING":
+        me_info = waha_session_data.get("me") or {}
+        phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
+        if phone:
+            reconciled, _, _ = reconcile_connected_session(session_obj, phone, source=source)
+            session_obj = reconciled
+            new_status = session_obj.status
+
+    update_fields = []
+    if session_obj.status != new_status:
+        session_obj.status = new_status
+        update_fields.append("status")
+        if new_status == WhatsAppSession.Status.DISCONNECTED:
+            if not session_obj.stopped_at:
+                session_obj.stopped_at = timezone.now()
+            session_obj.disconnect_count = (session_obj.disconnect_count or 0) + 1
+            update_fields.extend(["stopped_at", "disconnect_count"])
+
+    if update_fields:
+        session_obj.save(update_fields=list(set(update_fields)))
+    return session_obj
+
+
 class WhatsAppSessionListView(APIView):
     """
     List active WhatsApp sessions for the current user.
@@ -344,52 +396,17 @@ class WhatsAppSessionListView(APIView):
                 if not waha_session_data:
                     # If already authenticated (READY), preserve it! Never auto-disconnect during polling
                     new_status = WhatsAppSession.Status.READY if (s.status == WhatsAppSession.Status.READY) else "DISCONNECTED"
-                else:
-                    w_status = str(waha_session_data.get("status") or "").upper()
-                    if s.status == WhatsAppSession.Status.READY:
-                        if w_status in ("LOGGED_OUT", "UNPAIRED"):
-                            # Scenario A: preserve phone_number and all history on logout
-                            new_status = "DISCONNECTED"
-                            s.stopped_at = timezone.now()
+                    if s.status != new_status:
+                        s.status = new_status
+                        update_fields = ["status"]
+                        if new_status == "DISCONNECTED":
+                            if not s.stopped_at:
+                                s.stopped_at = timezone.now()
                             s.disconnect_count = (s.disconnect_count or 0) + 1
-                        else:
-                            new_status = "READY"
-                            if w_status in ("FAILED", "STOPPED", "NOT_FOUND"):
-                                try:
-                                    client.start_session(s.session_name)
-                                except Exception:
-                                    pass
-                    else:
-                        if w_status == "WORKING":
-                            new_status = "READY"
-                        elif w_status == "SCAN_QR_CODE":
-                            new_status = "QR_REQUIRED"
-                        elif w_status in ("STARTING", "CONNECTING", "RESUMING"):
-                            new_status = "STARTING"
-                        else:
-                            new_status = "STOPPED"
-
-                    if w_status == "WORKING":
-                        me_info = waha_session_data.get("me") or {}
-                        phone = me_info.get("phone") or (me_info.get("id") or "").split("@")[0].split(":")[0]
-                        if phone:
-                            reconciled, _, _ = reconcile_connected_session(
-                                s, phone, source="session_list"
-                            )
-                            s = reconciled
-                            new_status = s.status
-
-                update_fields = []
-                if s.status != new_status:
-                    s.status = new_status
-                    update_fields.append("status")
-                    if new_status == "DISCONNECTED":
-                        if not s.stopped_at:
-                            s.stopped_at = timezone.now()
-                        update_fields.extend(["stopped_at", "disconnect_count"])
-
-                if update_fields:
-                    s.save(update_fields=list(set(update_fields)))
+                            update_fields.extend(["stopped_at", "disconnect_count"])
+                        s.save(update_fields=list(set(update_fields)))
+                else:
+                    _sync_session_from_waha_payload(s, waha_session_data, source="session_list", client=client)
 
         except Exception as e:
             logger.error(f"Failed to sync sessions from WAHA: {e}")
@@ -427,6 +444,11 @@ class WhatsAppStatusView(APIView):
 
         try:
             status_data = get_session_status(session_name=target_session.session_name)
+            waha_status_payload = status_data.get("waha_status")
+            if isinstance(waha_status_payload, dict) and waha_status_payload.get("status"):
+                target_session = _sync_session_from_waha_payload(
+                    target_session, waha_status_payload, source="status"
+                )
         except Exception:
             status_data = {"status": target_session.status}
 
@@ -443,7 +465,7 @@ class WhatsAppStatusView(APIView):
             "sessions": WhatsAppSessionListSerializer([target_session], many=True).data,
             "historical_sessions": historical_sessions,
             "waha_status": status_data.get("waha_status", {}),
-            "status": status_data.get("status") or target_session.status,
+            "status": target_session.status,
             "phone_number": target_session.phone_number,
             "config": {
                 "outbound_enabled": _get_config().outbound_enabled,
