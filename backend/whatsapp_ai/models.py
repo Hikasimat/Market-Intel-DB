@@ -41,9 +41,12 @@ class WhatsAppAIReplyLog(models.Model):
 
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
+        QUEUED = "QUEUED", "Queued"
+        PROCESSING = "PROCESSING", "Processing"
         SENT = "SENT", "Sent"
         SKIPPED = "SKIPPED", "Skipped"
         FAILED = "FAILED", "Failed"
+        SEND_UNKNOWN = "SEND_UNKNOWN", "Send Status Unknown"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(

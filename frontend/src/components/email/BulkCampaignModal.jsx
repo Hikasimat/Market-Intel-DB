@@ -10,6 +10,7 @@ import { toast } from 'react-toastify';
 import api from '../../services/api';
 import TemplatePicker from '../lq/TemplatePicker';
 import OpenTrackingToggle from './OpenTrackingToggle';
+import GeminiEmailPromptBox from './GeminiEmailPromptBox';
 import AttachmentLibraryModal from './AttachmentLibraryModal';
 
 const STEPS = [
@@ -483,6 +484,17 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
                   setSelection={setTemplateSelection}
                 />
               </div>
+
+              {/* Gemini AI Personalized Email Generator */}
+              <GeminiEmailPromptBox
+                sourceContext="CAMPAIGN"
+                recipientEmails={selectedRecipients.map(r => r.email)}
+                campaignName={campaignName}
+                emailSubject={emailSubject}
+                emailBody={emailBody}
+                setEmailSubject={setEmailSubject}
+                setEmailBody={setEmailBody}
+              />
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">

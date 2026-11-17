@@ -164,80 +164,117 @@ class WhatsAppConversationSerializer(serializers.ModelSerializer):
     def _is_lid(self, val):
         if not val:
             return False
-        digits = re.sub(r"\D+", "", str(val))
+        s = str(val).strip()
+        if s.endswith("@lid"):
+            return True
+        digits = re.sub(r"\D+", "", s)
         return len(digits) > 13 or digits.startswith(("7658", "2262", "2167"))
 
-    def get_contact_name(self, obj):
-        if obj.chat_id and obj.chat_id.endswith("@g.us"):
-            return getattr(obj, "whatsapp_name", None) or "WhatsApp Group"
-        if obj.prospect_contact and obj.prospect_contact.contact_name:
-            return obj.prospect_contact.contact_name
-        w_name = getattr(obj, "whatsapp_name", None)
-        if w_name and w_name.strip() and w_name.strip().lower() != "whatsapp contact" and not self._is_lid(w_name) and "@" not in str(w_name):
-            return w_name
-        phone = self.get_phone_number(obj)
-        if phone:
-            return phone
-        if w_name and not self._is_lid(w_name) and w_name.strip().lower() != "whatsapp contact":
-            return w_name
-        return phone or "WhatsApp Contact"
-
-    def get_prospect_name(self, obj):
-        if obj.prospect and obj.prospect.company_name:
-            return obj.prospect.company_name
-        if obj.prospect_contact and obj.prospect_contact.prospect:
-            return obj.prospect_contact.prospect.company_name
-        return None
-
-    def get_phone_number(self, obj):
-        # Rule: Before the @c.us (or @s.whatsapp.net) is the user mobile number (e.g. 9360239398@c.us -> +9360239398)
+    def _extract_verified_conversation_digits(self, obj) -> str:
         if obj.chat_id:
             cid = str(obj.chat_id).strip()
             if "@c.us" in cid.lower() or "@s.whatsapp.net" in cid.lower():
                 raw = cid.split("@")[0].split(":")[0]
                 digits = re.sub(r"\D+", "", raw)
-                if digits and not self._is_lid(digits):
-                    return f"+{digits}" if not raw.startswith("+") else raw
-
-        if obj.prospect_contact:
-            val = getattr(obj.prospect_contact, 'phone_number', None) or getattr(obj.prospect_contact, 'phone', None)
-            if val:
-                digits = re.sub(r"\D+", "", str(val))
-                if digits and not self._is_lid(digits):
-                    return f"+{digits}" if not str(val).startswith("+") else str(val)
-
+                if digits and not self._is_lid(digits) and 7 <= len(digits) <= 15:
+                    return digits
         if obj.phone_number:
             raw = str(obj.phone_number).strip()
-            digits = re.sub(r"\D+", "", raw)
-            if digits and not self._is_lid(digits):
-                return f"+{digits}" if not raw.startswith("+") else raw
+            if not self._is_lid(raw):
+                digits = re.sub(r"\D+", "", raw)
+                if digits and not self._is_lid(digits) and 7 <= len(digits) <= 15:
+                    return digits
+        return ""
 
-        if obj.chat_id and not obj.chat_id.endswith('@lid') and not obj.chat_id.endswith('@g.us'):
-            digits = obj.chat_id.split('@')[0].split(':')[0]
-            digits = re.sub(r"\D+", "", digits)
-            if digits and not self._is_lid(digits):
-                return f"+{digits}"
+    def _has_verified_crm_contact(self, obj) -> bool:
+        contact = getattr(obj, "prospect_contact", None)
+        if not contact:
+            return False
+        conv_digits = self._extract_verified_conversation_digits(obj)
+        if not conv_digits:
+            return False
+        contact_digits = re.sub(
+            r"\D+",
+            "",
+            str(getattr(contact, "phone_number", None) or getattr(contact, "phone_digits", None) or ""),
+        )
+        if not contact_digits or contact_digits != conv_digits:
+            return False
+        session = getattr(obj, "session", None)
+        owner = getattr(session, "owner", None) if session else None
+        prospect = getattr(contact, "prospect", None)
+        if owner and prospect and getattr(prospect, "created_by", None):
+            if prospect.created_by != owner.username:
+                return False
+        return True
 
+    def get_contact_name(self, obj):
+        if obj.chat_id and obj.chat_id.endswith("@g.us"):
+            return getattr(obj, "whatsapp_name", None) or "WhatsApp Group"
+
+        # Priority 1: Actual sender's WhatsApp pushName / verified profile name
+        w_name = (getattr(obj, "whatsapp_name", None) or "").strip()
+        if (
+            w_name
+            and w_name.lower() != "whatsapp contact"
+            and not self._is_lid(w_name)
+            and "@" not in w_name
+            and not w_name.startswith("+")
+            and not re.fullmatch(r"[\d\s\-\+\(\)]+", w_name)
+        ):
+            return w_name
+
+        # Priority 2: Verified CRM contact name (exact phone + owner scope verified)
+        if self._has_verified_crm_contact(obj) and obj.prospect_contact.contact_name:
+            return obj.prospect_contact.contact_name.strip()
+
+        # Priority 3: Sender's verified phone number or safe unresolved WhatsApp identifier
+        phone = self.get_phone_number(obj)
+        if phone:
+            return phone
+        if obj.chat_id:
+            return str(obj.chat_id)
+        return "WhatsApp Contact"
+
+    def get_prospect_name(self, obj):
+        if self._has_verified_crm_contact(obj):
+            if obj.prospect_contact.prospect and obj.prospect_contact.prospect.company_name:
+                return obj.prospect_contact.prospect.company_name
+            if obj.prospect and obj.prospect.company_name:
+                return obj.prospect.company_name
+        return None
+
+    def get_phone_number(self, obj):
+        digits = self._extract_verified_conversation_digits(obj)
+        if digits:
+            return f"+{digits}"
+        if self._has_verified_crm_contact(obj):
+            val = getattr(obj.prospect_contact, "phone_number", None) or getattr(obj.prospect_contact, "phone", None)
+            if val:
+                c_digits = re.sub(r"\D+", "", str(val))
+                if c_digits and not self._is_lid(c_digits):
+                    return f"+{c_digits}"
         return None
 
     def get_prospect_phone(self, obj):
         return self.get_phone_number(obj)
 
     def get_contact_designation(self, obj):
-        if obj.prospect_contact:
-            return getattr(obj.prospect_contact, 'designation', None)
+        if self._has_verified_crm_contact(obj):
+            return getattr(obj.prospect_contact, "designation", None)
         return None
 
     def get_contact_email(self, obj):
-        if obj.prospect_contact:
-            return getattr(obj.prospect_contact, 'official_email', None)
+        if self._has_verified_crm_contact(obj):
+            return getattr(obj.prospect_contact, "official_email", None)
         return None
 
     def get_prospect_id(self, obj):
-        if obj.prospect_id:
-            return str(obj.prospect_id)
-        if obj.prospect_contact and obj.prospect_contact.prospect_id:
-            return str(obj.prospect_contact.prospect_id)
+        if self._has_verified_crm_contact(obj):
+            if obj.prospect_contact.prospect_id:
+                return str(obj.prospect_contact.prospect_id)
+            if obj.prospect_id:
+                return str(obj.prospect_id)
         return None
 
 

@@ -91,19 +91,7 @@ def _is_fresh_inbound_for_auto_reply(message, session=None) -> bool:
         .first()
     )
     if existing_log:
-        st = existing_log["status"]
-        if st in (WhatsAppAIReplyLog.Status.SENT, WhatsAppAIReplyLog.Status.SKIPPED):
-            return False
-        updated_at = existing_log.get("updated_at")
-        now = timezone.now()
-        if st == WhatsAppAIReplyLog.Status.PENDING and updated_at and updated_at > now - timedelta(seconds=20):
-            return False
-        if st == WhatsAppAIReplyLog.Status.FAILED and updated_at and updated_at > now - timedelta(seconds=5):
-            return False
-        retry_key = f"whatsapp_ai_retry:{message.pk}"
-        retries = int(cache.get(retry_key) or 0)
-        if retries >= 3:
-            return False
+        return False
 
     # Only treat freshly received messages within the real-time sync window as live
     msg_ts = getattr(message, "sent_at", None) or getattr(message, "waha_timestamp", None) or getattr(message, "created_at", None)
@@ -131,25 +119,66 @@ def _get_or_create_ai_config(session):
             "enabled": True,
             "reply_to_groups": False,
             "max_history_messages": 20,
-            "model_name": _get_setting("WHATSAPP_AI_MODEL", ""),
+            "model_name": _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
         },
     )
     return cfg
 
 
 def _extract_sender_identity(conversation, session) -> dict[str, str]:
-    """Identify the sender using phone number, WhatsApp JID, name, and CRM details."""
-    from whatsapp.services import normalize_phone_digits, normalize_phone_number
+    """
+    Identify the sender using verified WhatsApp pushName, verified CRM contact,
+    or verified phone number / WhatsApp JID strictly scoped to `session`.
+    """
+    from whatsapp.services import _is_lid_identifier, normalize_phone_digits, normalize_phone_number
+    from whatsapp.webhooks import _match_verified_prospect_contact
 
     chat_id = str(conversation.chat_id or "").strip()
-    digits = normalize_phone_digits(conversation.phone_number or "") or normalize_phone_digits(chat_id)
-    phone = normalize_phone_number(conversation.phone_number or "") or (f"+{digits}" if digits else "")
-    contact = getattr(conversation, "prospect_contact", None)
-    prospect = getattr(conversation, "prospect", None) or (getattr(contact, "prospect", None) if contact else None)
+    digits = ""
+    if "@c.us" in chat_id.lower() or "@s.whatsapp.net" in chat_id.lower():
+        digits = normalize_phone_digits(chat_id)
+    if not digits and conversation.phone_number:
+        digits = normalize_phone_digits(conversation.phone_number)
+    phone = f"+{digits}" if digits else (normalize_phone_number(conversation.phone_number or "") or "")
 
+    verified_contact = None
+    prospect = None
+    if digits and session:
+        cand_contact = getattr(conversation, "prospect_contact", None)
+        if cand_contact:
+            c_digits = normalize_phone_digits(
+                getattr(cand_contact, "phone_number", None) or getattr(cand_contact, "phone_digits", None) or ""
+            )
+            c_prospect = getattr(cand_contact, "prospect", None)
+            c_owner = getattr(c_prospect, "created_by", None) if c_prospect else None
+            if c_digits == digits and (not session.owner or not c_owner or c_owner == session.owner.username):
+                # Ensure contact match is unambiguous
+                if _match_verified_prospect_contact(session, digits) == cand_contact:
+                    verified_contact = cand_contact
+                    prospect = c_prospect
+        if not verified_contact:
+            verified_contact = _match_verified_prospect_contact(session, digits)
+            if verified_contact:
+                prospect = getattr(verified_contact, "prospect", None)
+
+    raw_w_name = str(conversation.whatsapp_name or "").strip()
+    valid_w_name = (
+        raw_w_name
+        if (
+            raw_w_name
+            and raw_w_name.lower() != "whatsapp contact"
+            and not _is_lid_identifier(raw_w_name)
+            and "@" not in raw_w_name
+            and not raw_w_name.startswith("+")
+            and not re.fullmatch(r"[\d\s\-\+\(\)]+", raw_w_name)
+        )
+        else ""
+    )
+
+    # Priority: 1) Sender's WhatsApp pushName, 2) Verified CRM contact name, 3) Verified phone or JID
     display_name = (
-        (contact.contact_name if contact else "")
-        or (conversation.whatsapp_name or "")
+        valid_w_name
+        or (verified_contact.contact_name.strip() if (verified_contact and verified_contact.contact_name) else "")
         or phone
         or chat_id
         or "WhatsApp User"
@@ -160,7 +189,7 @@ def _extract_sender_identity(conversation, session) -> dict[str, str]:
         "phone_number": phone,
         "display_name": display_name,
         "company_name": prospect.company_name if prospect else "",
-        "designation": getattr(contact, "designation", "") if contact else "",
+        "designation": getattr(verified_contact, "designation", "") if verified_contact else "",
         "account_phone": session.phone_number or "",
         "account_owner": (session.owner.get_full_name() or session.owner.username) if session.owner else "Market Intel",
     }
@@ -168,42 +197,22 @@ def _extract_sender_identity(conversation, session) -> dict[str, str]:
 
 def retrieve_synchronized_chat_history(conversation, session, limit: int = 20) -> list:
     """
-    Retrieve chronological conversation messages associated with the sender's
-    mobile number or WhatsApp JID strictly scoped to `session`.
+    Retrieve chronological conversation messages strictly for `conversation`
+    within `session`. Never fetches messages from any other conversation,
+    phone suffix, display name, or session.
     """
-    from whatsapp.models import WhatsAppConversation, WhatsAppMessage
-    from whatsapp.services import normalize_phone_digits
+    from whatsapp.models import WhatsAppMessage
 
-    chat_id = str(conversation.chat_id or "").strip()
-    is_group = chat_id.endswith("@g.us")
-    conv_ids = {conversation.pk}
-
-    if not is_group:
-        conv_q = Q(pk=conversation.pk)
-        cand_jids = [chat_id] if chat_id else []
-        if chat_id.endswith("@c.us"):
-            cand_jids.append(chat_id.replace("@c.us", "@s.whatsapp.net"))
-        elif chat_id.endswith("@s.whatsapp.net"):
-            cand_jids.append(chat_id.replace("@s.whatsapp.net", "@c.us"))
-        if cand_jids:
-            conv_q |= Q(chat_id__in=cand_jids)
-
-        digits = normalize_phone_digits(conversation.phone_number or "") or normalize_phone_digits(chat_id)
-        if digits and len(digits) >= 8:
-            suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-            conv_q |= Q(phone_number__endswith=suffix) | Q(chat_id__startswith=digits)
-
-        matching_ids = (
-            WhatsAppConversation.objects
-            .filter(session=session, is_deleted=False)
-            .filter(conv_q)
-            .values_list("pk", flat=True)
-        )
-        conv_ids.update(matching_ids)
+    if not conversation or not session or conversation.session_id != session.pk:
+        return []
 
     msgs = list(
         WhatsAppMessage.objects
-        .filter(conversation_id__in=list(conv_ids), conversation__session=session)
+        .filter(
+            conversation_id=conversation.pk,
+            conversation__session_id=session.pk,
+            is_deleted=False,
+        )
         .exclude(status__in=[WhatsAppMessage.Status.FAILED, WhatsAppMessage.Status.BLOCKED])
         .order_by("-waha_timestamp", "-sent_at", "-created_at", "-id")[: max(1, int(limit or 20))]
     )
@@ -299,45 +308,40 @@ def _parse_gemini_reply_json(raw_text: str) -> str:
     if fence:
         try:
             obj = json.loads(fence.group(0))
-            val = str(obj.get("reply") or obj.get("response") or obj.get("message") or "").strip()
-            if val:
-                return val[:2000]
+            if isinstance(obj, dict):
+                val = str(obj.get("reply") or obj.get("response") or obj.get("message") or "").strip()
+                if val:
+                    return val[:2000]
+            return ""
         except Exception:
-            pass
-    # Clean accidental code fences if plain text returned
+            return ""
     cleaned = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
+    if cleaned.startswith("{") or cleaned.endswith("}"):
+        return ""
     return cleaned[:2000]
 
 
-def generate_gemini_whatsapp_reply(prompt: str, *, model: str = "", timeout: int = 15) -> tuple[str, str]:
+def generate_gemini_whatsapp_reply(prompt: str, *, model: str = "gemini-3.8-flash", timeout: int = 15) -> tuple[str, str]:
     """Call Google Gemini REST API and return (reply_text, model_used)."""
     api_key = _get_setting("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured.")
 
     cached_winner = cache.get("whatsapp_ai_working_gemini_model")
-    explicit_model = "" if (not model or model == "gemini-3.8-flash") else model
-    discovered_models: list[str] = []
-    if not cached_winner and not explicit_model and "test" not in sys.argv:
-        try:
-            discovered_models = _discover_gemini_models(api_key, min(timeout, 8))
-        except Exception:
-            discovered_models = []
-
     candidates = []
     for cand in [
         cached_winner,
-        explicit_model,
+        model,
         _get_setting("WHATSAPP_AI_MODEL", ""),
         _get_setting("EMAIL_SUMMARY_MODEL", ""),
-        *discovered_models,
+        "gemini-3.8-flash",
         "gemini-2.5-flash",
         "gemini-flash-lite-latest",
         "gemini-2.5-flash-lite",
         "gemini-flash-latest",
         "gemini-2.0-flash-lite",
     ]:
-        if cand and cand != "gemini-3.8-flash" and cand not in candidates:
+        if cand and cand not in candidates:
             candidates.append(cand)
 
     payload = json.dumps({
@@ -406,6 +410,62 @@ def generate_gemini_whatsapp_reply(prompt: str, *, model: str = "", timeout: int
     raise ValueError(last_err or "Gemini WhatsApp reply generation failed.")
 
 
+def _is_uncertain_send_error(exc: Exception) -> bool:
+    """
+    Return True when a send exception has an uncertain outcome (e.g., read timeout
+    or gateway timeout after the HTTP request may have already been received by WAHA).
+    """
+    status_code = getattr(exc, "status_code", None)
+    msg = str(exc or "").lower()
+    if any(refused in msg for refused in ("connection refused", "10061", "econnrefused", "name or service not known", "getaddrinfo failed")):
+        return False
+    if status_code in (502, 504):
+        return True
+    if any(tok in msg for tok in ("timed out", "timeout", "read timed out", "gateway timeout")):
+        return True
+    return False
+
+
+def _reconcile_uncertain_waha_send(client, session_name: str, chat_id: str, reply_text: str) -> Optional[dict]:
+    """
+    Before marking a timed-out send as unknown, check WAHA's recent messages buffer
+    and chat messages to see if the outbound reply was actually accepted by WAHA.
+    """
+    from whatsapp.webhooks import _normalize_chat_jid
+
+    target_norm = _normalize_chat_jid(chat_id)
+    expected_body = (reply_text or "").strip()
+    if not expected_body:
+        return None
+
+    try:
+        stats_msgs = client.get_recent_messages_from_stats(force=True)
+        for m in (stats_msgs or []):
+            if not isinstance(m, dict) or not m.get("fromMe"):
+                continue
+            if str(m.get("session") or "").strip() not in ("", session_name):
+                continue
+            m_chat = _normalize_chat_jid(str(m.get("chatId") or m.get("to") or ""))
+            m_body = str(m.get("body") or m.get("text") or "").strip()
+            if m_chat == target_norm and m_body == expected_body and m.get("id"):
+                return m
+    except Exception:
+        pass
+
+    try:
+        chat_msgs = client.get_messages(session_name, chat_id, limit=5)
+        for m in (chat_msgs or []):
+            if not isinstance(m, dict) or not m.get("fromMe"):
+                continue
+            m_body = str(m.get("body") or m.get("text") or "").strip()
+            if m_body == expected_body and m.get("id"):
+                return m
+    except Exception:
+        pass
+
+    return None
+
+
 def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
     """
     End-to-end Gemini auto-reply execution for a persisted inbound WhatsAppMessage.
@@ -433,6 +493,7 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
             "conversation__session",
             "conversation__session__owner",
             "conversation__prospect_contact",
+            "conversation__prospect_contact__prospect",
             "conversation__prospect",
         )
         .filter(pk=incoming_message_id)
@@ -443,20 +504,22 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
 
     conversation = incoming.conversation
     session = conversation.session if conversation else None
-    if not conversation or not session:
+    if not conversation or not session or conversation.session_id != session.pk:
         return None
 
-    # Idempotency: ensure each incoming message receives at most one AI reply log
+    # Database-enforced uniqueness & atomic state transition to prevent duplicate replies
+    # across concurrent webhook and sync workers.
     try:
-        log_entry, created = WhatsAppAIReplyLog.objects.get_or_create(
-            incoming_message=incoming,
-            defaults={
-                "session": session,
-                "conversation": conversation,
-                "sender_identifier": conversation.phone_number or conversation.chat_id,
-                "status": WhatsAppAIReplyLog.Status.PENDING,
-            },
-        )
+        with transaction.atomic():
+            log_entry, created = WhatsAppAIReplyLog.objects.get_or_create(
+                incoming_message=incoming,
+                defaults={
+                    "session": session,
+                    "conversation": conversation,
+                    "sender_identifier": conversation.phone_number or conversation.chat_id,
+                    "status": WhatsAppAIReplyLog.Status.PROCESSING,
+                },
+            )
     except IntegrityError:
         return {"status": "SKIPPED", "reason": "already_claimed"}
 
@@ -464,19 +527,21 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
         if log_entry.status in (
             WhatsAppAIReplyLog.Status.SENT,
             WhatsAppAIReplyLog.Status.SKIPPED,
+            WhatsAppAIReplyLog.Status.PROCESSING,
+            WhatsAppAIReplyLog.Status.SEND_UNKNOWN,
+            WhatsAppAIReplyLog.Status.FAILED,
         ):
             return {"status": log_entry.status, "reason": "already_processed"}
-        if log_entry.status == WhatsAppAIReplyLog.Status.PENDING:
-            if log_entry.updated_at and log_entry.updated_at > timezone.now() - timedelta(seconds=20):
-                return {"status": log_entry.status, "reason": "already_processed"}
-        retry_key = f"whatsapp_ai_retry:{incoming.pk}"
-        retries = int(cache.get(retry_key) or 0)
-        if retries >= 3:
-            return {"status": log_entry.status, "reason": "retry_limit_reached"}
-        cache.set(retry_key, retries + 1, 600)
-        log_entry.status = WhatsAppAIReplyLog.Status.PENDING
-        log_entry.error_message = ""
-        log_entry.save(update_fields=["status", "error_message", "updated_at"])
+        claimed = WhatsAppAIReplyLog.objects.filter(
+            pk=log_entry.pk,
+            status__in=[WhatsAppAIReplyLog.Status.PENDING, WhatsAppAIReplyLog.Status.QUEUED],
+        ).update(
+            status=WhatsAppAIReplyLog.Status.PROCESSING,
+            updated_at=timezone.now(),
+        )
+        if claimed != 1:
+            return {"status": "SKIPPED", "reason": "already_claimed"}
+        log_entry.status = WhatsAppAIReplyLog.Status.PROCESSING
 
     def _skip(reason: str):
         log_entry.status = WhatsAppAIReplyLog.Status.SKIPPED
@@ -548,7 +613,7 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
     try:
         reply_text, model_used = generate_gemini_whatsapp_reply(
             prompt,
-            model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", ""),
+            model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
             timeout=int(_get_setting("WHATSAPP_AI_TIMEOUT", "15") or 15),
         )
     except Exception as exc:
@@ -558,44 +623,79 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
         log_entry.save(update_fields=["status", "error_message", "history_message_count", "sender_identifier", "updated_at"])
         return {"status": "FAILED", "error": str(exc)}
 
-    # Send through the exact same connected WhatsAppSession (no user login required)
+    # Send strictly through the originating WhatsAppSession and to the exact conversation.chat_id
     client = get_waha_client()
     is_lid_chat = str(conversation.chat_id).endswith("@lid")
     reply_to_id = incoming.waha_message_id if is_lid_chat else None
-    send_targets = [(conversation.chat_id, reply_to_id)]
-    if is_lid_chat:
-        if reply_to_id:
-            send_targets.append((conversation.chat_id, None))
-        if sender_info.get("phone_digits"):
-            send_targets.append((f"{sender_info['phone_digits']}@c.us", None))
 
     waha_resp = None
     last_send_exc = None
-    for target_jid, target_reply_to in send_targets:
-        try:
-            waha_resp = client.send_text(
-                session_name=session.session_name,
-                chat_id=target_jid,
-                text=reply_text,
-                reply_to=target_reply_to,
-            )
-            last_send_exc = None
-            break
-        except WAHAServiceError as exc:
-            last_send_exc = exc
-            continue
+    try:
+        waha_resp = client.send_text(
+            session_name=session.session_name,
+            chat_id=conversation.chat_id,
+            text=reply_text,
+            reply_to=reply_to_id,
+        )
+    except Exception as exc:
+        last_send_exc = exc
+        # Only if an @lid quote-reply was explicitly rejected with HTTP 400 (confirmed not sent),
+        # retry once on the exact same session and exact same conversation.chat_id without reply_to.
+        if (
+            is_lid_chat
+            and reply_to_id
+            and isinstance(exc, WAHAServiceError)
+            and getattr(exc, "status_code", None) == 400
+            and not _is_uncertain_send_error(exc)
+        ):
+            try:
+                waha_resp = client.send_text(
+                    session_name=session.session_name,
+                    chat_id=conversation.chat_id,
+                    text=reply_text,
+                    reply_to=None,
+                )
+                last_send_exc = None
+            except Exception as retry_exc:
+                last_send_exc = retry_exc
 
     if last_send_exc is not None:
-        logger.error("WAHA send failed for Gemini AI reply msg %s: %s", incoming.pk, last_send_exc)
-        log_entry.status = WhatsAppAIReplyLog.Status.FAILED
-        log_entry.reply_text = reply_text
-        log_entry.model_used = model_used
-        log_entry.error_message = str(last_send_exc)[:1000]
-        log_entry.save(update_fields=[
-            "status", "reply_text", "model_used", "error_message",
-            "history_message_count", "sender_identifier", "updated_at",
-        ])
-        return {"status": "FAILED", "error": str(last_send_exc)}
+        if _is_uncertain_send_error(last_send_exc):
+            reconciled = _reconcile_uncertain_waha_send(
+                client,
+                session.session_name,
+                conversation.chat_id,
+                reply_text,
+            )
+            if reconciled is not None:
+                waha_resp = reconciled
+                last_send_exc = None
+            else:
+                logger.warning(
+                    "Uncertain WAHA send outcome for Gemini AI reply msg %s (not resending): %s",
+                    incoming.pk,
+                    last_send_exc,
+                )
+                log_entry.status = WhatsAppAIReplyLog.Status.SEND_UNKNOWN
+                log_entry.reply_text = reply_text
+                log_entry.model_used = model_used
+                log_entry.error_message = f"send_status_unknown: {last_send_exc}"[:1000]
+                log_entry.save(update_fields=[
+                    "status", "reply_text", "model_used", "error_message",
+                    "history_message_count", "sender_identifier", "updated_at",
+                ])
+                return {"status": "SEND_UNKNOWN", "error": str(last_send_exc)}
+        else:
+            logger.error("WAHA send failed for Gemini AI reply msg %s: %s", incoming.pk, last_send_exc)
+            log_entry.status = WhatsAppAIReplyLog.Status.FAILED
+            log_entry.reply_text = reply_text
+            log_entry.model_used = model_used
+            log_entry.error_message = str(last_send_exc)[:1000]
+            log_entry.save(update_fields=[
+                "status", "reply_text", "model_used", "error_message",
+                "history_message_count", "sender_identifier", "updated_at",
+            ])
+            return {"status": "FAILED", "error": str(last_send_exc)}
 
     now = timezone.now()
     waha_msg_id = (
@@ -753,17 +853,7 @@ def catch_up_unreplied_fresh_inbound_messages() -> int:
             conversation__is_deleted=False,
             conversation__session__is_active=True,
             conversation__session__status=WhatsAppSession.Status.READY,
-        )
-        .filter(
-            Q(ai_reply_log__isnull=True)
-            | Q(
-                ai_reply_log__status=WhatsAppAIReplyLog.Status.FAILED,
-                ai_reply_log__updated_at__lte=now - timedelta(seconds=5),
-            )
-            | Q(
-                ai_reply_log__status=WhatsAppAIReplyLog.Status.PENDING,
-                ai_reply_log__updated_at__lte=now - timedelta(seconds=20),
-            )
+            ai_reply_log__isnull=True,
         )
         .order_by("sent_at", "created_at")[:25]
     )

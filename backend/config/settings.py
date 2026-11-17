@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'market_events',
     'whatsapp',
     'whatsapp_ai',
+    'email_ai',
     'digital_marketing',
     'drf_spectacular',
 ]

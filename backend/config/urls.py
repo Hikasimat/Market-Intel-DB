@@ -18,6 +18,7 @@ def redirect_to_frontend(request, route_path=''):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/', include('accounts.urls')),
+    path('api/', include('email_ai.urls')),
     path('api/', include('prospects.urls')),
     path('api/', include('market_events.urls')),
     path('api/whatsapp/', include('whatsapp.urls')),

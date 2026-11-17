@@ -353,8 +353,25 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
 
   return (
     <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative overflow-hidden shadow-sm shrink-0">
+      {showWorkspace && selectedLq ? (
+        <LqWorkspaceModal
+          selectedLq={selectedLq}
+          initialTab="outreach"
+          onClose={() => { setShowWorkspace(false); dispatch(fetchLqPipeline()); }}
+          hasIncorrect={hasIncorrect}
+          allCorrect={allCorrect}
+          verificationFields={verificationFields}
+          handleFieldToggle={handleFieldToggle}
+          handleSubmitIssue={handleSubmitIssue}
+          handleReadyForOutreach={handleReadyForOutreach}
+          isConfirmingFixes={false}
+          correctedFields={correctedFields}
+          fullPage={true}
+        />
+      ) : (
+        <>
+          {/* Header */}
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative overflow-hidden shadow-sm shrink-0">
         <div className="relative z-10">
           <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Outreach Workspace</h1>
           <p className="text-blue-100 text-xs max-w-2xl">Execute outreach communication, log call outcomes, and qualify opportunities.</p>
@@ -638,22 +655,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
           onPageChange={(newPage) => dispatch(setPage(newPage))} 
         />
       </div>
-
-      {/* Workspace Modal */}
-      {showWorkspace && selectedLq && (
-        <LqWorkspaceModal
-          selectedLq={selectedLq}
-          initialTab="outreach"
-          onClose={() => { setShowWorkspace(false); dispatch(fetchLqPipeline()); }}
-          hasIncorrect={hasIncorrect}
-          allCorrect={allCorrect}
-          verificationFields={verificationFields}
-          handleFieldToggle={handleFieldToggle}
-          handleSubmitIssue={handleSubmitIssue}
-          handleReadyForOutreach={handleReadyForOutreach}
-          isConfirmingFixes={false}
-          correctedFields={correctedFields}
-        />
+        </>
       )}
     </div>
   );

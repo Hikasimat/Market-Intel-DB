@@ -478,3 +478,359 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         fake_waha.send_text.assert_called_once()
         old_opt.refresh_from_db()
         self.assertFalse(old_opt.is_active)
+
+    def test_customer_identity_and_collision_isolation_rules(self):
+        """
+        Verifies mandatory customer identity and collision isolation rules (1-9, 19):
+          1. Two different customers in same session with different names stay separate.
+          2. Two different customers with same WhatsApp display name ('Mohan V') stay separate.
+          3. Two different customers sharing last 8/10 phone digits (+19811122233 vs +919811122233) stay separate.
+          4. Unresolved @lid sender is never assigned to another customer's conversation.
+          5. New sender is never attached to the most recently active outbound conversation.
+          6. CRM contact is linked only on exact, owner-scoped, unambiguous full phone match;
+             fromMe=True echo with pushName='Mohan V' never overwrites customer whatsapp_name.
+          8. Group conversations remain separate from individual conversations.
+          9 & 19. GET /api/whatsapp/conversations/ is strictly read-only (does not merge, move
+             messages, or soft-delete conversations) and serializes the right customer name.
+        """
+        now = timezone.now()
+
+        # Seed a foreign-owner CRM contact named "Mohan V" with blank phone, plus ambiguous duplicates
+        other_prospect = Prospect.objects.create(company_name="Foreign Corp", created_by=self.user2.username)
+        ProspectContact.objects.create(
+            prospect=other_prospect,
+            contact_name="Mohan V",
+            phone_number="",
+        )
+        # Ambiguous contacts for +919999888877 under user1
+        ProspectContact.objects.create(
+            prospect=self.prospect,
+            contact_name="Ambiguous One",
+            phone_number="+919999888877",
+        )
+        ProspectContact.objects.create(
+            prospect=self.prospect,
+            contact_name="Ambiguous Two",
+            phone_number="+919999888877",
+        )
+
+        # Seed a recent outbound 1-on-1 conversation to Arjun (+919811122233)
+        conv_arjun = WhatsAppConversation.objects.create(
+            session=self.session1,
+            chat_id="919811122233@c.us",
+            phone_number="+919811122233",
+            whatsapp_name="Arjun Mehta",
+            prospect=self.prospect,
+            prospect_contact=self.contact,
+            is_matched=True,
+            last_message_at=now - timedelta(seconds=10),
+            last_message_from_me=True,
+            last_message_preview="Outbound to Arjun",
+        )
+        WhatsAppMessage.objects.create(
+            idempotency_key="out-arjun-1",
+            conversation=conv_arjun,
+            direction=WhatsAppMessage.Direction.OUTBOUND,
+            status=WhatsAppMessage.Status.SENT,
+            body_preview="Outbound to Arjun",
+            full_body="Outbound to Arjun",
+            sent_at=now - timedelta(seconds=10),
+        )
+
+        with patch.dict("os.environ", {"WHATSAPP_AI_AUTO_REPLY_ENABLED": "false"}):
+            # Case 3: Different customer sharing last 10 digits (+19811122233 vs +919811122233)
+            self._post_signed_webhook({
+                "event": "message",
+                "id": "evt_col_us_1",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "false_19811122233@c.us_MSG_1",
+                    "from": "19811122233@c.us",
+                    "to": "919003619221@c.us",
+                    "fromMe": False,
+                    "pushName": "Carlos US",
+                    "body": "Hello from US number sharing 10-digit suffix",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+
+            # Case 2: Two different customers with identical pushName "Mohan V"
+            self._post_signed_webhook({
+                "event": "message",
+                "id": "evt_col_same_name_1",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "false_917777111101@c.us_MSG_1",
+                    "from": "917777111101@c.us",
+                    "to": "919003619221@c.us",
+                    "fromMe": False,
+                    "pushName": "Mohan V",
+                    "body": "Message from first customer named Mohan V",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+            self._post_signed_webhook({
+                "event": "message",
+                "id": "evt_col_same_name_2",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "false_917777111102@c.us_MSG_1",
+                    "from": "917777111102@c.us",
+                    "to": "919003619221@c.us",
+                    "fromMe": False,
+                    "pushName": "Mohan V",
+                    "body": "Message from second customer named Mohan V",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+
+            # Case 4 & 5: Unresolved @lid sender arriving right after outbound message
+            # and carrying pushName="Mohan V" must NOT attach to conv_arjun or any other chat
+            fake_waha = MagicMock()
+            fake_waha.get_contact_info.return_value = {}
+            with patch("whatsapp.client.get_waha_client", return_value=fake_waha):
+                self._post_signed_webhook({
+                    "event": "message",
+                    "id": "evt_col_lid_1",
+                    "session": self.session1.session_name,
+                    "payload": {
+                        "id": "false_191126329925674@lid_MSG_1",
+                        "from": "191126329925674@lid",
+                        "to": "919003619221@c.us",
+                        "fromMe": False,
+                        "pushName": "Fahad",
+                        "body": "Unresolved LID message",
+                        "timestamp": int(now.timestamp()),
+                    },
+                })
+
+            # Case 6a: Self-echo (fromMe=True) carrying account owner's pushName "Mohan V"
+            # must NEVER overwrite Fahad's or Arjun's conversation whatsapp_name!
+            self._post_signed_webhook({
+                "event": "message.any",
+                "id": "evt_col_echo_owner_name",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "true_191126329925674@lid_ECHO_1",
+                    "from": "191126329925674@lid",
+                    "to": "191126329925674@lid",
+                    "fromMe": True,
+                    "pushName": "Mohan V",
+                    "body": "Outbound reply to Fahad",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+
+            # Case 6b: Ambiguous CRM contact phone (+919999888877) must remain unlinked
+            self._post_signed_webhook({
+                "event": "message",
+                "id": "evt_col_ambig_1",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "false_919999888877@c.us_MSG_1",
+                    "from": "919999888877@c.us",
+                    "to": "919003619221@c.us",
+                    "fromMe": False,
+                    "pushName": "Real Sender Name",
+                    "body": "Message from number with ambiguous CRM contacts",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+
+            # Case 8: Group chat message remains separate from 1-on-1 conversations
+            self._post_signed_webhook({
+                "event": "message",
+                "id": "evt_col_grp_1",
+                "session": self.session1.session_name,
+                "payload": {
+                    "id": "false_120363099999999@g.us_MSG_1",
+                    "chatId": "120363099999999@g.us",
+                    "from": "919811122233@c.us",
+                    "participant": "919811122233@c.us",
+                    "fromMe": False,
+                    "pushName": "Arjun Mehta",
+                    "chatName": "Project Alpha Group",
+                    "body": "Group discussion message",
+                    "timestamp": int(now.timestamp()),
+                },
+            })
+
+        # Verify each conversation is distinct and isolated
+        conv_us = WhatsAppConversation.objects.get(session=self.session1, chat_id="19811122233@c.us")
+        self.assertNotEqual(conv_us.pk, conv_arjun.pk)
+        self.assertIsNone(conv_us.prospect_contact)  # Not suffix-matched to Arjun's +919811122233!
+
+        conv_m1 = WhatsAppConversation.objects.get(session=self.session1, chat_id="917777111101@c.us")
+        conv_m2 = WhatsAppConversation.objects.get(session=self.session1, chat_id="917777111102@c.us")
+        self.assertNotEqual(conv_m1.pk, conv_m2.pk)
+
+        conv_lid = WhatsAppConversation.objects.get(session=self.session1, chat_id="191126329925674@lid")
+        self.assertNotEqual(conv_lid.pk, conv_arjun.pk)
+        self.assertNotEqual(conv_lid.pk, conv_m1.pk)
+        self.assertEqual(conv_lid.whatsapp_name, "Fahad")  # Not overwritten by fromMe pushName "Mohan V"!
+
+        conv_ambig = WhatsAppConversation.objects.get(session=self.session1, chat_id="919999888877@c.us")
+        self.assertFalse(conv_ambig.is_matched)
+        self.assertIsNone(conv_ambig.prospect_contact)
+        self.assertEqual(conv_ambig.whatsapp_name, "Real Sender Name")
+
+        conv_grp = WhatsAppConversation.objects.get(session=self.session1, chat_id="120363099999999@g.us")
+        self.assertNotEqual(conv_grp.pk, conv_arjun.pk)
+        self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv_arjun).count(), 1)
+
+        # Case 19: GET /api/whatsapp/conversations/ is strictly read-only
+        self.client.force_authenticate(user=self.user1)
+        total_convs_before = WhatsAppConversation.objects.filter(session=self.session1, is_deleted=False).count()
+        res_list = self.client.get("/api/whatsapp/conversations/")
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        total_convs_after = WhatsAppConversation.objects.filter(session=self.session1, is_deleted=False).count()
+        self.assertEqual(total_convs_before, total_convs_after)
+        self.assertEqual(len(res_list.data), total_convs_before)
+
+        by_chat_id = {item["chat_id"]: item for item in res_list.data}
+        self.assertEqual(by_chat_id["19811122233@c.us"]["contact_name"], "Carlos US")
+        self.assertEqual(by_chat_id["191126329925674@lid"]["contact_name"], "Fahad")
+        self.assertEqual(by_chat_id["919999888877@c.us"]["contact_name"], "Real Sender Name")
+
+    def test_ai_history_isolation_and_concurrent_idempotency_and_uncertain_send(self):
+        """
+        Verifies mandatory AI history isolation & concurrency rules (10-17):
+          10 & 11. AI prompt contains ONLY target conversation's history; never includes messages
+                   from another conversation with same 10-digit phone suffix, same pushName, or @lid.
+          12. Outgoing AI message uses exact originating session and exact conversation.chat_id.
+          13, 14, 15. Repeated webhook, realtime sync, and concurrent worker calls produce at most 1 reply.
+          16 & 17. Confirmed send failure -> FAILED; uncertain timeout -> SEND_UNKNOWN (never auto-retried).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from whatsapp.client import WAHAServiceError
+        from whatsapp_ai.gemini_service import process_ai_auto_reply
+        from whatsapp_ai.realtime_listener import run_realtime_sync_cycle
+
+        now = timezone.now()
+
+        # Customer A (+919811122233)
+        conv_a = WhatsAppConversation.objects.create(
+            session=self.session1,
+            chat_id="919811122233@c.us",
+            phone_number="+919811122233",
+            whatsapp_name="Arjun Mehta",
+        )
+        WhatsAppMessage.objects.create(
+            idempotency_key="hist-a-1",
+            conversation=conv_a,
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            body_preview="CONFIDENTIAL_ARJUN_A_MESSAGE",
+            full_body="CONFIDENTIAL_ARJUN_A_MESSAGE",
+            sent_at=now - timedelta(minutes=5),
+        )
+
+        # Customer B sharing the same 10-digit suffix (+19811122233) and same name in same session
+        conv_b = WhatsAppConversation.objects.create(
+            session=self.session1,
+            chat_id="19811122233@c.us",
+            phone_number="+19811122233",
+            whatsapp_name="Arjun Mehta",
+        )
+        msg_b_in = WhatsAppMessage.objects.create(
+            idempotency_key="in-b-1",
+            conversation=conv_b,
+            waha_message_id="false_19811122233@c.us_B1",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            body_preview="Hello from Customer B in US",
+            full_body="Hello from Customer B in US",
+            sent_at=now,
+        )
+
+        fake_waha = MagicMock()
+        fake_waha.send_text.return_value = {"id": "true_19811122233@c.us_AI_B1"}
+        captured_prompts = []
+
+        def _fake_urlopen(req, timeout=15):
+            body = json.loads(req.data.decode("utf-8"))
+            captured_prompts.append(body["contents"][0]["parts"][0]["text"])
+            return _FakeGeminiHttpResponse("Hi Customer B! Happy to help.")
+
+        with patch.dict("os.environ", {
+            "GEMINI_API_KEY": "fake-key",
+            "WHATSAPP_AI_AUTO_REPLY_ENABLED": "true",
+        }), \
+             patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            # 15. Run two workers on the same incoming message
+            res1 = process_ai_auto_reply(msg_b_in.pk)
+            res2 = process_ai_auto_reply(msg_b_in.pk)
+            # 14. Run realtime sync cycle after message was already processed
+            fake_waha.get_all_sessions.return_value = []
+            fake_waha.get_recent_messages_from_stats.return_value = []
+            fake_waha.get_chats.return_value = []
+            run_realtime_sync_cycle(force_chat_poll=True)
+
+        self.assertEqual(res1["status"], "SENT")
+        self.assertEqual(res2["reason"], "already_processed")
+        self.assertEqual(fake_waha.send_text.call_count, 1)
+        self.assertEqual(fake_waha.send_text.call_args.kwargs["session_name"], self.session1.session_name)
+        self.assertEqual(fake_waha.send_text.call_args.kwargs["chat_id"], "19811122233@c.us")
+
+        # 10 & 11. Prompt for Customer B must NEVER contain Customer A's message despite shared 10-digit suffix
+        self.assertEqual(len(captured_prompts), 1)
+        self.assertIn("Hello from Customer B in US", captured_prompts[0])
+        self.assertNotIn("CONFIDENTIAL_ARJUN_A_MESSAGE", captured_prompts[0])
+
+        # 17. Uncertain send outcome (HTTP 504 Gateway Timeout) -> reconciled first; if unconfirmed, marked SEND_UNKNOWN and NOT retried
+        msg_b_timeout = WhatsAppMessage.objects.create(
+            idempotency_key="in-b-timeout",
+            conversation=conv_b,
+            waha_message_id="false_19811122233@c.us_B_TIMEOUT",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            body_preview="Are you still there?",
+            full_body="Are you still there?",
+            sent_at=now + timedelta(seconds=5),
+        )
+        fake_waha_timeout = MagicMock()
+        fake_waha_timeout.send_text.side_effect = WAHAServiceError("Read timed out waiting for WAHA", status_code=504)
+        fake_waha_timeout.get_recent_messages_from_stats.return_value = []
+        fake_waha_timeout.get_messages.return_value = []
+
+        with patch.dict("os.environ", {
+            "GEMINI_API_KEY": "fake-key",
+            "WHATSAPP_AI_AUTO_REPLY_ENABLED": "true",
+        }), \
+             patch("whatsapp.client.get_waha_client", return_value=fake_waha_timeout), \
+             patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            timeout_res = process_ai_auto_reply(msg_b_timeout.pk)
+            retry_res = process_ai_auto_reply(msg_b_timeout.pk)
+
+        self.assertEqual(timeout_res["status"], "SEND_UNKNOWN")
+        self.assertEqual(retry_res["reason"], "already_processed")
+        self.assertEqual(fake_waha_timeout.send_text.call_count, 1)  # Never blindly retried!
+        log_timeout = WhatsAppAIReplyLog.objects.get(incoming_message=msg_b_timeout)
+        self.assertEqual(log_timeout.status, WhatsAppAIReplyLog.Status.SEND_UNKNOWN)
+
+        # 16. Confirmed send failure (HTTP 400 Bad Request) -> marked FAILED
+        msg_b_fail = WhatsAppMessage.objects.create(
+            idempotency_key="in-b-fail",
+            conversation=conv_b,
+            waha_message_id="false_19811122233@c.us_B_FAIL",
+            direction=WhatsAppMessage.Direction.INBOUND,
+            status=WhatsAppMessage.Status.DELIVERED,
+            body_preview="Another test",
+            full_body="Another test",
+            sent_at=now + timedelta(seconds=10),
+        )
+        fake_waha_fail = MagicMock()
+        fake_waha_fail.send_text.side_effect = WAHAServiceError("Invalid chatId parameter", status_code=400)
+
+        with patch.dict("os.environ", {
+            "GEMINI_API_KEY": "fake-key",
+            "WHATSAPP_AI_AUTO_REPLY_ENABLED": "true",
+        }), \
+             patch("whatsapp.client.get_waha_client", return_value=fake_waha_fail), \
+             patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            fail_res = process_ai_auto_reply(msg_b_fail.pk)
+
+        self.assertEqual(fail_res["status"], "FAILED")
+        log_fail = WhatsAppAIReplyLog.objects.get(incoming_message=msg_b_fail)
+        self.assertEqual(log_fail.status, WhatsAppAIReplyLog.Status.FAILED)

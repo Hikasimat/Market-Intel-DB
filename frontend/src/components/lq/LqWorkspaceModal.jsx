@@ -39,6 +39,7 @@ import api from '../../services/api';
 import { localDateTimeToUTC } from '../../utils/timezone';
 import TemplatePicker from './TemplatePicker';
 import OpenTrackingToggle from '../email/OpenTrackingToggle';
+import GeminiEmailPromptBox from '../email/GeminiEmailPromptBox';
 import MeetingProviderPicker, { CreatedMeetingCard } from './MeetingProviderPicker';
 import AttachmentLibraryModal from '../email/AttachmentLibraryModal';
 import { notifyMailSent } from '../../services/mailSyncService';
@@ -90,7 +91,8 @@ export default function LqWorkspaceModal({
   handleSubmitIssue,
   handleReadyForOutreach,
   isConfirmingFixes,
-  correctedFields = []
+  correctedFields = [],
+  fullPage = true
 }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const dispatch = useDispatch();
@@ -1077,9 +1079,28 @@ export default function LqWorkspaceModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 font-sans">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full overflow-hidden border border-slate-200 flex flex-col max-h-[92vh]">
-        {/* Modal Header */}
+    <div className={fullPage ? "w-full space-y-4 font-sans" : "fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 font-sans"}>
+      {fullPage && (
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-indigo-600 transition cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Outreach List</span>
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-2xs"
+          >
+            Done / Close Workspace
+          </button>
+        </div>
+      )}
+      <div className={fullPage ? "bg-white rounded-2xl shadow-sm w-full overflow-hidden border border-slate-200 flex flex-col" : "bg-white rounded-2xl shadow-2xl max-w-5xl w-full overflow-hidden border border-slate-200 flex flex-col max-h-[92vh]"}>
+        {/* Workspace Header */}
         <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-5 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center border border-white/10 shrink-0">
@@ -1102,8 +1123,8 @@ export default function LqWorkspaceModal({
           </button>
         </div>
 
-        {/* Modal Scrollable Content Body */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-slate-50">
+        {/* Workspace Content Body */}
+        <div className={fullPage ? "p-6 space-y-6 bg-slate-50" : "p-6 overflow-y-auto flex-1 space-y-6 bg-slate-50"}>
           <div className="space-y-6">
                   {/* Email Section */}
                   <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
@@ -1429,6 +1450,16 @@ export default function LqWorkspaceModal({
                           disabled={isEmailSent}
                           selection={templateSelection}
                           setSelection={setTemplateSelection}
+                        />
+                        <GeminiEmailPromptBox
+                          sourceContext="OUTREACH"
+                          prospect={prospect}
+                          recipientEmails={toEmails}
+                          emailSubject={emailSubject}
+                          emailBody={emailBody}
+                          setEmailSubject={setEmailSubject}
+                          setEmailBody={setEmailBody}
+                          disabled={isEmailSent}
                         />
                         <div>
                           <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Email Subject</label>

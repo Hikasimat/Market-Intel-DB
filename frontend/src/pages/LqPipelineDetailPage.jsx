@@ -124,6 +124,21 @@ const LqPipelineDetailPage = () => {
 
   return (
     <div className="space-y-6">
+      {showWorkspace && lq ? (
+        <LqWorkspaceModal
+          selectedLq={lq}
+          initialTab={lq.verification_status === 'Verified' ? 'outreach' : 'verification'}
+          onClose={() => { setShowWorkspace(false); dispatch(fetchLqPipelineItem(id)); }}
+          hasIncorrect={hasIncorrect}
+          allCorrect={allCorrect}
+          verificationFields={verificationFields}
+          handleFieldToggle={handleFieldToggle}
+          handleSubmitIssue={handleSubmitIssue}
+          handleReadyForOutreach={handleReadyForOutreach}
+          fullPage={true}
+        />
+      ) : (
+        <>
       {/* Top Navigation */}
       <div className="flex items-center justify-between">
         <Link 
@@ -319,20 +334,7 @@ const LqPipelineDetailPage = () => {
         </h2>
         <CorporateStructureTree prospect={p} />
       </div>
-
-      {/* Workspace Modal */}
-      {showWorkspace && lq && (
-        <LqWorkspaceModal
-          selectedLq={lq}
-          initialTab={lq.verification_status === 'Verified' ? 'outreach' : 'verification'}
-          onClose={() => { setShowWorkspace(false); dispatch(fetchLqPipelineItem(id)); }}
-          hasIncorrect={hasIncorrect}
-          allCorrect={allCorrect}
-          verificationFields={verificationFields}
-          handleFieldToggle={handleFieldToggle}
-          handleSubmitIssue={handleSubmitIssue}
-          handleReadyForOutreach={handleReadyForOutreach}
-        />
+        </>
       )}
     </div>
   );

@@ -102,7 +102,7 @@ function ContactAvatar({ chat, size = "md", avatarVersion }) {
     lg: "w-14 h-14",
   }[size] || "w-6 h-6";
 
-  const displayName = chat.contact_name || chat.whatsapp_name || "";
+  const displayName = chat.whatsapp_name || (chat.is_matched ? chat.contact_name : "") || "";
   const hasLetters = /[a-zA-Z]/.test(displayName);
 
   let initials = "";
@@ -437,6 +437,10 @@ export default function WhatsappPage() {
   const [msgSearchQuery, setMsgSearchQuery] = useState('');
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [wahaContact, setWahaContact] = useState(null);
+  const activeChatKeyRef = useRef('');
+  const msgRequestGenRef = useRef(0);
+  const msgAbortControllerRef = useRef(null);
+  const msgPollingInFlightRef = useRef(false);
 
   // Media Sending & Preview
   const [attachPreview, setAttachPreview] = useState(null);
@@ -799,32 +803,75 @@ export default function WhatsappPage() {
     }
   }, [dispatch]);
 
-  const fetchMessages = useCallback(async (conversationId, isPolling = false) => {
+  const fetchMessages = useCallback(async (conversationId, isPolling = false, sessionNameOverride = undefined) => {
+    const targetSessionName = sessionNameOverride !== undefined ? sessionNameOverride : (selectedSession?.session_name || '');
+    const expectedKey = `${targetSessionName}::${conversationId || ''}`;
+
     if (!conversationId || String(conversationId).startsWith('temp-')) {
-      setMessages([]);
-      if (!isPolling) setLoadingMessages(false);
+      if (!isPolling) {
+        setMessages([]);
+        setLoadingMessages(false);
+      }
       return;
     }
-    if (!isPolling) setLoadingMessages(true);
+
+    if (isPolling) {
+      if (activeChatKeyRef.current !== expectedKey || msgPollingInFlightRef.current) {
+        return;
+      }
+      msgPollingInFlightRef.current = true;
+    } else {
+      if (msgAbortControllerRef.current) {
+        try {
+          msgAbortControllerRef.current.abort();
+        } catch (_) {}
+      }
+      msgRequestGenRef.current += 1;
+      setLoadingMessages(true);
+    }
+
+    const reqGen = msgRequestGenRef.current;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (!isPolling) {
+      msgAbortControllerRef.current = controller;
+    }
+
     try {
-      const response = await api.get(`/whatsapp/conversations/${conversationId}/messages/`);
-      const rawList = Array.isArray(response.data.messages) ? response.data.messages : [];
+      const response = await api.get(
+        `/whatsapp/conversations/${conversationId}/messages/`,
+        controller ? { signal: controller.signal } : undefined
+      );
+      if (activeChatKeyRef.current !== expectedKey || msgRequestGenRef.current !== reqGen) {
+        return;
+      }
+      const rawList = Array.isArray(response.data?.messages) ? response.data.messages : [];
       // Sort strictly in ascending chronological order (oldest -> newest) using original WhatsApp timestamp
       const sorted = [...rawList].sort((a, b) => {
         const tsA = new Date(a.waha_timestamp || a.sent_at || a.created_at || 0).getTime();
         const tsB = new Date(b.waha_timestamp || b.sent_at || b.created_at || 0).getTime();
-        return tsA - tsB;
+        if (tsA !== tsB) return tsA - tsB;
+        const cA = new Date(a.created_at || 0).getTime();
+        const cB = new Date(b.created_at || 0).getTime();
+        if (cA !== cB) return cA - cB;
+        return String(a.id || '').localeCompare(String(b.id || ''));
       });
       setMessages(sorted);
       if (!isPolling) {
         setTimeout(scrollToBottom, 150);
       }
     } catch (error) {
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        return;
+      }
       console.error('Failed to fetch messages:', error);
     } finally {
-      if (!isPolling) setLoadingMessages(false);
+      if (isPolling) {
+        msgPollingInFlightRef.current = false;
+      } else if (activeChatKeyRef.current === expectedKey && msgRequestGenRef.current === reqGen) {
+        setLoadingMessages(false);
+      }
     }
-  }, []);
+  }, [selectedSession?.session_name]);
 
   // Automatically synchronize missing messages from the last 2 days when user opens WhatsApp or returns online
   const runTwoDayHistorySync = useCallback(async () => {
@@ -865,9 +912,27 @@ export default function WhatsappPage() {
   }, [runTwoDayHistorySync]);
 
   useEffect(() => {
+    const sessName = selectedSession?.session_name || '';
+    const chatIdKey = selectedChat?.id || '';
+    const nextKey = `${sessName}::${chatIdKey}`;
+    const keyChanged = activeChatKeyRef.current !== nextKey;
+    activeChatKeyRef.current = nextKey;
+
+    if (keyChanged) {
+      if (msgAbortControllerRef.current) {
+        try {
+          msgAbortControllerRef.current.abort();
+        } catch (_) {}
+      }
+      msgRequestGenRef.current += 1;
+      msgPollingInFlightRef.current = false;
+      setMessages([]);
+    }
+
+    let cancelled = false;
     if (selectedChat) {
       if (!String(selectedChat.id).startsWith('temp-')) {
-        fetchMessages(selectedChat.id);
+        fetchMessages(selectedChat.id, false, sessName);
       } else {
         setMessages([]);
       }
@@ -876,12 +941,20 @@ export default function WhatsappPage() {
       if (selectedChat.chat_id) {
         api.get(`/whatsapp/contact-info/${selectedChat.chat_id}/`)
           .then(r => {
-            if (r.data) setWahaContact(r.data);
+            if (!cancelled && activeChatKeyRef.current === nextKey && r.data) {
+              setWahaContact(r.data);
+            }
           })
           .catch(err => console.error('Contact info error:', err));
       }
+    } else {
+      setMessages([]);
+      setWahaContact(null);
     }
-  }, [selectedChat, fetchMessages]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedChat?.id, selectedChat?.chat_id, selectedSession?.session_name, fetchMessages]);
 
   // Polling for new incoming messages & conversations
   useEffect(() => {
@@ -1554,20 +1627,29 @@ export default function WhatsappPage() {
     if (isGroup) {
       return chat.whatsapp_name || chat.contact_name || 'WhatsApp Group';
     }
-    // 1. CRM Key Person Name (e.g. "Mohanraj")
-    if (chat.contact_name && !isLidNumber(chat.contact_name)) return chat.contact_name;
-
-    // 2. WhatsApp Profile PushName (e.g. "Rocky", "Mohanraj")
-    if (chat.whatsapp_name && !chat.whatsapp_name.startsWith('+') && !chat.whatsapp_name.includes('@') && !isLidNumber(chat.whatsapp_name)) {
+    // 1. Actual sender's WhatsApp pushName / verified profile name
+    if (
+      chat.whatsapp_name &&
+      chat.whatsapp_name.toLowerCase() !== 'whatsapp contact' &&
+      !chat.whatsapp_name.startsWith('+') &&
+      !chat.whatsapp_name.includes('@') &&
+      !isLidNumber(chat.whatsapp_name) &&
+      !/^[\d\s\-+()]+$/.test(chat.whatsapp_name)
+    ) {
       return chat.whatsapp_name;
     }
 
-    // 3. Contact mobile number (derived from before @c.us)
+    // 2. Verified CRM Key Person Name (only when conversation is verified/matched)
+    if (chat.is_matched && chat.contact_name && !isLidNumber(chat.contact_name) && chat.contact_name.toLowerCase() !== 'whatsapp contact') {
+      return chat.contact_name;
+    }
+
+    // 3. Verified contact mobile number
     const phone = getConversationPhoneNumber(chat);
     if (phone) return phone;
 
-    // 4. Fallback name
-    if (chat.whatsapp_name && !isLidNumber(chat.whatsapp_name) && !chat.whatsapp_name.includes('@')) return chat.whatsapp_name;
+    // 4. Safe unresolved WhatsApp identifier
+    if (chat.chat_id) return chat.chat_id;
 
     return 'WhatsApp Contact';
   };
@@ -1638,18 +1720,14 @@ export default function WhatsappPage() {
       }
     }
 
-    // Deduplicate so chats with identical phone number never appear twice
-    if (!chat.is_synthetic && !chat.chat_id?.endsWith('@g.us')) {
-      const rawD = (getConversationPhoneNumber(chat) || chat.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-      const key = rawD.length >= 10 ? rawD.slice(-10) : rawD;
-      if (key) {
-        return index === self.findIndex(other => {
-          if (other.chat_id?.endsWith('@g.us')) return false;
-          const oRaw = (getConversationPhoneNumber(other) || other.chat_id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-          const oKey = oRaw.length >= 10 ? oRaw.slice(-10) : oRaw;
-          return oKey && oKey === key;
-        });
-      }
+    // Deduplicate only by exact canonical chat_id (never by partial 8/10-digit suffix)
+    if (!chat.is_synthetic && chat.chat_id) {
+      const canonicalJid = String(chat.chat_id).replace(/:[0-9]+@/, '@').replace('@s.whatsapp.net', '@c.us');
+      return index === self.findIndex(other => {
+        if (!other.chat_id) return false;
+        const otherJid = String(other.chat_id).replace(/:[0-9]+@/, '@').replace('@s.whatsapp.net', '@c.us');
+        return otherJid === canonicalJid;
+      });
     }
     return true;
   });

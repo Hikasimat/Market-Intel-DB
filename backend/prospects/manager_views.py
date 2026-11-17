@@ -5,55 +5,46 @@ GET /api/manager-dashboard/?date=YYYY-MM-DD
 
 Returns aggregated PRE/LQ performance metrics for the given reporting date.
 All calculations use MANAGER_REPORT_TIMEZONE from settings (defaults to TIME_ZONE).
+
+Note: Manager Email Activity & Daily Email Activity AI Report views now live in
+`email_ai.views` and are re-exported here for backward compatibility.
 """
-import hashlib
 from datetime import date as date_type
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
 from django.utils import timezone
+from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework import status
 
 from accounts.permissions import IsManagerOrSuperuser
+from email_ai.views import (  # noqa: F401
+    _day_bounds,
+    _get_authorized_all_users_for_manager,
+    _get_authorized_pre_users_for_manager,
+    _get_report_tz,
+    _parse_date_range_bounds,
+    _serialize_daily_user_report,
+    manager_daily_email_report,
+    manager_daily_email_report_refresh,
+    manager_email_activity_detail,
+    manager_email_activity_list,
+    manager_email_summary_refresh,
+)
 from .models import (
-    Prospect, LeadQualification, CallActivity, CommunicationActivity,
-    OutreachEmail, EmailThread, EmailThreadMessage,
+    CallActivity,
+    CommunicationActivity,
+    LeadQualification,
+    OutreachEmail,
+    Prospect,
 )
-from .serializers import (
-    ProspectSerializer, EmailThreadListSerializer, EmailThreadDetailSerializer,
-)
+from .serializers import ProspectSerializer
 
 User = get_user_model()
 
-# ────────────────────────────────────────────────────────────────────────────
-# Timezone helpers
-# ────────────────────────────────────────────────────────────────────────────
 
-def _get_report_tz():
-    import zoneinfo
-    tz_name = getattr(settings, 'MANAGER_REPORT_TIMEZONE', settings.TIME_ZONE)
-    try:
-        return zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        return timezone.utc
-
-
-def _day_bounds(reporting_date):
-    """Return (day_start, day_end) as aware datetimes in the reporting timezone."""
-    import datetime
-    tz = _get_report_tz()
-    day_start = timezone.datetime(
-        reporting_date.year, reporting_date.month, reporting_date.day,
-        0, 0, 0, tzinfo=tz
-    )
-    day_end = day_start + datetime.timedelta(days=1)
-    return day_start, day_end
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # ────────────────────────────────────────────────────────────────────────────
 # LQ distribution helper: prospects mapped directly to their creator PRE user
 # ────────────────────────────────────────────────────────────────────────────
@@ -71,7 +62,6 @@ def _get_lq_assignment_map():
     """
     Returns a dict: {user_id: [prospect_id, ...]} for ALL prospects,
     mapping prospects directly to the creator PRE user (or assigned_lq).
-    Removes the 5-record split and round-robin formula entirely.
     """
     users = list(
         User.objects.filter(profile__role__in=['PRE', 'LQ'], is_superuser=False)
@@ -105,14 +95,9 @@ def _get_lq_assignment_map():
 
 
 def _get_lq_received_on_date(lq_user_id, day_start, day_end, assignment_map):
-    """
-    Return list of prospect IDs assigned to lq_user_id that were created on the given day.
-    Uses the pre-computed global assignment map so we honour the full ordering.
-    """
     assigned_ids = assignment_map.get(lq_user_id, [])
     if not assigned_ids:
         return []
-    # Filter to those created on the selected date
     return list(
         Prospect.objects.filter(
             id__in=assigned_ids,
@@ -122,22 +107,9 @@ def _get_lq_received_on_date(lq_user_id, day_start, day_end, assignment_map):
     )
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Deterministic audit sample
-# ────────────────────────────────────────────────────────────────────────────
-
 def _stable_sample(prospect_ids, reporting_date, lq_user_id, n=10):
-    """
-    Returns the first n records created/assigned on this day for the user.
-    Sorting by id guarantees chronological order, so the list never shifts
-    even if new records are added later in the day.
-    """
     return sorted(prospect_ids)[:n]
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Main analytics view
-# ────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([IsManagerOrSuperuser])
@@ -147,7 +119,6 @@ def manager_dashboard(request):
 
     Returns structured analytics for the Manager dashboard.
     """
-    # --- Resolve reporting date ---
     date_str = request.query_params.get('date')
     if date_str:
         try:
@@ -163,21 +134,18 @@ def manager_dashboard(request):
 
     day_start, day_end = _day_bounds(reporting_date)
 
-    # --- Fetch all LQ users and assignment map once ---
     lq_user_ids = _get_all_lq_users()
     lq_users_qs = User.objects.filter(id__in=lq_user_ids).select_related('profile')
     lq_users = list(lq_users_qs)
 
     assignment_map = _get_lq_assignment_map()
 
-    # --- PRE users ---
     pre_users = list(
         User.objects.filter(profile__role='PRE', is_superuser=False)
         .select_related('profile')
         .order_by('id')
     )
 
-    # ── PRE DAILY PRODUCTION ──────────────────────────────────────────────
     pre_users_data = []
     total_pre_entered = 0
     for pre_user in pre_users:
@@ -194,7 +162,6 @@ def manager_dashboard(request):
         })
         total_pre_entered += count
 
-    # ── LQ DAILY METRICS ─────────────────────────────────────────────────
     lq_users_data = []
     total_lq_received = 0
     total_attended = 0
@@ -207,13 +174,11 @@ def manager_dashboard(request):
         received_count = len(received_ids)
         total_lq_received += received_count
 
-        # Attended: attended_at on the selected date
         attended_count = LeadQualification.objects.filter(
             attended_at__gte=day_start,
             attended_at__lt=day_end,
             decision_by=lq_user,
         ).count()
-        # Fallback: if decision_by not set, use qualified_by
         attended_count_fallback = LeadQualification.objects.filter(
             attended_at__gte=day_start,
             attended_at__lt=day_end,
@@ -223,7 +188,6 @@ def manager_dashboard(request):
         attended_count = attended_count + attended_count_fallback
         total_attended += attended_count
 
-        # Lead Qualified decisions on this date
         lq_count = LeadQualification.objects.filter(
             decision_at__gte=day_start,
             decision_at__lt=day_end,
@@ -232,7 +196,6 @@ def manager_dashboard(request):
         ).count()
         total_lead_qualified += lq_count
 
-        # Not Lead Qualified decisions on this date (decided but not LQ)
         not_lq_count = LeadQualification.objects.filter(
             decision_at__gte=day_start,
             decision_at__lt=day_end,
@@ -240,7 +203,6 @@ def manager_dashboard(request):
         ).exclude(qualification_status='Lead Qualified').exclude(
             qualification_status='Unqualified'
         ).count()
-        # Also count explicitly disqualified etc on this day
         not_lq_count_2 = LeadQualification.objects.filter(
             decision_at__gte=day_start,
             decision_at__lt=day_end,
@@ -250,7 +212,6 @@ def manager_dashboard(request):
         not_lq_count = max(not_lq_count, not_lq_count_2)
         total_not_lead_qualified += not_lq_count
 
-        # Activities: calls + emails + comm activity on this date by this user
         calls_count = CallActivity.objects.filter(
             created_by=lq_user,
             created_at__gte=day_start,
@@ -263,7 +224,6 @@ def manager_dashboard(request):
         ).count()
         total_activities += calls_count + emails_count
 
-        # PRE → LQ source breakdown for received records on this date
         pre_source = {}
         if received_ids:
             qs = Prospect.objects.filter(
@@ -287,7 +247,6 @@ def manager_dashboard(request):
             'pre_source': pre_source,
         })
 
-    # ── PRE AUDIT SAMPLES ─────────────────────────────────────────────────
     pre_audit_samples = []
     for pre_user in pre_users:
         entered_ids = list(Prospect.objects.filter(
@@ -295,7 +254,7 @@ def manager_dashboard(request):
             created_at__gte=day_start,
             created_at__lt=day_end,
         ).values_list('id', flat=True))
-        
+
         sample_ids = _stable_sample(entered_ids, reporting_date, pre_user.id, n=10)
         sample_prospects = []
         if sample_ids:
@@ -334,7 +293,6 @@ def manager_dashboard(request):
             'sample': sample_prospects,
         })
 
-    # ── LQ AUDIT SAMPLES ──────────────────────────────────────────────────
     audit_samples = []
     for lq_user in lq_users:
         received_ids = _get_lq_received_on_date(lq_user.id, day_start, day_end, assignment_map)
@@ -364,7 +322,6 @@ def manager_dashboard(request):
                     distinct=True
                 )
             )
-            # Build dict to preserve stable order
             p_dict = {str(p.id): p for p in prospects_qs}
             for pid in sample_ids:
                 p = p_dict.get(str(pid))
@@ -379,8 +336,7 @@ def manager_dashboard(request):
                     'attended_at': lq_obj.attended_at.isoformat() if lq_obj and lq_obj.attended_at else None,
                     'decision_at': lq_obj.decision_at.isoformat() if lq_obj and lq_obj.decision_at else None,
                 })
-                
-                # Retrieve LQ activities performed today on this prospect
+
                 activities = []
                 comm_acts = CommunicationActivity.objects.filter(
                     prospect=p,
@@ -390,10 +346,10 @@ def manager_dashboard(request):
                 ).order_by('created_at')
                 for ca in comm_acts:
                     activities.append(f"{ca.get_activity_type_display()} - {ca.status or 'Completed'}")
-                    
+
                 if lq_obj and lq_obj.decision_at and day_start <= lq_obj.decision_at < day_end:
                     activities.append(f"Record decision: {lq_obj.qualification_status}")
-                    
+
                 item_data['lq_activities'] = activities
                 sample_prospects.append(item_data)
 
@@ -405,7 +361,6 @@ def manager_dashboard(request):
             'sample': sample_prospects,
         })
 
-    # ── PRE → LQ DISTRIBUTION SUMMARY ───────────────────────────────────
     lq_pre_distribution = []
     for entry in lq_users_data:
         lq_pre_distribution.append({
@@ -415,10 +370,7 @@ def manager_dashboard(request):
             'pre_source': entry['pre_source'],
         })
 
-    # ── USER ACTIVITY (date-wise) ─────────────────────────────────────────
     user_activity = []
-
-    # PRE activity (including unified LQ tasks)
     for pre_user in pre_users:
         entered = Prospect.objects.filter(
             created_by=pre_user.username,
@@ -478,7 +430,6 @@ def manager_dashboard(request):
                 'not_lead_qualified': not_lq_decisions,
             })
 
-    # Legacy LQ users if any distinct from pre_users
     pre_user_ids = {u.id for u in pre_users}
     for lq_user in lq_users:
         if lq_user.id in pre_user_ids:
@@ -530,7 +481,6 @@ def manager_dashboard(request):
                 'not_lead_qualified': not_lq_decisions,
             })
 
-    # ── SUMMARY ──────────────────────────────────────────────────────────
     summary = {
         'pre_entered': total_pre_entered,
         'lq_received': total_lq_received,
@@ -552,457 +502,3 @@ def manager_dashboard(request):
         'audit_samples': audit_samples,
         'user_activity': user_activity,
     })
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Manager Email Activity & AI Conversation Summaries (Part B)
-# ────────────────────────────────────────────────────────────────────────────
-
-def _get_authorized_pre_users_for_manager(request_user):
-    """
-    Dynamically return active PRE/LQ users within the manager's authorized company scope.
-    Superusers can view all companies.
-    Managers with company assigned see only PRE/LQ users in that same company.
-    Managers without a company see PRE/LQ users without a company (backward compatibility).
-    Never uses hardcoded user IDs or fixed user counts.
-    """
-    qs = User.objects.filter(
-        is_active=True,
-        is_superuser=False,
-        profile__role__in=['PRE', 'LQ'],
-    ).select_related('profile').order_by('id')
-
-    if request_user.is_superuser:
-        return qs
-
-    mgr_company_id = getattr(getattr(request_user, 'profile', None), 'company_id', None)
-    if mgr_company_id is not None:
-        return qs.filter(profile__company_id=mgr_company_id)
-    return qs.filter(profile__company__isnull=True)
-
-
-def _parse_date_range_bounds(request):
-    """Parse optional ?date=YYYY-MM-DD or ?date_from=...&date_to=... into UTC aware datetimes."""
-    import datetime
-    single_date = (request.query_params.get('date') or '').strip()
-    date_from = (request.query_params.get('date_from') or '').strip()
-    date_to = (request.query_params.get('date_to') or '').strip()
-
-    tz = _get_report_tz()
-    start_dt = None
-    end_dt = None
-
-    if single_date:
-        try:
-            d = date_type.fromisoformat(single_date)
-            return _day_bounds(d)
-        except ValueError:
-            pass
-
-    if date_from:
-        try:
-            df = date_type.fromisoformat(date_from)
-            start_dt = timezone.datetime(df.year, df.month, df.day, 0, 0, 0, tzinfo=tz)
-        except ValueError:
-            pass
-
-    if date_to:
-        try:
-            dt = date_type.fromisoformat(date_to)
-            end_dt = timezone.datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=tz) + datetime.timedelta(days=1)
-        except ValueError:
-            pass
-
-    return start_dt, end_dt
-
-
-@api_view(['GET'])
-@permission_classes([IsManagerOrSuperuser])
-def manager_email_activity_list(request):
-    """
-    GET /api/manager-dashboard/email-activity/
-    Returns paginated email conversation threads + AI summaries across all
-    authorized PRE/LQ users with filters (pre_user_id, date, date_from, date_to,
-    search, status, direction, match_status).
-    """
-    import sys
-    from .email_thread_service import (
-        backfill_outreach_emails_to_threads,
-        sync_authorized_mailboxes,
-    )
-    from .email_summarizer import schedule_thread_summary, _resolve_provider_and_key
-
-    authorized_users = list(_get_authorized_pre_users_for_manager(request.user))
-    authorized_ids = [u.id for u in authorized_users]
-
-    # Opportunistic idempotent backfill for legacy OutreachEmail records without threads
-    if authorized_ids and OutreachEmail.objects.filter(
-        created_by_id__in=authorized_ids,
-        thread_message__isnull=True,
-    ).exists():
-        try:
-            backfill_outreach_emails_to_threads(authorized_ids)
-        except Exception:
-            pass
-
-    base_qs = (
-        EmailThread.objects
-        .select_related('owner', 'owner__profile', 'prospect', 'prospect_contact')
-        .filter(owner_id__in=authorized_ids)
-    )
-
-    # Filter by specific PRE user (strictly within authorized scope)
-    pre_user_id = (request.query_params.get('pre_user_id') or '').strip()
-    filter_uid = None
-    if pre_user_id and pre_user_id.lower() != 'all':
-        try:
-            uid_int = int(pre_user_id)
-        except ValueError:
-            return Response({'detail': 'Invalid pre_user_id.'}, status=status.HTTP_400_BAD_REQUEST)
-        if uid_int not in authorized_ids:
-            # Distinguish out-of-tenant unauthorized user from nonexistent user cleanly
-            if User.objects.filter(pk=uid_int).exists():
-                return Response(
-                    {'detail': 'You are not authorized to access this PRE user.'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            base_qs = base_qs.none()
-        else:
-            filter_uid = uid_int
-            base_qs = base_qs.filter(owner_id=uid_int)
-
-    # Sync incoming replies from authorized PRE Gmail mailboxes automatically
-    # (cooldown-throttled every 30s unless ?sync=true; skipped inside unit test runs unless ?sync=true)
-    sync_param = (request.query_params.get('sync') or '').strip().lower()
-    force_sync = sync_param in ('1', 'true', 'yes')
-    running_tests = ('test' in sys.argv)
-    if authorized_ids and (force_sync or not running_tests):
-        try:
-            sync_authorized_mailboxes(
-                authorized_ids,
-                pre_user_id=filter_uid,
-                force=force_sync,
-                limit=25,
-            )
-        except Exception:
-            pass
-
-    # Date range filter
-    start_dt, end_dt = _parse_date_range_bounds(request)
-    if start_dt is not None:
-        base_qs = base_qs.filter(
-            Q(last_message_at__gte=start_dt)
-            | Q(last_message_at__isnull=True, created_at__gte=start_dt)
-        )
-    if end_dt is not None:
-        base_qs = base_qs.filter(
-            Q(last_message_at__lt=end_dt)
-            | Q(last_message_at__isnull=True, created_at__lt=end_dt)
-        )
-
-    # Status / Direction / Match Status filters
-    status_filter = (request.query_params.get('status') or '').strip().upper()
-    if status_filter and status_filter != 'ALL':
-        base_qs = base_qs.filter(status=status_filter)
-
-    direction_filter = (request.query_params.get('direction') or '').strip().upper()
-    if direction_filter and direction_filter != 'ALL':
-        base_qs = base_qs.filter(last_direction=direction_filter)
-
-    match_filter = (request.query_params.get('match_status') or '').strip().upper()
-    if match_filter and match_filter != 'ALL':
-        base_qs = base_qs.filter(match_status=match_filter)
-
-    # Search filter (subject, correspondent, prospect, snippet, summary)
-    search_q = (request.query_params.get('search') or '').strip()
-    if search_q:
-        base_qs = base_qs.filter(
-            Q(subject__icontains=search_q)
-            | Q(correspondent_email__icontains=search_q)
-            | Q(correspondent_name__icontains=search_q)
-            | Q(mailbox_email__icontains=search_q)
-            | Q(prospect__company_name__icontains=search_q)
-            | Q(last_snippet__icontains=search_q)
-            | Q(summary_text__icontains=search_q)
-            | Q(owner__username__icontains=search_q)
-            | Q(owner__first_name__icontains=search_q)
-            | Q(owner__last_name__icontains=search_q)
-        )
-
-    # Aggregate counts before pagination
-    agg = base_qs.aggregate(
-        total=Count('id'),
-        waiting=Count('id', filter=Q(status=EmailThread.Status.WAITING_REPLY)),
-        replied=Count('id', filter=Q(status=EmailThread.Status.REPLIED)),
-        failed=Count('id', filter=Q(status=EmailThread.Status.FAILED)),
-        unmatched=Count('id', filter=Q(match_status=EmailThread.MatchStatus.UNMATCHED)),
-    )
-
-    # Dynamic list of authorized PRE users + per-user thread counts
-    per_user_counts = dict(
-        EmailThread.objects.filter(owner_id__in=authorized_ids)
-        .values('owner_id')
-        .annotate(c=Count('id'))
-        .values_list('owner_id', 'c')
-    )
-    pre_users_meta = [
-        {
-            'id': u.id,
-            'name': u.get_full_name() or u.username,
-            'username': u.username,
-            'email': u.email,
-            'role': getattr(getattr(u, 'profile', None), 'role', 'PRE'),
-            'thread_count': per_user_counts.get(u.id, 0),
-        }
-        for u in authorized_users
-    ]
-
-    # Pagination
-    try:
-        page = max(1, int(request.query_params.get('page') or 1))
-    except ValueError:
-        page = 1
-    try:
-        page_size = min(100, max(1, int(request.query_params.get('page_size') or 20)))
-    except ValueError:
-        page_size = 20
-
-    total_count = agg['total'] or 0
-    total_pages = max(1, (total_count + page_size - 1) // page_size)
-    offset = (page - 1) * page_size
-
-    page_threads = list(base_qs.order_by('-last_message_at', '-updated_at')[offset:offset + page_size])
-
-    # Trigger non-blocking summary for any page thread still PENDING
-    for th in page_threads:
-        if th.summary_status == EmailThread.SummaryStatus.PENDING and th.message_count > 0:
-            schedule_thread_summary(th.id)
-
-    serializer = EmailThreadListSerializer(page_threads, many=True)
-    return Response({
-        'count': total_count,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': total_pages,
-        'pre_users': pre_users_meta,
-        'stats': {
-            'total_threads': total_count,
-            'waiting_reply': agg['waiting'] or 0,
-            'replied': agg['replied'] or 0,
-            'failed': agg['failed'] or 0,
-            'unmatched': agg['unmatched'] or 0,
-        },
-        'results': serializer.data,
-    })
-
-
-@api_view(['GET'])
-@permission_classes([IsManagerOrSuperuser])
-def manager_email_activity_detail(request, thread_id):
-    """
-    GET /api/manager-dashboard/email-activity/<uuid:thread_id>/
-    Returns chronological full email thread messages & safe metadata for the manager.
-    """
-    authorized_ids = list(
-        _get_authorized_pre_users_for_manager(request.user).values_list('id', flat=True)
-    )
-    thread = (
-        EmailThread.objects
-        .select_related('owner', 'owner__profile', 'prospect', 'prospect_contact')
-        .prefetch_related('messages')
-        .filter(pk=thread_id)
-        .first()
-    )
-    if not thread:
-        return Response({'detail': 'Email thread not found.'}, status=status.HTTP_404_NOT_FOUND)
-    if thread.owner_id not in authorized_ids and not request.user.is_superuser:
-        return Response({'detail': 'You are not authorized to view this email thread.'}, status=status.HTTP_403_FORBIDDEN)
-
-    if thread.summary_status == EmailThread.SummaryStatus.PENDING and thread.message_count > 0:
-        from .email_summarizer import schedule_thread_summary
-        schedule_thread_summary(thread.id)
-
-    serializer = EmailThreadDetailSerializer(thread)
-    return Response(serializer.data)
-
-
-@api_view(['POST'])
-@permission_classes([IsManagerOrSuperuser])
-def manager_email_summary_refresh(request, thread_id):
-    """
-    POST /api/manager-dashboard/email-activity/<uuid:thread_id>/refresh-summary/
-    Forces regeneration of the AI conversation summary for the given thread.
-    """
-    from .email_summarizer import summarize_email_thread
-
-    authorized_ids = list(
-        _get_authorized_pre_users_for_manager(request.user).values_list('id', flat=True)
-    )
-    thread = EmailThread.objects.filter(pk=thread_id).first()
-    if not thread:
-        return Response({'detail': 'Email thread not found.'}, status=status.HTTP_404_NOT_FOUND)
-    if thread.owner_id not in authorized_ids and not request.user.is_superuser:
-        return Response({'detail': 'You are not authorized to refresh this thread summary.'}, status=status.HTTP_403_FORBIDDEN)
-
-    result = summarize_email_thread(thread.id, force=True)
-    thread.refresh_from_db()
-    data = EmailThreadListSerializer(thread).data
-    data['refresh_result'] = result
-    return Response(data, status=status.HTTP_200_OK)
-
-
-def _get_authorized_all_users_for_manager(request_user):
-    """
-    Dynamically return all active non-superuser users within the manager's company scope
-    (all roles) so the daily email activity report covers every existing user.
-    """
-    qs = User.objects.filter(
-        is_active=True,
-        is_superuser=False,
-    ).select_related('profile').order_by('id')
-
-    if request_user.is_superuser:
-        return qs
-
-    mgr_company_id = getattr(getattr(request_user, 'profile', None), 'company_id', None)
-    if mgr_company_id is not None:
-        return qs.filter(profile__company_id=mgr_company_id)
-    return qs.filter(profile__company__isnull=True)
-
-
-def _serialize_daily_user_report(user, report):
-    return {
-        'user_id': user.id,
-        'username': user.username,
-        'name': user.get_full_name() or user.username,
-        'email': user.email,
-        'role': getattr(getattr(user, 'profile', None), 'role', 'PRE'),
-        'report_date': report.report_date.isoformat(),
-        'emails_received': report.emails_received,
-        'emails_sent': report.emails_sent,
-        'sent_received_responses': report.sent_received_responses,
-        'pending_responses': report.pending_responses,
-        'overall_summary': report.overall_summary,
-        'recommended_actions': report.recommended_actions,
-        'summary_status': report.summary_status,
-        'summary_provider': report.summary_provider,
-        'summary_model': report.summary_model,
-        'summary_error': report.summary_error,
-        'generated_at': report.generated_at.isoformat() if report.generated_at else None,
-    }
-
-
-@api_view(['GET'])
-@permission_classes([IsManagerOrSuperuser])
-def manager_daily_email_report(request):
-    """
-    GET /api/manager-dashboard/daily-email-report/?date=YYYY-MM-DD
-    Returns a user-wise daily email activity report with Gemini AI analysis and
-    exact counts (received, sent, sent_received_responses, pending_responses)
-    for every existing active user in the manager's authorized scope.
-    """
-    import sys
-    from .email_thread_service import backfill_outreach_emails_to_threads, sync_authorized_mailboxes
-    from .email_summarizer import generate_daily_user_email_report
-
-    date_param = (request.query_params.get('date') or '').strip()
-    tz = _get_report_tz()
-    if date_param:
-        try:
-            report_date = date_type.fromisoformat(date_param)
-        except ValueError:
-            return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
-    else:
-        report_date = timezone.now().astimezone(tz).date()
-
-    day_start, day_end = _day_bounds(report_date)
-
-    authorized_users = list(_get_authorized_all_users_for_manager(request.user))
-    target_user_id_raw = (request.query_params.get('user_id') or '').strip()
-    if target_user_id_raw and target_user_id_raw.lower() != 'all':
-        try:
-            target_uid = int(target_user_id_raw)
-        except ValueError:
-            return Response({'detail': 'Invalid user_id.'}, status=status.HTTP_400_BAD_REQUEST)
-        auth_ids = {u.id for u in authorized_users}
-        if target_uid not in auth_ids:
-            if User.objects.filter(pk=target_uid).exists():
-                return Response({'detail': 'You are not authorized to access this user.'}, status=status.HTTP_403_FORBIDDEN)
-            return Response({'date': report_date.isoformat(), 'users': [], 'totals': {
-                'total_users': 0, 'emails_received': 0, 'emails_sent': 0,
-                'sent_received_responses': 0, 'pending_responses': 0,
-            }})
-        authorized_users = [u for u in authorized_users if u.id == target_uid]
-
-    user_ids = [u.id for u in authorized_users]
-    if user_ids and OutreachEmail.objects.filter(created_by_id__in=user_ids, thread_message__isnull=True).exists():
-        try:
-            backfill_outreach_emails_to_threads(user_ids)
-        except Exception:
-            pass
-
-    sync_param = (request.query_params.get('sync') or '').strip().lower()
-    force_sync = sync_param in ('1', 'true', 'yes')
-    force_regen = (request.query_params.get('force') or '').strip().lower() in ('1', 'true', 'yes')
-    running_tests = ('test' in sys.argv)
-    if user_ids and (force_sync or not running_tests):
-        try:
-            sync_authorized_mailboxes(user_ids, force=force_sync, limit=25)
-        except Exception:
-            pass
-
-    user_reports = []
-    totals = {
-        'total_users': len(authorized_users),
-        'emails_received': 0,
-        'emails_sent': 0,
-        'sent_received_responses': 0,
-        'pending_responses': 0,
-    }
-    for u in authorized_users:
-        report = generate_daily_user_email_report(
-            u, report_date, day_start, day_end, force=force_regen
-        )
-        serialized = _serialize_daily_user_report(u, report)
-        user_reports.append(serialized)
-        totals['emails_received'] += report.emails_received
-        totals['emails_sent'] += report.emails_sent
-        totals['sent_received_responses'] += report.sent_received_responses
-        totals['pending_responses'] += report.pending_responses
-
-    return Response({
-        'date': report_date.isoformat(),
-        'totals': totals,
-        'users': user_reports,
-    }, status=status.HTTP_200_OK)
-
-
-@api_view(['POST'])
-@permission_classes([IsManagerOrSuperuser])
-def manager_daily_email_report_refresh(request, user_id):
-    """
-    POST /api/manager-dashboard/daily-email-report/<int:user_id>/refresh/
-    Forces Gemini AI regeneration of a single user's daily email activity summary.
-    """
-    from .email_summarizer import generate_daily_user_email_report
-
-    authorized_users = list(_get_authorized_all_users_for_manager(request.user))
-    target_user = next((u for u in authorized_users if u.id == user_id), None)
-    if not target_user:
-        if User.objects.filter(pk=user_id).exists():
-            return Response({'detail': 'You are not authorized to refresh this user report.'}, status=status.HTTP_403_FORBIDDEN)
-        return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-    date_param = (request.data.get('date') or request.query_params.get('date') or '').strip()
-    tz = _get_report_tz()
-    if date_param:
-        try:
-            report_date = date_type.fromisoformat(date_param)
-        except ValueError:
-            return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
-    else:
-        report_date = timezone.now().astimezone(tz).date()
-
-    day_start, day_end = _day_bounds(report_date)
-    report = generate_daily_user_email_report(target_user, report_date, day_start, day_end, force=True)
-    return Response(_serialize_daily_user_report(target_user, report), status=status.HTTP_200_OK)

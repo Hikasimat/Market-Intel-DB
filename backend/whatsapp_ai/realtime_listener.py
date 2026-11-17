@@ -87,18 +87,7 @@ def _detect_local_server_port() -> str:
 
 
 def _resolve_default_webhook_url() -> str:
-    explicit = _get_setting("WHATSAPP_WEBHOOK_PUBLIC_URL", "")
-    if explicit:
-        return explicit
-    base_url = _get_setting("WHATSAPP_SERVICE_URL", "").lower()
-    if not base_url:
-        return ""
-    port = _detect_local_server_port()
-    if "host.docker.internal" in base_url:
-        return f"http://host.docker.internal:{port}/api/whatsapp/webhook/"
-    if "localhost" in base_url or "127.0.0.1" in base_url:
-        return f"http://127.0.0.1:{port}/api/whatsapp/webhook/"
-    return ""
+    return _get_setting("WHATSAPP_WEBHOOK_PUBLIC_URL", "")
 
 
 def _reconcile_live_waha_sessions(client) -> None:

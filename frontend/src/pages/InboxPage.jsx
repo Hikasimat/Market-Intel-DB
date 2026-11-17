@@ -12,6 +12,7 @@ import { Link, useNavigate, useOutletContext } from 'react-router-dom';
 import api from '../services/api';
 import TemplatePicker from '../components/lq/TemplatePicker';
 import OpenTrackingToggle from '../components/email/OpenTrackingToggle';
+import GeminiEmailPromptBox from '../components/email/GeminiEmailPromptBox';
 import BulkCampaignModal from '../components/email/BulkCampaignModal';
 import AttachmentLibraryModal from '../components/email/AttachmentLibraryModal';
 import {
@@ -2202,6 +2203,18 @@ const InboxPage = () => {
                 setEmailBody={(val) => setComposeData(prev => ({ ...prev, body: val }))}
                 selection={templateSelection}
                 setSelection={setTemplateSelection}
+                disabled={sendingEmail}
+              />
+
+              {/* Gemini AI Personalized Email Generator */}
+              <GeminiEmailPromptBox
+                sourceContext="INBOX"
+                prospect={null}
+                recipientEmails={composeData.to ? composeData.to.split(/[,;\s]+/).filter(Boolean) : []}
+                emailSubject={composeData.subject}
+                emailBody={composeData.body}
+                setEmailSubject={(val) => setComposeData(prev => ({ ...prev, subject: val }))}
+                setEmailBody={(val) => setComposeData(prev => ({ ...prev, body: val }))}
                 disabled={sendingEmail}
               />
 

@@ -187,7 +187,7 @@ def record_outbound_email_in_thread(
     Never stores BCC recipients.
     """
     from .models import EmailThread, EmailThreadMessage
-    from .email_summarizer import schedule_thread_summary
+    from email_ai.services import schedule_thread_summary
 
     if not owner:
         return None, None
@@ -339,7 +339,7 @@ def update_outbound_send_result(
     error_message: str = "",
 ) -> None:
     from .models import EmailThread, EmailThreadMessage
-    from .email_summarizer import schedule_thread_summary
+    from email_ai.services import schedule_thread_summary
 
     try:
         msg = EmailThreadMessage.objects.select_related("thread").filter(pk=thread_message_id).first()
@@ -476,7 +476,7 @@ def ingest_fetched_messages(cred, raw_messages: list) -> dict:
         Prospect,
         ProspectContact,
     )
-    from .email_summarizer import schedule_thread_summary
+    from email_ai.services import schedule_thread_summary
 
     owner = getattr(cred, "user", None)
     if not owner or not raw_messages:

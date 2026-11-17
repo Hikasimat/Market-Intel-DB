@@ -971,60 +971,42 @@ class WhatsAppSendMessageView(APIView):
                 if alt_chat_id:
                     candidate_ids.append(alt_chat_id)
 
+                digits = re.sub(r"\D+", "", clean_chat_id.split("@")[0].split(":")[0])
+                is_grp = clean_chat_id.endswith("@g.us")
+                valid_phone_digits = (
+                    digits
+                    if (not is_grp and not clean_chat_id.endswith("@lid") and not _is_lid(digits) and 7 <= len(digits) <= 15)
+                    else ""
+                )
+                if valid_phone_digits:
+                    for exact_jid in (f"{valid_phone_digits}@c.us", f"{valid_phone_digits}@s.whatsapp.net"):
+                        if exact_jid not in candidate_ids:
+                            candidate_ids.append(exact_jid)
+
                 target_conv = WhatsAppConversation.objects.filter(
                     session=user_session,
                     chat_id__in=candidate_ids,
                 ).first()
 
-                digits = re.sub(r"\D+", "", clean_chat_id.split("@")[0].split(":")[0])
-                if not target_conv and not clean_chat_id.endswith("@g.us") and digits and len(digits) >= 8:
-                    suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-                    target_conv = WhatsAppConversation.objects.filter(
-                        session=user_session,
-                    ).filter(
-                        Q(phone_number__icontains=suffix) | Q(chat_id__icontains=suffix)
-                    ).first()
-
                 if not target_conv:
-                    # Session-scoped only: never read metadata from another session's conversation.
-                    existing_any = WhatsAppConversation.objects.filter(
-                        session=user_session, chat_id__in=candidate_ids
-                    ).first()
-                    matched_contact = existing_any.prospect_contact if existing_any else None
-                    if not matched_contact and digits and len(digits) >= 8:
-                        suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-                        matched_contact = (
-                            ProspectContact.objects.filter(phone_digits__endswith=suffix)
-                            .select_related("prospect")
-                            .first()
-                        )
-                        if not matched_contact:
-                            for c in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                                s_digits = re.sub(r"\D+", "", c.phone_number or "")
-                                if s_digits and (s_digits == digits or s_digits.endswith(suffix) or digits.endswith(s_digits[-8:])):
-                                    matched_contact = c
-                                    break
+                    from .webhooks import _match_verified_prospect_contact
 
-                    if not target_conv and matched_contact:
-                        target_conv = WhatsAppConversation.objects.filter(
-                            session=user_session,
-                            prospect_contact=matched_contact,
-                            is_deleted=False,
-                        ).first()
-
-                    phone_formatted = f"+{digits}" if digits else None
-                    is_grp = clean_chat_id.endswith("@g.us")
-                    if not target_conv:
-                        target_conv = WhatsAppConversation.objects.create(
-                            session=user_session,
-                            chat_id=clean_chat_id,
-                            account_phone=user_session.phone_number if user_session else None,
-                            phone_number=phone_formatted if not is_grp else None,
-                            prospect_contact=matched_contact if not is_grp else None,
-                            prospect=matched_contact.prospect if matched_contact else (existing_any.prospect if existing_any else None),
-                            is_matched=matched_contact is not None or (existing_any.is_matched if existing_any else False) or is_grp,
-                            whatsapp_name=matched_contact.contact_name if matched_contact else (existing_any.whatsapp_name if existing_any else ("WhatsApp Group" if is_grp else "")),
-                        )
+                    matched_contact = (
+                        _match_verified_prospect_contact(user_session, valid_phone_digits)
+                        if valid_phone_digits
+                        else None
+                    )
+                    phone_formatted = f"+{valid_phone_digits}" if valid_phone_digits else None
+                    target_conv = WhatsAppConversation.objects.create(
+                        session=user_session,
+                        chat_id=clean_chat_id,
+                        account_phone=user_session.phone_number if user_session else None,
+                        phone_number=phone_formatted if not is_grp else None,
+                        prospect_contact=matched_contact if not is_grp else None,
+                        prospect=matched_contact.prospect if matched_contact else None,
+                        is_matched=(matched_contact is not None) or is_grp,
+                        whatsapp_name=matched_contact.contact_name if matched_contact else ("WhatsApp Group" if is_grp else ""),
+                    )
 
                 if target_conv.is_deleted:
                     target_conv.is_deleted = False
@@ -1133,60 +1115,17 @@ class WhatsAppConversationsView(APIView):
             if not user_session:
                 return Response({"detail": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
         else:
-            user_session = _get_user_session(user, create=True)
+            user_session = _get_user_session(user, create=False)
 
-        qs = WhatsAppConversation.objects.select_related(
-            "prospect_contact", "prospect", "session"
-        ).filter(is_deleted=False)
-
-        # Opportunistically sync groups from WAHA for this user's active session (cached every 10 min to prevent rate-limiting)
-        if user_session and user_session.status == WhatsAppSession.Status.READY:
-            from django.core.cache import cache
-            group_sync_cache_key = f"waha_groups_sync_{user_session.id}"
-            if not cache.get(group_sync_cache_key):
-                cache.set(group_sync_cache_key, True, 600)  # 10 minutes cache
-                try:
-                    from .client import get_waha_client
-                    client = get_waha_client()
-                    waha_groups = client.get_groups(user_session.session_name)
-                    for wc in (waha_groups or []):
-                        raw_id = wc.get("id") or wc.get("gid") or wc.get("chatId") or ""
-                        c_id = re.sub(r":[0-9]+@", "@", raw_id)
-                        if not c_id:
-                            continue
-                        if not c_id.endswith("@g.us"):
-                            c_id = f"{c_id}@g.us"
-                        w_name = wc.get("name") or wc.get("subject") or "WhatsApp Group"
-
-                        conv_obj = WhatsAppConversation.objects.filter(session=user_session, chat_id=c_id).first()
-                        if not conv_obj:
-                            conv_obj = WhatsAppConversation.objects.create(
-                                session=user_session,
-                                chat_id=c_id,
-                                whatsapp_name=w_name,
-                                account_phone=user_session.phone_number,
-                                unread_count=wc.get("unreadCount", 0),
-                                is_matched=True,
-                            )
-                        elif conv_obj.is_deleted:
-                            # User explicitly deleted this group; do not restore
-                            continue
-                        elif w_name and conv_obj.whatsapp_name != w_name:
-                            conv_obj.whatsapp_name = w_name
-                            conv_obj.is_matched = True
-                            if not conv_obj.account_phone and user_session.phone_number:
-                                conv_obj.account_phone = user_session.phone_number
-                            conv_obj.save(update_fields=["whatsapp_name", "is_matched", "account_phone"])
-                except Exception as e:
-                    logger.debug("Failed to sync live WAHA groups for %s: %s", user_session.session_name, e)
-
-        # Strictly scoped to current user's session and normalized account phone number
         if not user_session:
             return Response([])
 
+        qs = WhatsAppConversation.objects.select_related(
+            "prospect_contact", "prospect_contact__prospect", "prospect", "session", "session__owner"
+        ).filter(is_deleted=False, session=user_session, session__owner=user)
+
         clean_user_phone = normalize_phone_digits(user_session.phone_number or "")
         norm_user_phone = normalize_phone_number(user_session.phone_number or "")
-        qs = qs.filter(session=user_session, session__owner=user)
         if clean_user_phone:
             qs = qs.exclude(
                 ~Q(account_phone=clean_user_phone)
@@ -1196,159 +1135,24 @@ class WhatsAppConversationsView(APIView):
                 & Q(account_phone__isnull=False)
             )
 
-        # Deduplicate conversations by canonical phone digits / contact / group ID and auto-merge duplicate threads
+        # Read-only listing: never merge records, move messages, mutate contacts, or soft-delete
+        # conversations during a GET request. Each (session, canonical chat_id) remains distinct.
         conversations = list(qs)
         canonical_convs = {}
-        duplicates_to_merge = []
-
-        # Build reverse phone mapping so conversations with and without contact share the same deduplication key
-        phone_to_key = {}
-        name_to_key = {}
         for c in conversations:
-            if not c.chat_id.endswith("@g.us"):
-                raw_d = ""
-                # Rule: Before the @c.us is the user mobile number (e.g. 9360239398@c.us -> 9360239398)
-                if c.chat_id and ("@c.us" in c.chat_id.lower() or "@s.whatsapp.net" in c.chat_id.lower()):
-                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                    if cand_d and not _is_lid(cand_d):
-                        raw_d = cand_d
-                        if not c.phone_number or _is_lid(c.phone_number):
-                            c.phone_number = f"+{cand_d}"
-                if not raw_d and c.phone_number and not _is_lid(c.phone_number) and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
-                    raw_d = re.sub(r"\D+", "", str(c.phone_number))
-                elif not raw_d and not c.chat_id.endswith("@lid"):
-                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                    if not _is_lid(cand_d):
-                        raw_d = cand_d
-
-                # Clean any lingering LID stored in c.phone_number
-                if c.phone_number and _is_lid(c.phone_number):
-                    c.phone_number = f"+{raw_d}" if raw_d else None
-
-                # Clean any lingering LID stored in c.whatsapp_name
-                if c.whatsapp_name and _is_lid(c.whatsapp_name):
-                    c.whatsapp_name = (
-                        c.prospect_contact.contact_name
-                        if (c.prospect_contact and c.prospect_contact.contact_name)
-                        else (f"+{raw_d}" if raw_d else "WhatsApp Contact")
-                    )
-
-                if len(raw_d) >= 8 and len(raw_d) <= 13:
-                    suffix = raw_d[-10:]
-                    if c.prospect_contact_id:
-                        phone_to_key[suffix] = f"contact_{c.prospect_contact_id}"
-                    elif suffix not in phone_to_key:
-                        phone_to_key[suffix] = f"phone_{suffix}"
-                    if c.whatsapp_name and not c.whatsapp_name.startswith("+"):
-                        name_to_key[c.whatsapp_name.lower().strip()] = phone_to_key[suffix]
-
-        for c in conversations:
-            if c.chat_id.endswith("@g.us"):
-                key = f"group_{c.chat_id}"
-            elif c.prospect_contact_id:
-                key = f"contact_{c.prospect_contact_id}"
-            else:
-                raw_d = ""
-                if c.chat_id and ("@c.us" in c.chat_id.lower() or "@s.whatsapp.net" in c.chat_id.lower()):
-                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                    if cand_d and not _is_lid(cand_d):
-                        raw_d = cand_d
-                if not raw_d and c.phone_number and not _is_lid(c.phone_number) and len(re.sub(r"\D+", "", str(c.phone_number))) <= 13:
-                    raw_d = re.sub(r"\D+", "", str(c.phone_number))
-                elif not raw_d and not c.chat_id.endswith("@lid"):
-                    cand_d = re.sub(r"\D+", "", c.chat_id.split("@")[0].split(":")[0])
-                    if not _is_lid(cand_d):
-                        raw_d = cand_d
-                suffix = raw_d[-10:] if (len(raw_d) >= 8 and len(raw_d) <= 13) else None
-                if suffix and suffix in phone_to_key:
-                    key = phone_to_key[suffix]
-                elif c.whatsapp_name and c.whatsapp_name.lower().strip() in name_to_key:
-                    key = name_to_key[c.whatsapp_name.lower().strip()]
-                else:
-                    key = c.chat_id
-
+            raw_cid = str(c.chat_id or "").strip()
+            norm_cid = re.sub(r":[0-9]+@", "@", raw_cid).replace("@s.whatsapp.net", "@c.us")
+            key = norm_cid or str(c.pk)
             if key not in canonical_convs:
                 canonical_convs[key] = c
             else:
                 existing = canonical_convs[key]
-                # Prioritize real phone conversation over @lid conversation as primary
-                if not c.chat_id.endswith("@lid") and existing.chat_id.endswith("@lid"):
-                    primary, secondary = c, existing
-                elif c.chat_id.endswith("@lid") and not existing.chat_id.endswith("@lid"):
-                    primary, secondary = existing, c
-                elif c.prospect_contact and not existing.prospect_contact:
-                    primary, secondary = c, existing
-                elif existing.prospect_contact and not c.prospect_contact:
-                    primary, secondary = existing, c
-                else:
-                    c_time = c.last_message_at or c.updated_at
-                    ex_time = existing.last_message_at or existing.updated_at
-                    primary, secondary = (c, existing) if (c_time and ex_time and c_time > ex_time) else (existing, c)
-                canonical_convs[key] = primary
-                duplicates_to_merge.append((primary, secondary))
-
-        for primary, secondary in duplicates_to_merge:
-            try:
-                WhatsAppMessage.objects.filter(conversation=secondary).update(conversation=primary)
-                update_fields = []
-                if not primary.prospect_contact and secondary.prospect_contact:
-                    primary.prospect_contact = secondary.prospect_contact
-                    primary.prospect = secondary.prospect
-                    primary.is_matched = True
-                    update_fields.extend(["prospect_contact", "prospect", "is_matched"])
-                if not primary.phone_number and secondary.phone_number and not _is_lid(secondary.phone_number):
-                    primary.phone_number = secondary.phone_number
-                    update_fields.append("phone_number")
-                if not primary.whatsapp_name and secondary.whatsapp_name and not _is_lid(secondary.whatsapp_name):
-                    primary.whatsapp_name = secondary.whatsapp_name
-                    update_fields.append("whatsapp_name")
-                sec_time = secondary.last_message_at or secondary.updated_at
-                prim_time = primary.last_message_at or primary.updated_at
-                if sec_time and (not prim_time or sec_time > prim_time):
-                    primary.last_message_at = secondary.last_message_at
-                    primary.last_message_preview = secondary.last_message_preview
-                    primary.last_message_from_me = secondary.last_message_from_me
-                    update_fields.extend(["last_message_at", "last_message_preview", "last_message_from_me"])
-                if update_fields:
-                    primary.save(update_fields=list(set(update_fields)))
-                secondary.is_deleted = True
-                secondary.save(update_fields=["is_deleted"])
-            except Exception as merge_err:
-                logger.debug("Conversation merge error: %s", merge_err)
+                c_time = c.last_message_at or c.updated_at or c.created_at
+                ex_time = existing.last_message_at or existing.updated_at or existing.created_at
+                if c_time and ex_time and c_time > ex_time:
+                    canonical_convs[key] = c
 
         final_list = list(canonical_convs.values())
-
-        # Opportunistic auto-matching for unmatched conversations
-        for c in final_list:
-            if not c.is_matched or not c.prospect_contact:
-                c_phone = c.chat_id.split("@")[0].split(":")[0]
-                c_digits = re.sub(r"\D+", "", c_phone)
-
-                if len(c_digits) >= 8:
-                    suffix = c_digits[-10:] if len(c_digits) >= 10 else c_digits[-8:]
-                    matched_c = (
-                        ProspectContact.objects.filter(phone_digits__endswith=suffix)
-                        .select_related("prospect")
-                        .first()
-                    )
-                    if not matched_c:
-                        for contact in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                            stored_digits = re.sub(r"\D+", "", contact.phone_number or "")
-                            if stored_digits and (
-                                stored_digits == c_digits
-                                or (len(c_digits) >= 10 and stored_digits.endswith(c_digits[-10:]))
-                                or (len(stored_digits) >= 10 and c_digits.endswith(stored_digits[-10:]))
-                            ):
-                                matched_c = contact
-                                break
-                    if matched_c:
-                        c.prospect_contact = matched_c
-                        c.prospect = matched_c.prospect
-                        c.is_matched = True
-                        if not c.whatsapp_name or c.whatsapp_name.startswith("+"):
-                            c.whatsapp_name = matched_c.contact_name
-                        c.save(update_fields=["prospect_contact", "prospect", "is_matched", "whatsapp_name"])
-
         final_list.sort(key=lambda x: x.last_message_at or x.created_at, reverse=True)
 
         serializer = WhatsAppConversationSerializer(final_list[:100], many=True)
@@ -2315,42 +2119,47 @@ class WhatsAppContactInfoView(APIView):
 
     def get(self, request, chat_id):
         try:
-            user_session = _get_user_session(request.user, create=True)
-            # Strictly scope conversation lookup to current user's session
+            user_session = _get_user_session(request.user, create=False)
+            # Strictly scope conversation lookup to current user's active session
             conv = None
             if user_session:
                 conv = WhatsAppConversation.objects.filter(
                     chat_id=chat_id,
                     session=user_session,
-                ).select_related("prospect_contact", "prospect").first()
-            if not conv and user_session and user_session.owner:
-                conv = WhatsAppConversation.objects.filter(
-                    chat_id=chat_id,
-                    session__owner=user_session.owner,
-                ).select_related("prospect_contact", "prospect").first()
+                    is_deleted=False,
+                ).select_related("prospect_contact", "prospect_contact__prospect", "prospect").first()
 
             clean_phone = chat_id.split("@")[0].split(":")[0]
-            contact = conv.prospect_contact if conv else None
-            prospect = (conv.prospect or (contact.prospect if contact else None)) if conv else None
-            is_group = chat_id.endswith("@g.us") or (conv and conv.chat_id.endswith("@g.us"))
+            is_group = chat_id.endswith("@g.us") or bool(conv and conv.chat_id.endswith("@g.us"))
+            from .webhooks import _match_verified_prospect_contact
 
-            if not contact and not is_group:
-                # Fallback: search ProspectContact by indexed phone digits
-                digits = re.sub(r"\D+", "", clean_phone)
-                if len(digits) >= 8 and not _is_lid(digits):
-                    suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-                    contact = (
-                        ProspectContact.objects.filter(phone_digits__endswith=suffix)
-                        .select_related("prospect")
-                        .first()
+            verified_digits = ""
+            if not is_group:
+                if "@c.us" in chat_id.lower() or "@s.whatsapp.net" in chat_id.lower():
+                    d = re.sub(r"\D+", "", clean_phone)
+                    if d and not _is_lid(d) and 7 <= len(d) <= 15:
+                        verified_digits = d
+                if not verified_digits and conv and conv.phone_number and not _is_lid(conv.phone_number):
+                    d = re.sub(r"\D+", "", str(conv.phone_number))
+                    if d and not _is_lid(d) and 7 <= len(d) <= 15:
+                        verified_digits = d
+
+            contact = None
+            prospect = None
+            if not is_group and verified_digits and user_session:
+                if conv and conv.prospect_contact:
+                    pc_digits = re.sub(
+                        r"\D+",
+                        "",
+                        str(conv.prospect_contact.phone_number or conv.prospect_contact.phone_digits or ""),
                     )
-                    if not contact:
-                        for pc in ProspectContact.objects.filter(phone_number__icontains=suffix).select_related("prospect"):
-                            stored = re.sub(r"\D+", "", pc.phone_number or "")
-                            if stored and (stored == digits or (len(digits) >= 10 and stored.endswith(digits[-10:]))):
-                                contact = pc
-                                break
-                    if contact and not prospect:
+                    pc_owner = getattr(conv.prospect_contact.prospect, "created_by", None) if conv.prospect_contact.prospect else None
+                    if pc_digits == verified_digits and (not user_session.owner or not pc_owner or pc_owner == user_session.owner.username):
+                        contact = conv.prospect_contact
+                        prospect = conv.prospect or conv.prospect_contact.prospect
+                if not contact:
+                    contact = _match_verified_prospect_contact(user_session, verified_digits)
+                    if contact:
                         prospect = contact.prospect
 
             # -------------------------------------------------------------------
@@ -2611,17 +2420,42 @@ class WhatsAppContactInfoView(APIView):
                 if c_digits and not _is_lid(c_digits):
                     contact_phone = f"+{c_digits}"
 
-            clean_phone_display = f"+{clean_phone}" if (clean_phone and not _is_lid(clean_phone)) else ""
+            clean_phone_display = f"+{clean_phone}" if (clean_phone and not _is_lid(clean_phone) and not is_group) else ""
+            raw_w_name = (conv.whatsapp_name.strip() if (conv and conv.whatsapp_name) else "")
+            valid_w_name = (
+                raw_w_name
+                if (
+                    raw_w_name
+                    and raw_w_name.lower() != "whatsapp contact"
+                    and not _is_lid(raw_w_name)
+                    and "@" not in raw_w_name
+                    and not raw_w_name.startswith("+")
+                    and not re.fullmatch(r"[\d\s\-\+\(\)]+", raw_w_name)
+                )
+                else ""
+            )
+            resolved_display_name = (
+                (raw_w_name or "WhatsApp Group")
+                if is_group
+                else (
+                    valid_w_name
+                    or (contact.contact_name if contact else "")
+                    or contact_phone
+                    or clean_phone_display
+                    or (conv.chat_id if conv else chat_id)
+                    or "WhatsApp Contact"
+                )
+            )
 
             data = {
                 "chatId": conv.chat_id if conv else chat_id,
                 "phoneNumber": contact_phone or clean_phone_display,
-                "name": (contact.contact_name if contact else "") or ((conv.whatsapp_name if (conv and not _is_lid(conv.whatsapp_name) and "@" not in str(conv.whatsapp_name)) else "") or contact_phone or clean_phone_display or "WhatsApp Contact"),
+                "name": resolved_display_name,
                 "company": prospect.company_name if prospect else "",
                 "contact_name": contact.contact_name if contact else "",
                 "designation": getattr(contact, "designation", "") if contact else "",
                 "official_email": getattr(contact, "official_email", "") if contact else "",
-                "is_matched": (conv.is_matched if conv else False) or (contact is not None) or is_group,
+                "is_matched": bool(contact is not None or is_group),
                 "prospect_id": str(prospect.id) if prospect else None,
                 "prospect_contact_id": str(contact.id) if contact else None,
                 "custom_avatar_url": conv.custom_avatar_url if conv else "",
