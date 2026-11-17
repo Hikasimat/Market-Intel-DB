@@ -235,7 +235,7 @@ def _discover_gemini_models(api_key: str, timeout: int) -> list:
     return discovered[:8]
 
 
-def _call_gemini(prompt: str, api_key: str, model: str, timeout: int) -> Tuple[str, str, str]:
+def _call_gemini(prompt: str, api_key: str, model: str, timeout: int, max_output_tokens: int = 1024) -> Tuple[str, str, str]:
     from django.core.cache import cache
 
     candidate_models = []
@@ -256,7 +256,7 @@ def _call_gemini(prompt: str, api_key: str, model: str, timeout: int) -> Tuple[s
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": max_output_tokens,
             "responseMimeType": "application/json",
         },
     }).encode("utf-8")
@@ -519,4 +519,301 @@ def schedule_thread_summary(thread_id, force: bool = False) -> None:
         transaction.on_commit(_dispatch)
     except Exception:
         _dispatch()
+
+
+def _build_daily_user_llm_prompt(user, report_date, metrics: dict, messages: list) -> str:
+    """Build a structured, strictly grounded Gemini prompt for a user's daily email activity."""
+    user_label = user.get_full_name() or user.username
+    lines = []
+    bounded = messages[-35:] if len(messages) > 35 else messages
+    for idx, m in enumerate(bounded, start=1):
+        ts = (m.sent_at or m.created_at).isoformat() if (m.sent_at or m.created_at) else "unknown-time"
+        to_list = ", ".join(str(x) for x in (m.to_emails or [])[:3]) or "unknown"
+        prospect_name = (
+            m.thread.prospect.company_name
+            if getattr(m, "thread", None) and m.thread.prospect
+            else (getattr(m.thread, "correspondent_name", "") or getattr(m.thread, "correspondent_email", ""))
+        )
+        thread_status = getattr(m.thread, "status", "") if getattr(m, "thread", None) else ""
+        body_excerpt = _clean_message_text(m)[:800]
+        lines.append(
+            f"[{idx}] {m.direction} | Time: {ts} | Status: {m.status} | ThreadStatus: {thread_status}\n"
+            f"    From: {m.sender_email} -> To: {to_list} | Prospect/Contact: {prospect_name}\n"
+            f"    Subject: {m.subject or '(No Subject)'}\n"
+            f"    Content: {body_excerpt}"
+        )
+
+    return (
+        "You are an executive B2B sales operations analyst writing a Manager Dashboard daily report "
+        "for one team member.\n"
+        "RULES:\n"
+        "1. Summarize ONLY facts explicitly present in the metrics and emails below. Never fabricate names, companies, numbers, or commitments.\n"
+        "2. Cover key topics, prospect discussions, replies received, and pending follow-ups.\n"
+        "3. Return strictly valid JSON with keys:\n"
+        '   - "summary": 3-5 clear sentences summarizing the user\'s overall daily email conversations, context, and key outcomes.\n'
+        '   - "next_action": concise recommended follow-up action for the manager/user (<= 180 chars).\n\n'
+        f"User: {user_label} (@{user.username})\n"
+        f"Report Date: {report_date.isoformat()}\n"
+        f"Emails Received: {metrics['emails_received']}\n"
+        f"Emails Sent: {metrics['emails_sent']}\n"
+        f"Sent Emails That Received Responses: {metrics['sent_received_responses']}\n"
+        f"Pending Responses: {metrics['pending_responses']}\n\n"
+        "Emails:\n" + "\n".join(lines)
+    )
+
+
+def _generate_daily_user_extractive_summary(user, report_date, metrics: dict, messages: list) -> Tuple[str, str]:
+    user_label = user.get_full_name() or user.username
+    sent_count = metrics["emails_sent"]
+    recv_count = metrics["emails_received"]
+    replied_count = metrics["sent_received_responses"]
+    pending_count = metrics["pending_responses"]
+
+    if sent_count == 0 and recv_count == 0:
+        return (
+            f"No sent or received email activity recorded for {user_label} on {report_date.isoformat()}.",
+            "No follow-up needed.",
+        )
+
+    subjects = []
+    for m in messages:
+        subj = (m.subject or "").strip()
+        if subj and subj not in subjects:
+            subjects.append(subj)
+        if len(subjects) >= 4:
+            break
+
+    topics_str = ", ".join(f"'{s}'" for s in subjects) if subjects else "general outreach"
+    summary = (
+        f"On {report_date.isoformat()}, {user_label} sent {sent_count} email(s) and received {recv_count} email(s) "
+        f"({replied_count} sent email(s) received responses, {pending_count} pending response). "
+        f"Key subjects included {topics_str}."
+    )
+    if pending_count > 0:
+        next_action = f"Follow up on {pending_count} pending outbound email(s) for {user_label}."
+    elif recv_count > 0:
+        next_action = f"Review {recv_count} inbound reply/replies with {user_label}."
+    else:
+        next_action = "Monitor outreach responses."
+    return summary, next_action[:480]
+
+
+def generate_daily_user_email_report(
+    user,
+    report_date,
+    day_start,
+    day_end,
+    force: bool = False,
+):
+    """
+    Compute a user's exact daily email counts (received, sent, responded, pending)
+    and generate/cache their Gemini AI overall daily email summary in DailyUserEmailReport.
+    """
+    from django.db.models import Q
+    from .models import DailyUserEmailReport, EmailThread, EmailThreadMessage, OutreachEmail
+
+    day_msgs = list(
+        EmailThreadMessage.objects
+        .select_related("thread", "thread__prospect", "thread__prospect_contact")
+        .filter(owner=user)
+        .filter(
+            Q(sent_at__gte=day_start, sent_at__lt=day_end)
+            | Q(sent_at__isnull=True, created_at__gte=day_start, created_at__lt=day_end)
+        )
+        .order_by("sent_at", "created_at")
+    )
+
+    inbound_msgs = [m for m in day_msgs if m.direction == EmailThreadMessage.Direction.INBOUND]
+    outbound_msgs = [
+        m for m in day_msgs
+        if m.direction == EmailThreadMessage.Direction.OUTBOUND
+        and m.status != EmailThreadMessage.Status.FAILED
+    ]
+
+    # Also count any OutreachEmail rows created by `user` on this day not yet linked to a thread message
+    unlinked_outreach = list(
+        OutreachEmail.objects
+        .filter(created_by=user, thread_message__isnull=True, created_at__gte=day_start, created_at__lt=day_end)
+        .exclude(status="FAILED")
+    )
+
+    emails_received = len(inbound_msgs)
+    emails_sent = len(outbound_msgs) + len(unlinked_outreach)
+
+    # Check response status per outbound message (using all inbound messages in touched threads)
+    touched_thread_ids = {m.thread_id for m in outbound_msgs if m.thread_id}
+    inbound_by_thread = {}
+    if touched_thread_ids:
+        for th_id, ts in (
+            EmailThreadMessage.objects
+            .filter(
+                owner=user,
+                thread_id__in=touched_thread_ids,
+                direction=EmailThreadMessage.Direction.INBOUND,
+            )
+            .values_list("thread_id", "sent_at")
+        ):
+            if th_id not in inbound_by_thread:
+                inbound_by_thread[th_id] = []
+            inbound_by_thread[th_id].append(ts)
+
+    sent_received_responses = 0
+    pending_responses = 0
+    for m in outbound_msgs:
+        m_ts = m.sent_at or m.created_at
+        thread_inbounds = inbound_by_thread.get(m.thread_id, [])
+        has_reply = False
+        if thread_inbounds:
+            for in_ts in thread_inbounds:
+                if in_ts is None or m_ts is None or in_ts >= m_ts:
+                    has_reply = True
+                    break
+        elif getattr(m, "thread", None) and m.thread.status == EmailThread.Status.REPLIED:
+            has_reply = True
+
+        if has_reply:
+            sent_received_responses += 1
+        else:
+            pending_responses += 1
+
+    for oe in unlinked_outreach:
+        if oe.status == "RECEIVED RESPONSE":
+            sent_received_responses += 1
+        else:
+            pending_responses += 1
+
+    metrics = {
+        "emails_received": emails_received,
+        "emails_sent": emails_sent,
+        "sent_received_responses": sent_received_responses,
+        "pending_responses": pending_responses,
+    }
+
+    hash_parts = [
+        f"u:{user.id}|d:{report_date.isoformat()}",
+        f"r:{emails_received}|s:{emails_sent}|rr:{sent_received_responses}|p:{pending_responses}",
+    ]
+    for m in day_msgs:
+        hash_parts.append(
+            f"{m.id}:{m.direction}:{m.status}:{(m.subject or '')[:120]}:{_clean_message_text(m)[:400]}"
+        )
+    content_hash = hashlib.sha256("\n".join(hash_parts).encode("utf-8")).hexdigest()
+
+    company = getattr(getattr(user, "profile", None), "company", None)
+    report, _created = DailyUserEmailReport.objects.get_or_create(
+        user=user,
+        report_date=report_date,
+        defaults={
+            "company": company,
+            **metrics,
+        },
+    )
+
+    # Always keep counts synchronized even if returning cached AI summary
+    counts_changed = (
+        report.emails_received != emails_received
+        or report.emails_sent != emails_sent
+        or report.sent_received_responses != sent_received_responses
+        or report.pending_responses != pending_responses
+        or report.company_id != (company.id if company else None)
+    )
+    if counts_changed:
+        report.emails_received = emails_received
+        report.emails_sent = emails_sent
+        report.sent_received_responses = sent_received_responses
+        report.pending_responses = pending_responses
+        report.company = company
+
+    if (
+        not force
+        and report.content_hash == content_hash
+        and report.summary_status in (DailyUserEmailReport.SummaryStatus.READY, DailyUserEmailReport.SummaryStatus.SKIPPED)
+        and report.overall_summary
+    ):
+        if counts_changed:
+            report.save(update_fields=[
+                "company", "emails_received", "emails_sent",
+                "sent_received_responses", "pending_responses", "updated_at",
+            ])
+        return report
+
+    if emails_received == 0 and emails_sent == 0:
+        summary_text, next_action = _generate_daily_user_extractive_summary(user, report_date, metrics, day_msgs)
+        report.overall_summary = summary_text
+        report.recommended_actions = next_action
+        report.summary_status = DailyUserEmailReport.SummaryStatus.SKIPPED
+        report.summary_provider = "none"
+        report.summary_model = ""
+        report.summary_error = ""
+        report.content_hash = content_hash
+        report.generated_at = timezone.now()
+        report.save()
+        return report
+
+    provider, api_key, model = _resolve_provider_and_key()
+    timeout = int(_get_setting("EMAIL_SUMMARY_TIMEOUT", "15") or 15)
+    max_retries = max(1, int(_get_setting("EMAIL_SUMMARY_MAX_RETRIES", "2") or 2))
+
+    if provider in ("gemini", "openai") and not api_key:
+        provider = "extractive"
+        model = "extractive-v1"
+
+    if provider == "extractive":
+        summary_text, next_action = _generate_daily_user_extractive_summary(user, report_date, metrics, day_msgs)
+        report.overall_summary = summary_text
+        report.recommended_actions = next_action
+        report.summary_status = DailyUserEmailReport.SummaryStatus.READY
+        report.summary_provider = "extractive"
+        report.summary_model = model
+        report.summary_error = ""
+        report.content_hash = content_hash
+        report.generated_at = timezone.now()
+        report.save()
+        return report
+
+    prompt = _build_daily_user_llm_prompt(user, report_date, metrics, day_msgs)
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            used_model = model
+            if provider == "gemini":
+                summary_text, next_action, used_model = _call_gemini(
+                    prompt, api_key, model, timeout, max_output_tokens=1536
+                )
+            else:
+                summary_text, next_action = _call_openai(prompt, api_key, model, timeout)
+
+            if not next_action:
+                _, next_action = _generate_daily_user_extractive_summary(user, report_date, metrics, day_msgs)
+
+            report.overall_summary = summary_text
+            report.recommended_actions = next_action
+            report.summary_status = DailyUserEmailReport.SummaryStatus.READY
+            report.summary_provider = provider
+            report.summary_model = used_model
+            report.summary_error = ""
+            report.content_hash = content_hash
+            report.generated_at = timezone.now()
+            report.save()
+            return report
+        except Exception as exc:
+            last_err = str(exc)
+            logger.warning(
+                "Daily user email AI summary attempt %s/%s failed for user %s (%s): %s",
+                attempt + 1, max_retries, user.id, provider, exc,
+            )
+            if attempt + 1 < max_retries:
+                time.sleep(0.4 * (attempt + 1))
+
+    fallback_text, fallback_action = _generate_daily_user_extractive_summary(user, report_date, metrics, day_msgs)
+    report.overall_summary = fallback_text
+    report.recommended_actions = fallback_action
+    report.summary_status = DailyUserEmailReport.SummaryStatus.FAILED
+    report.summary_provider = "extractive_fallback"
+    report.summary_model = f"{provider}:{model}"
+    report.summary_error = (last_err or "AI summarization failed")[:1000]
+    report.content_hash = content_hash
+    report.generated_at = timezone.now()
+    report.save()
+    return report
 

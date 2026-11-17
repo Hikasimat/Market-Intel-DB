@@ -269,6 +269,19 @@ class Meeting(models.Model):
     google_recording_id = models.CharField(max_length=255, blank=True, default='')
     recording_drive_file_id = models.CharField(max_length=255, blank=True, default='')
 
+    # Custom Browser Engine (CBE) speaker diarization & audio transcription artifacts
+    transcript_text = models.TextField(blank=True, default='')
+    transcript_segments = models.JSONField(default=list, blank=True)
+    speaker_segments = models.JSONField(default=list, blank=True)
+    diarization_participants = models.JSONField(default=list, blank=True)
+    transcription_status = models.CharField(max_length=50, blank=True, default='NONE')
+    transcription_backend = models.CharField(max_length=64, blank=True, default='')
+    transcription_completed_at = models.DateTimeField(null=True, blank=True)
+    cbe_meeting_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_session_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_recording_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_delivery_id = models.CharField(max_length=255, blank=True, default='')
+
     notified_1h = models.BooleanField(default=False)
     notified_30m = models.BooleanField(default=False)
     notified_15m = models.BooleanField(default=False)
@@ -912,4 +925,70 @@ class EmailThreadMessage(models.Model):
 
     def __str__(self):
         return f"{self.direction} {self.subject[:60]} ({self.owner_id})"
+
+
+class DailyUserEmailReport(models.Model):
+    """
+    Cached per-user daily email activity counts and Gemini AI overall content summary
+    displayed in the Manager Dashboard. Keyed dynamically by (user, report_date).
+    """
+
+    class SummaryStatus(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        READY = 'READY', 'Ready'
+        FAILED = 'FAILED', 'Failed'
+        SKIPPED = 'SKIPPED', 'Skipped'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='daily_email_reports',
+    )
+    company = models.ForeignKey(
+        'companies.Company',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='daily_email_reports',
+    )
+    report_date = models.DateField(db_index=True)
+
+    emails_received = models.PositiveIntegerField(default=0)
+    emails_sent = models.PositiveIntegerField(default=0)
+    sent_received_responses = models.PositiveIntegerField(default=0)
+    pending_responses = models.PositiveIntegerField(default=0)
+
+    overall_summary = models.TextField(blank=True, default='')
+    key_highlights = models.JSONField(default=list, blank=True)
+    recommended_actions = models.CharField(max_length=500, blank=True, default='')
+
+    summary_status = models.CharField(
+        max_length=20,
+        choices=SummaryStatus.choices,
+        default=SummaryStatus.PENDING,
+    )
+    summary_provider = models.CharField(max_length=64, blank=True, default='')
+    summary_model = models.CharField(max_length=128, blank=True, default='')
+    summary_error = models.TextField(blank=True, default='')
+    content_hash = models.CharField(max_length=64, blank=True, default='')
+    generated_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['user_id', '-report_date']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'report_date'],
+                name='unique_daily_email_report_user_date',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['report_date', 'user']),
+        ]
+
+    def __str__(self):
+        return f"DailyEmailReport({self.user_id}, {self.report_date})"
 

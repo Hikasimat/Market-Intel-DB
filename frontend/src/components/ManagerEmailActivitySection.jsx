@@ -2,13 +2,15 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   Mail, RefreshCw, Search, Eye, X, Paperclip, Sparkles,
-  ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownLeft, AlertCircle, Clock,
+  ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownLeft, AlertCircle, Clock, Users,
 } from 'lucide-react';
 import {
   fetchManagerEmailActivity,
   fetchManagerEmailThreadDetail,
   refreshManagerEmailSummary,
   clearSelectedEmailThread,
+  fetchManagerDailyEmailReport,
+  refreshManagerUserDailyEmailReport,
 } from '../features/manager/managerSlice';
 
 const statusBadgeClass = (st) => {
@@ -41,6 +43,10 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
     selectedEmailThreadLoading,
     selectedEmailThreadError,
     refreshingSummaryId,
+    dailyEmailReport,
+    dailyEmailReportLoading,
+    dailyEmailReportError,
+    refreshingUserDailyReportId,
   } = useSelector((state) => state.manager);
 
   const [preUserId, setPreUserId] = useState('all');
@@ -51,6 +57,18 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
   const [dateTo, setDateTo] = useState('');
   const [useSelectedDate, setUseSelectedDate] = useState(false);
   const [page, setPage] = useState(1);
+
+  const loadDailyReport = useCallback((forceSync = false) => {
+    dispatch(fetchManagerDailyEmailReport({
+      date: selectedDate || undefined,
+      sync: forceSync,
+      force: forceSync,
+    }));
+  }, [dispatch, selectedDate]);
+
+  useEffect(() => {
+    loadDailyReport(false);
+  }, [loadDailyReport]);
 
   const loadThreads = useCallback((forceSync = false) => {
     const params = {
@@ -97,6 +115,17 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
   const stats = emailActivity?.stats || {};
   const totalPages = emailActivity?.total_pages || 1;
   const totalCount = emailActivity?.count || 0;
+  const dailyUsers = dailyEmailReport?.users || [];
+  const dailyTotals = dailyEmailReport?.totals || {};
+
+  const handleRefreshAll = () => {
+    loadDailyReport(true);
+    loadThreads(true);
+  };
+
+  const handleRefreshUserDailyReport = (userId) => {
+    dispatch(refreshManagerUserDailyEmailReport({ userId, date: selectedDate }));
+  };
 
   return (
     <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
@@ -105,45 +134,155 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
         <div>
           <h2 className="text-lg font-black text-sky-900 flex items-center gap-2">
             <Mail className="w-5 h-5 text-sky-600" />
-            PRE Email Activity &amp; Conversation Summaries
+            User-Wise Daily Email Activity Report
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">
-            Track outreach, inbox threads, incoming replies, and AI summaries across all PRE users ({preUsers.length} active PRE/LQ users).
+            Gemini AI-analyzed daily email metrics &amp; summaries across all active users ({dailyUsers.length} users · {dailyEmailReport?.date || selectedDate || 'today'}).
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {stats?.total_threads !== undefined && (
+          {dailyTotals?.total_users !== undefined && (
             <div className="hidden sm:flex items-center gap-2 text-xs font-bold">
               <span className="px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">
-                Total: {stats.total_threads}
+                Received: {dailyTotals.emails_received || 0}
+              </span>
+              <span className="px-2.5 py-1 rounded-full bg-sky-100 text-sky-800">
+                Sent: {dailyTotals.emails_sent || 0}
               </span>
               <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700">
-                Replied: {stats.replied || 0}
+                Responses: {dailyTotals.sent_received_responses || 0}
               </span>
               <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-700">
-                Waiting: {stats.waiting_reply || 0}
+                Pending: {dailyTotals.pending_responses || 0}
               </span>
-              {stats.failed > 0 && (
-                <span className="px-2.5 py-1 rounded-full bg-red-100 text-red-700">
-                  Failed: {stats.failed}
-                </span>
-              )}
             </div>
           )}
           <button
             type="button"
-            onClick={() => loadThreads(true)}
-            disabled={emailActivityLoading}
+            onClick={handleRefreshAll}
+            disabled={emailActivityLoading || dailyEmailReportLoading}
             className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 transition-colors inline-flex items-center gap-1.5"
-            title="Sync incoming replies & refresh"
+            title="Sync incoming replies & refresh daily user AI reports"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${emailActivityLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${emailActivityLoading || dailyEmailReportLoading ? 'animate-spin' : ''}`} />
             Sync &amp; Refresh
           </button>
         </div>
       </div>
 
-      {/* Filters Toolbar */}
+      {/* User-Wise Daily Email Activity Cards */}
+      <div className="p-6 border-b border-slate-200 bg-slate-50/50 space-y-4">
+        {dailyEmailReportError && (
+          <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{typeof dailyEmailReportError === 'string' ? dailyEmailReportError : JSON.stringify(dailyEmailReportError)}</span>
+          </div>
+        )}
+
+        {dailyEmailReportLoading && dailyUsers.length === 0 ? (
+          <div className="py-8 text-center text-slate-500 text-sm">
+            Generating Gemini AI user-wise daily email activity reports...
+          </div>
+        ) : dailyUsers.length === 0 ? (
+          <div className="py-8 text-center text-slate-400 text-sm italic">
+            No active users found in this workspace scope.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {dailyUsers.map((u) => {
+              const isRefreshing = refreshingUserDailyReportId === u.user_id;
+              return (
+                <div
+                  key={u.user_id}
+                  className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col gap-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-black text-slate-900 flex items-center gap-2 flex-wrap">
+                        <Users className="w-4 h-4 text-sky-600 flex-shrink-0" />
+                        <span>{u.name} &ndash; Daily Email Activity</span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                          {u.role}
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5 truncate">
+                        @{u.username}{u.email ? ` · ${u.email}` : ''} · {u.report_date}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleRefreshUserDailyReport(u.user_id)}
+                        disabled={isRefreshing}
+                        className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-[11px] font-bold inline-flex items-center gap-1"
+                        title="Regenerate Gemini AI Daily Summary"
+                      >
+                        <Sparkles className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                        {isRefreshing ? 'Analyzing...' : 'Refresh AI'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Required 4 daily counts */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                      <div className="text-[11px] font-semibold text-slate-500">Emails Received</div>
+                      <div className="text-lg font-black text-slate-900 mt-0.5">{u.emails_received ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg bg-sky-50 border border-sky-200 px-3 py-2">
+                      <div className="text-[11px] font-semibold text-sky-700">Emails Sent</div>
+                      <div className="text-lg font-black text-sky-900 mt-0.5">{u.emails_sent ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
+                      <div className="text-[11px] font-semibold text-emerald-700">Received Responses</div>
+                      <div className="text-lg font-black text-emerald-900 mt-0.5">{u.sent_received_responses ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                      <div className="text-[11px] font-semibold text-amber-700">Pending Responses</div>
+                      <div className="text-lg font-black text-amber-900 mt-0.5">{u.pending_responses ?? 0}</div>
+                    </div>
+                  </div>
+
+                  {/* Gemini AI Overall Email Summary */}
+                  <div className="rounded-xl bg-sky-50/70 border border-sky-200 p-3.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-[11px] font-black text-sky-900 uppercase tracking-wider inline-flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+                        Overall Email Summary
+                        {u.summary_provider && u.summary_provider !== 'none' && (
+                          <span className="font-semibold text-sky-700 normal-case">
+                            ({u.summary_provider}{u.summary_model && u.summary_status === 'READY' ? ` · ${u.summary_model}` : ''})
+                          </span>
+                        )}
+                      </span>
+                      {u.summary_status === 'FAILED' && (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-bold">
+                          AI Fallback
+                        </span>
+                      )}
+                    </div>
+                    {u.summary_status === 'FAILED' && u.summary_error && (
+                      <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1">
+                        AI provider fallback active: {u.summary_error}
+                      </div>
+                    )}
+                    <p className="text-xs text-slate-800 leading-relaxed whitespace-pre-wrap">
+                      {u.overall_summary || 'No summary generated yet.'}
+                    </p>
+                    {u.recommended_actions && (
+                      <p className="text-[11px] font-semibold text-sky-800">
+                        Recommended Action: {u.recommended_actions}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Filters Toolbar (Individual Thread Drill-Down) */}
       <div className="px-6 py-3.5 bg-slate-50 border-b border-slate-100 flex flex-wrap items-center gap-3">
         <select
           value={preUserId}

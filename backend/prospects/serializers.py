@@ -497,6 +497,9 @@ class MeetingSerializer(serializers.ModelSerializer):
             'recording_file', 'recording_status', 'recording_downloaded_at',
             'recording_file_size', 'recording_mime_type',
             'google_conference_record_id', 'google_recording_id', 'recording_drive_file_id',
+            'transcript_text', 'transcript_segments', 'speaker_segments', 'diarization_participants',
+            'transcription_status', 'transcription_backend', 'transcription_completed_at',
+            'cbe_meeting_id', 'cbe_session_id', 'cbe_recording_id', 'cbe_delivery_id',
             'notified_1h', 'notified_30m', 'notified_15m',
             'created_at', 'updated_at'
         ]
@@ -506,7 +509,10 @@ class MeetingSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_username',
             'recording_file', 'recording_status', 'recording_downloaded_at',
             'recording_file_size', 'recording_mime_type',
-            'google_conference_record_id', 'google_recording_id', 'recording_drive_file_id'
+            'google_conference_record_id', 'google_recording_id', 'recording_drive_file_id',
+            'transcript_text', 'transcript_segments', 'speaker_segments', 'diarization_participants',
+            'transcription_status', 'transcription_backend', 'transcription_completed_at',
+            'cbe_meeting_id', 'cbe_session_id', 'cbe_recording_id', 'cbe_delivery_id',
         ]
 
     def get_key_person_name(self, obj):

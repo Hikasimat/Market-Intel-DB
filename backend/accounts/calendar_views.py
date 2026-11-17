@@ -174,6 +174,11 @@ class CalendarEventsView(_CalendarBase):
                     e['recording_status'] = m.recording_status
                     e['recording_file_size'] = m.recording_file_size
                     e['recording_downloaded_at'] = m.recording_downloaded_at.isoformat() if m.recording_downloaded_at else None
+                    e['transcription_status'] = getattr(m, 'transcription_status', 'NONE') or 'NONE'
+                    e['transcription_backend'] = getattr(m, 'transcription_backend', '') or ''
+                    e['transcript_text'] = getattr(m, 'transcript_text', '') or ''
+                    e['speaker_segments'] = getattr(m, 'speaker_segments', []) or []
+                    e['transcript_segments'] = getattr(m, 'transcript_segments', []) or []
 
             return Response({
                 "is_connected": True,
@@ -345,5 +350,165 @@ class GoogleCalendarSyncRecordingView(_CalendarBase):
             'detail': res.get('detail') or res.get('error'),
             'file_size': meeting.recording_file_size,
         }, status=status.HTTP_200_OK if res.get('success') else (status.HTTP_202_ACCEPTED if res.get('status') == 'PROCESSING' else status.HTTP_200_OK))
+
+
+class MeetingTriggerWebhookView(APIView):
+    """
+    POST /api/auth/webhooks/meeting-trigger/
+    Receives scheduled meeting details & meeting link when a meeting's start time arrives
+    and triggers the Custom Browser Engine (CBE) meeting-processing workflow
+    (/v1/meetings with transcription + speaker diarization enabled).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        import json as _json
+        from django.conf import settings as _settings
+        from .meeting_automation_service import (
+            _get_env,
+            trigger_cbe_meeting_processing,
+            verify_cbe_hmac_headers,
+        )
+
+        raw_body = request.body or b""
+        secret = _get_env("CBE_TRIGGER_WEBHOOK_SECRET", "") or _get_env("CBE_HMAC_SECRET", "")
+        has_sig = bool(request.headers.get("X-CBE-Signature"))
+        if secret or has_sig:
+            path_q = request.get_full_path()
+            ok, reason = verify_cbe_hmac_headers(
+                method=request.method,
+                path_with_query=path_q,
+                headers=dict(request.headers),
+                raw_body=raw_body,
+                secret=secret,
+            )
+            if not ok:
+                return Response({"detail": reason}, status=status.HTTP_401_UNAUTHORIZED)
+        elif not getattr(_settings, "DEBUG", False):
+            return Response({"detail": "Webhook secret not configured."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        try:
+            payload = _json.loads(raw_body.decode("utf-8") or "{}")
+        except Exception:
+            return Response({"detail": "Invalid JSON body."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = trigger_cbe_meeting_processing(payload)
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class CBECompletionWebhookView(APIView):
+    """
+    POST /api/auth/webhooks/cbe/meeting-completed/
+    Receives HMAC-SHA256 signed `meeting.completed` webhooks from the Custom Browser
+    Engine (`WebhookOutbox`) containing finalized speaker diarization and audio
+    transcription, and stores them into Market Intel DB records.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        import json as _json
+        from django.conf import settings as _settings
+        from .meeting_automation_service import (
+            _get_env,
+            ingest_cbe_completed_webhook,
+            verify_cbe_hmac_headers,
+        )
+
+        raw_body = request.body or b""
+        secret = _get_env("CBE_WEBHOOK_SECRET", "") or _get_env("CBE_HMAC_SECRET", "")
+        has_sig = bool(request.headers.get("X-CBE-Signature"))
+        if secret or has_sig:
+            path_q = request.get_full_path()
+            ok, reason = verify_cbe_hmac_headers(
+                method=request.method,
+                path_with_query=path_q,
+                headers=dict(request.headers),
+                raw_body=raw_body,
+                secret=secret,
+            )
+            if not ok:
+                return Response({"detail": reason}, status=status.HTTP_401_UNAUTHORIZED)
+        elif not getattr(_settings, "DEBUG", False):
+            return Response({"detail": "CBE webhook secret not configured."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        try:
+            payload = _json.loads(raw_body.decode("utf-8") or "{}")
+        except Exception:
+            return Response({"detail": "Invalid JSON payload."}, status=status.HTTP_400_BAD_REQUEST)
+
+        delivery_id = request.headers.get("X-CBE-Delivery-Id", "")
+        idem_key = request.headers.get("Idempotency-Key", "")
+        result = ingest_cbe_completed_webhook(
+            payload,
+            delivery_id=delivery_id,
+            idempotency_key=idem_key,
+        )
+        return Response({"status": "ok", **result}, status=status.HTTP_200_OK)
+
+
+class MeetingAutomationPollView(_CalendarBase):
+    """
+    POST /api/auth/calendar/automation/poll/
+    Trigger dynamic multi-user calendar discovery & due meeting webhook dispatch.
+    """
+
+    def post(self, request):
+        from .meeting_automation_service import process_due_scheduled_meetings
+        res = process_due_scheduled_meetings()
+        return Response(res, status=status.HTTP_200_OK)
+
+
+class MeetingAutomationJobsView(_CalendarBase):
+    """
+    GET /api/auth/calendar/automation/jobs/
+    List discovered/processed MeetingAutomationJob records (own user, or all for Manager/Superuser).
+    """
+
+    def get(self, request):
+        from .models import MeetingAutomationJob
+
+        qs = MeetingAutomationJob.objects.select_related("user", "meeting", "calendar_recording")
+        profile = getattr(request.user, "profile", None)
+        is_mgr_or_admin = request.user.is_superuser or (profile and profile.role == "MANAGER")
+        if not is_mgr_or_admin:
+            qs = qs.filter(user=request.user)
+        elif not request.user.is_superuser:
+            comp_id = getattr(profile, "company_id", None)
+            if comp_id is not None:
+                qs = qs.filter(user__profile__company_id=comp_id)
+
+        jobs = list(qs.order_by("-scheduled_start")[:100])
+        return Response([
+            {
+                "id": str(j.id),
+                "user_id": j.user_id,
+                "username": j.user.username,
+                "source_type": j.source_type,
+                "external_event_id": j.external_event_id,
+                "meeting_id": j.meeting_id,
+                "title": j.title,
+                "meeting_link": j.meeting_link,
+                "platform": j.platform,
+                "scheduled_start": j.scheduled_start.isoformat() if j.scheduled_start else None,
+                "scheduled_end": j.scheduled_end.isoformat() if j.scheduled_end else None,
+                "status": j.status,
+                "cbe_job_id": j.cbe_job_id,
+                "cbe_meeting_id": j.cbe_meeting_id,
+                "transcript_text": j.transcript_text,
+                "transcript_segments": j.transcript_segments,
+                "speaker_segments": j.speaker_segments,
+                "participants": j.participants,
+                "last_error": j.last_error,
+                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+            }
+            for j in jobs
+        ], status=status.HTTP_200_OK)
 
 

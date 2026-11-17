@@ -248,6 +248,17 @@ class CalendarEventRecording(models.Model):
     google_conference_record_id = models.CharField(max_length=255, blank=True, default='')
     google_recording_id = models.CharField(max_length=255, blank=True, default='')
     recording_drive_file_id = models.CharField(max_length=255, blank=True, default='')
+    transcript_text = models.TextField(blank=True, default='')
+    transcript_segments = models.JSONField(default=list, blank=True)
+    speaker_segments = models.JSONField(default=list, blank=True)
+    diarization_participants = models.JSONField(default=list, blank=True)
+    transcription_status = models.CharField(max_length=50, blank=True, default='NONE')
+    transcription_backend = models.CharField(max_length=64, blank=True, default='')
+    transcription_completed_at = models.DateTimeField(null=True, blank=True)
+    cbe_meeting_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_session_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_recording_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_delivery_id = models.CharField(max_length=255, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -267,3 +278,99 @@ class CalendarEventRecording(models.Model):
 
     def __str__(self):
         return f"Recording for event {self.event_id} ({self.user_id})"
+
+
+class MeetingAutomationJob(models.Model):
+    """
+    Tracks scheduled meetings discovered across all users' calendars and CRM Meeting records,
+    their webhook dispatch to the Custom Browser Engine (CBE), and stored diarization /
+    transcription artifacts returned via the CBE completion webhook.
+    """
+
+    class SourceType(models.TextChoices):
+        MEETING_RECORD = 'MEETING_RECORD', 'Meeting Record'
+        GOOGLE_CALENDAR = 'GOOGLE_CALENDAR', 'Google Calendar'
+        MICROSOFT_CALENDAR = 'MICROSOFT_CALENDAR', 'Microsoft Calendar'
+        EMAIL = 'EMAIL', 'Email'
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        DISPATCHED = 'DISPATCHED', 'Dispatched to Webhook'
+        PROCESSING = 'PROCESSING', 'Processing in CBE'
+        COMPLETED = 'COMPLETED', 'Completed'
+        FAILED = 'FAILED', 'Failed'
+        SKIPPED = 'SKIPPED', 'Skipped'
+
+    id = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='meeting_automation_jobs',
+    )
+    meeting = models.ForeignKey(
+        'prospects.Meeting',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='automation_jobs',
+    )
+    calendar_recording = models.ForeignKey(
+        CalendarEventRecording,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='automation_jobs',
+    )
+    source_type = models.CharField(
+        max_length=32,
+        choices=SourceType.choices,
+        default=SourceType.GOOGLE_CALENDAR,
+    )
+    external_event_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+
+    title = models.CharField(max_length=500, blank=True, default='')
+    meeting_link = models.CharField(max_length=512, blank=True, default='')
+    platform = models.CharField(max_length=32, blank=True, default='')
+    organizer_email = models.EmailField(blank=True, default='')
+    attendees = models.JSONField(default=list, blank=True)
+
+    scheduled_start = models.DateTimeField(db_index=True)
+    scheduled_end = models.DateTimeField(null=True, blank=True)
+
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    webhook_url_used = models.CharField(max_length=512, blank=True, default='')
+    cbe_job_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    cbe_meeting_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    cbe_session_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_recording_id = models.CharField(max_length=255, blank=True, default='')
+    cbe_delivery_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+
+    dispatch_response = models.JSONField(default=dict, blank=True)
+    transcript_text = models.TextField(blank=True, default='')
+    transcript_segments = models.JSONField(default=list, blank=True)
+    speaker_segments = models.JSONField(default=list, blank=True)
+    participants = models.JSONField(default=list, blank=True)
+    recording_metadata = models.JSONField(default=dict, blank=True)
+    webhook_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default='')
+
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-scheduled_start', '-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status', 'scheduled_start']),
+            models.Index(fields=['external_event_id']),
+        ]
+
+    def __str__(self):
+        return f"MeetingAutomationJob({self.user_id}, {self.title or self.external_event_id}, {self.status})"

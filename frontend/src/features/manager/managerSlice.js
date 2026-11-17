@@ -61,6 +61,37 @@ export const refreshManagerEmailSummary = createAsyncThunk(
   }
 );
 
+export const fetchManagerDailyEmailReport = createAsyncThunk(
+  'manager/fetchDailyEmailReport',
+  async (params = {}, { rejectWithValue }) => {
+    try {
+      const query = {};
+      if (params.date) query.date = params.date;
+      if (params.user_id && params.user_id !== 'all') query.user_id = params.user_id;
+      if (params.sync) query.sync = 'true';
+      if (params.force) query.force = 'true';
+      const response = await api.get('/manager-dashboard/daily-email-report/', { params: query });
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.response?.data || err.message);
+    }
+  }
+);
+
+export const refreshManagerUserDailyEmailReport = createAsyncThunk(
+  'manager/refreshUserDailyEmailReport',
+  async ({ userId, date }, { rejectWithValue }) => {
+    try {
+      const response = await api.post(`/manager-dashboard/daily-email-report/${userId}/refresh/`, {
+        date: date || undefined,
+      });
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.response?.data || err.message);
+    }
+  }
+);
+
 const managerSlice = createSlice({
   name: 'manager',
   initialState: {
@@ -82,6 +113,14 @@ const managerSlice = createSlice({
     selectedEmailThreadLoading: false,
     selectedEmailThreadError: null,
     refreshingSummaryId: null,
+    dailyEmailReport: {
+      date: '',
+      totals: null,
+      users: [],
+    },
+    dailyEmailReportLoading: false,
+    dailyEmailReportError: null,
+    refreshingUserDailyReportId: null,
   },
   reducers: {
     clearDashboard: (state) => {
@@ -148,6 +187,33 @@ const managerSlice = createSlice({
       })
       .addCase(refreshManagerEmailSummary.rejected, (state) => {
         state.refreshingSummaryId = null;
+      })
+      .addCase(fetchManagerDailyEmailReport.pending, (state) => {
+        state.dailyEmailReportLoading = true;
+        state.dailyEmailReportError = null;
+      })
+      .addCase(fetchManagerDailyEmailReport.fulfilled, (state, action) => {
+        state.dailyEmailReportLoading = false;
+        state.dailyEmailReport = action.payload;
+      })
+      .addCase(fetchManagerDailyEmailReport.rejected, (state, action) => {
+        state.dailyEmailReportLoading = false;
+        state.dailyEmailReportError = action.payload || action.error.message;
+      })
+      .addCase(refreshManagerUserDailyEmailReport.pending, (state, action) => {
+        state.refreshingUserDailyReportId = action.meta.arg?.userId ?? null;
+      })
+      .addCase(refreshManagerUserDailyEmailReport.fulfilled, (state, action) => {
+        state.refreshingUserDailyReportId = null;
+        const updated = action.payload;
+        if (updated?.user_id) {
+          state.dailyEmailReport.users = (state.dailyEmailReport.users || []).map((u) =>
+            u.user_id === updated.user_id ? { ...u, ...updated } : u
+          );
+        }
+      })
+      .addCase(refreshManagerUserDailyEmailReport.rejected, (state) => {
+        state.refreshingUserDailyReportId = null;
       });
   },
 });

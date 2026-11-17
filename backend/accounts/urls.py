@@ -29,6 +29,10 @@ from .calendar_views import (
     CalendarEventsView,
     GoogleCalendarSyncRecordingView,
     MeetingProvidersStatusView,
+    MeetingTriggerWebhookView,
+    CBECompletionWebhookView,
+    MeetingAutomationPollView,
+    MeetingAutomationJobsView,
 )
 from .zoom_views import (
     ZoomOAuthURLView,
@@ -133,6 +137,12 @@ urlpatterns = [
     path('microsoft/callback/', MicrosoftOAuthCallbackView.as_view(), name='microsoft_oauth_callback'),
     path('microsoft/status/', MicrosoftOAuthStatusView.as_view(), name='microsoft_oauth_status'),
     path('microsoft/disconnect/', MicrosoftOAuthDisconnectView.as_view(), name='microsoft_oauth_disconnect'),
+
+    # Custom Browser Engine (CBE) meeting automation webhooks & orchestration endpoints
+    path('webhooks/meeting-trigger/', MeetingTriggerWebhookView.as_view(), name='meeting_trigger_webhook'),
+    path('webhooks/cbe/meeting-completed/', CBECompletionWebhookView.as_view(), name='cbe_meeting_completed_webhook'),
+    path('calendar/automation/poll/', MeetingAutomationPollView.as_view(), name='meeting_automation_poll'),
+    path('calendar/automation/jobs/', MeetingAutomationJobsView.as_view(), name='meeting_automation_jobs'),
 ]
 
 

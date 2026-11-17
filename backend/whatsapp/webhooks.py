@@ -2248,6 +2248,18 @@ def _handle_incoming_message(
         wa_message.pk,
         msg_dt.isoformat(),
     )
+    try:
+        from .signals import whatsapp_message_persisted
+        whatsapp_message_persisted.send(
+            sender=_handle_incoming_message,
+            session=session_obj,
+            conversation=conversation,
+            message=wa_message,
+            is_from_me=is_from_me,
+            is_history_sync=is_history_sync,
+        )
+    except Exception as sig_exc:
+        logger.debug("whatsapp_message_persisted signal dispatch skipped: %s", sig_exc)
     return True
 
 

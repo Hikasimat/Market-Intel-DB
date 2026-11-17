@@ -849,3 +849,160 @@ def manager_email_summary_refresh(request, thread_id):
     data = EmailThreadListSerializer(thread).data
     data['refresh_result'] = result
     return Response(data, status=status.HTTP_200_OK)
+
+
+def _get_authorized_all_users_for_manager(request_user):
+    """
+    Dynamically return all active non-superuser users within the manager's company scope
+    (all roles) so the daily email activity report covers every existing user.
+    """
+    qs = User.objects.filter(
+        is_active=True,
+        is_superuser=False,
+    ).select_related('profile').order_by('id')
+
+    if request_user.is_superuser:
+        return qs
+
+    mgr_company_id = getattr(getattr(request_user, 'profile', None), 'company_id', None)
+    if mgr_company_id is not None:
+        return qs.filter(profile__company_id=mgr_company_id)
+    return qs.filter(profile__company__isnull=True)
+
+
+def _serialize_daily_user_report(user, report):
+    return {
+        'user_id': user.id,
+        'username': user.username,
+        'name': user.get_full_name() or user.username,
+        'email': user.email,
+        'role': getattr(getattr(user, 'profile', None), 'role', 'PRE'),
+        'report_date': report.report_date.isoformat(),
+        'emails_received': report.emails_received,
+        'emails_sent': report.emails_sent,
+        'sent_received_responses': report.sent_received_responses,
+        'pending_responses': report.pending_responses,
+        'overall_summary': report.overall_summary,
+        'recommended_actions': report.recommended_actions,
+        'summary_status': report.summary_status,
+        'summary_provider': report.summary_provider,
+        'summary_model': report.summary_model,
+        'summary_error': report.summary_error,
+        'generated_at': report.generated_at.isoformat() if report.generated_at else None,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrSuperuser])
+def manager_daily_email_report(request):
+    """
+    GET /api/manager-dashboard/daily-email-report/?date=YYYY-MM-DD
+    Returns a user-wise daily email activity report with Gemini AI analysis and
+    exact counts (received, sent, sent_received_responses, pending_responses)
+    for every existing active user in the manager's authorized scope.
+    """
+    import sys
+    from .email_thread_service import backfill_outreach_emails_to_threads, sync_authorized_mailboxes
+    from .email_summarizer import generate_daily_user_email_report
+
+    date_param = (request.query_params.get('date') or '').strip()
+    tz = _get_report_tz()
+    if date_param:
+        try:
+            report_date = date_type.fromisoformat(date_param)
+        except ValueError:
+            return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        report_date = timezone.now().astimezone(tz).date()
+
+    day_start, day_end = _day_bounds(report_date)
+
+    authorized_users = list(_get_authorized_all_users_for_manager(request.user))
+    target_user_id_raw = (request.query_params.get('user_id') or '').strip()
+    if target_user_id_raw and target_user_id_raw.lower() != 'all':
+        try:
+            target_uid = int(target_user_id_raw)
+        except ValueError:
+            return Response({'detail': 'Invalid user_id.'}, status=status.HTTP_400_BAD_REQUEST)
+        auth_ids = {u.id for u in authorized_users}
+        if target_uid not in auth_ids:
+            if User.objects.filter(pk=target_uid).exists():
+                return Response({'detail': 'You are not authorized to access this user.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'date': report_date.isoformat(), 'users': [], 'totals': {
+                'total_users': 0, 'emails_received': 0, 'emails_sent': 0,
+                'sent_received_responses': 0, 'pending_responses': 0,
+            }})
+        authorized_users = [u for u in authorized_users if u.id == target_uid]
+
+    user_ids = [u.id for u in authorized_users]
+    if user_ids and OutreachEmail.objects.filter(created_by_id__in=user_ids, thread_message__isnull=True).exists():
+        try:
+            backfill_outreach_emails_to_threads(user_ids)
+        except Exception:
+            pass
+
+    sync_param = (request.query_params.get('sync') or '').strip().lower()
+    force_sync = sync_param in ('1', 'true', 'yes')
+    force_regen = (request.query_params.get('force') or '').strip().lower() in ('1', 'true', 'yes')
+    running_tests = ('test' in sys.argv)
+    if user_ids and (force_sync or not running_tests):
+        try:
+            sync_authorized_mailboxes(user_ids, force=force_sync, limit=25)
+        except Exception:
+            pass
+
+    user_reports = []
+    totals = {
+        'total_users': len(authorized_users),
+        'emails_received': 0,
+        'emails_sent': 0,
+        'sent_received_responses': 0,
+        'pending_responses': 0,
+    }
+    for u in authorized_users:
+        report = generate_daily_user_email_report(
+            u, report_date, day_start, day_end, force=force_regen
+        )
+        serialized = _serialize_daily_user_report(u, report)
+        user_reports.append(serialized)
+        totals['emails_received'] += report.emails_received
+        totals['emails_sent'] += report.emails_sent
+        totals['sent_received_responses'] += report.sent_received_responses
+        totals['pending_responses'] += report.pending_responses
+
+    return Response({
+        'date': report_date.isoformat(),
+        'totals': totals,
+        'users': user_reports,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsManagerOrSuperuser])
+def manager_daily_email_report_refresh(request, user_id):
+    """
+    POST /api/manager-dashboard/daily-email-report/<int:user_id>/refresh/
+    Forces Gemini AI regeneration of a single user's daily email activity summary.
+    """
+    from .email_summarizer import generate_daily_user_email_report
+
+    authorized_users = list(_get_authorized_all_users_for_manager(request.user))
+    target_user = next((u for u in authorized_users if u.id == user_id), None)
+    if not target_user:
+        if User.objects.filter(pk=user_id).exists():
+            return Response({'detail': 'You are not authorized to refresh this user report.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    date_param = (request.data.get('date') or request.query_params.get('date') or '').strip()
+    tz = _get_report_tz()
+    if date_param:
+        try:
+            report_date = date_type.fromisoformat(date_param)
+        except ValueError:
+            return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        report_date = timezone.now().astimezone(tz).date()
+
+    day_start, day_end = _day_bounds(report_date)
+    report = generate_daily_user_email_report(target_user, report_date, day_start, day_end, force=True)
+    return Response(_serialize_daily_user_report(target_user, report), status=status.HTTP_200_OK)
