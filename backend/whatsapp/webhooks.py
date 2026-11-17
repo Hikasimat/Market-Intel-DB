@@ -756,6 +756,28 @@ def _extract_phone_digits(chat_id: str) -> Optional[str]:
     return digits
 
 
+def _resolve_user_from_session_name(session_name: str):
+    """Resolve active Django User encoded in deterministic `wa_u<id>_<hmac>` or legacy `user_<id>`."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+
+    if session_name.startswith("wa_u"):
+        try:
+            parts = session_name.split("_")
+            u_id = int(parts[1][1:])  # strip leading 'u'
+            if verify_deterministic_session_name(session_name, u_id):
+                return User.objects.filter(id=u_id, is_active=True).first()
+        except Exception:
+            return None
+    elif session_name.startswith("user_"):
+        try:
+            u_id = int(session_name.split("_")[1])
+            return User.objects.filter(id=u_id, is_active=True).first()
+        except Exception:
+            return None
+    return None
+
+
 def _resolve_originating_session(session_name: str) -> Optional[WhatsAppSession]:
     """
     Resolve the originating WhatsAppSession strictly by the exact WAHA session name.
@@ -767,40 +789,22 @@ def _resolve_originating_session(session_name: str) -> Optional[WhatsAppSession]
         return None
     session_obj = WhatsAppSession.objects.select_related("owner").filter(session_name=session_name).first()
     if session_obj:
-        # Reject unowned sessions to enforce ownership boundary
-        if session_obj.owner is None:
+        if session_obj.owner is not None:
+            return session_obj
+        inferred_user = _resolve_user_from_session_name(session_name)
+        if inferred_user is None:
             return None
+        session_obj.owner = inferred_user
+        session_obj.save(update_fields=["owner"])
         return session_obj
-    if session_name.startswith("wa_u"):
-        try:
-            parts = session_name.split("_")
-            u_id = int(parts[1][1:])  # strip leading 'u'
-            if verify_deterministic_session_name(session_name, u_id):
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-                u = User.objects.filter(id=u_id, is_active=True).first()
-                if u:
-                    session_obj, _ = WhatsAppSession.objects.get_or_create(
-                        session_name=session_name,
-                        defaults={"owner": u, "status": WhatsAppSession.Status.STARTING, "is_active": True},
-                    )
-                    return session_obj
-        except Exception:
-            return None
-    if session_name.startswith("user_"):
-        try:
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
-            u_id = int(session_name.split("_")[1])
-            u = User.objects.filter(id=u_id, is_active=True).first()
-            if u:
-                session_obj, _ = WhatsAppSession.objects.get_or_create(
-                    session_name=session_name,
-                    defaults={"owner": u, "status": WhatsAppSession.Status.STARTING, "is_active": True},
-                )
-                return session_obj
-        except Exception:
-            return None
+
+    inferred_user = _resolve_user_from_session_name(session_name)
+    if inferred_user:
+        session_obj, _ = WhatsAppSession.objects.get_or_create(
+            session_name=session_name,
+            defaults={"owner": inferred_user, "status": WhatsAppSession.Status.STARTING, "is_active": True},
+        )
+        return session_obj
     return None
 
 

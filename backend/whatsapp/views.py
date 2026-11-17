@@ -415,15 +415,15 @@ class WhatsAppStatusView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request):
-        user_session = _get_user_session(request.user, create=True)
         session_id = request.query_params.get("session_id")
-        session_name = request.query_params.get("session")
+        session_name = request.query_params.get("session") or request.query_params.get("session_name")
 
-        target_session = user_session
-        if request.user.is_superuser and (session_id or session_name):
+        if session_id or session_name:
             target_session = _get_owned_session(request, session_id=session_id, session_name=session_name)
             if not target_session:
                 return Response({"detail": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            target_session = _get_user_session(request.user, create=True)
 
         try:
             status_data = get_session_status(session_name=target_session.session_name)
@@ -1105,7 +1105,13 @@ class WhatsAppConversationsView(APIView):
     def get(self, request):
         user = request.user
         session_id = request.query_params.get("session_id")
-        user_session = _get_user_session(user, create=True)
+        session_name = request.query_params.get("session") or request.query_params.get("session_name")
+        if session_id or session_name:
+            user_session = _get_owned_session(request, session_id=session_id, session_name=session_name)
+            if not user_session:
+                return Response({"detail": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            user_session = _get_user_session(user, create=True)
 
         qs = WhatsAppConversation.objects.select_related(
             "prospect_contact", "prospect", "session"

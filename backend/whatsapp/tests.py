@@ -1253,6 +1253,80 @@ class WhatsAppDynamicSyncAndLifecycleTestCase(APITestCase):
         anon_pic_resp = self.client.get("/api/whatsapp/profile-pic/120363413990423012@g.us/")
         self.assertEqual(anon_pic_resp.status_code, status.HTTP_200_OK)
 
+    def test_6_dynamic_session_ownership_and_query_params(self):
+        """Legacy unowned user/HMAC sessions bind dynamically; status/conversations honor owned session params; create_group never falls back to default."""
+        from whatsapp.services import generate_user_session_name, reconcile_connected_session
+        from whatsapp.webhooks import _resolve_originating_session
+        from whatsapp.client import WAHAClient, WAHAServiceError
+
+        # 1. Stale unowned 'default' holding user1's phone is deactivated on reconcile
+        stale_default = WhatsAppSession.objects.create(
+            session_name="default",
+            owner=None,
+            status=WhatsAppSession.Status.READY,
+            phone_number="+919003619221",
+            is_active=True,
+        )
+        u1_det_name = generate_user_session_name(self.user1)
+        # Existing unowned row carrying verified deterministic HMAC name dynamically binds owner
+        u1_session = WhatsAppSession.objects.create(
+            session_name=u1_det_name,
+            owner=None,
+            status=WhatsAppSession.Status.STARTING,
+            is_active=True,
+        )
+        resolved = _resolve_originating_session(u1_det_name)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.owner_id, self.user1.id)
+
+        active_u1, _, _ = reconcile_connected_session(resolved, "+91 90036 19221", source="test")
+        self.assertEqual(active_u1.owner_id, self.user1.id)
+        self.assertEqual(active_u1.phone_number, "+919003619221")
+        stale_default.refresh_from_db()
+        self.assertFalse(stale_default.is_active)
+
+        # 2. Status & Conversations endpoints honor explicit owned session_name / session_id and reject others with 404
+        u2_det_name = generate_user_session_name(self.user2)
+        u2_session = WhatsAppSession.objects.create(
+            session_name=u2_det_name,
+            owner=self.user2,
+            status=WhatsAppSession.Status.READY,
+            phone_number="+919876500002",
+            is_active=True,
+        )
+        WhatsAppConversation.objects.create(
+            session=active_u1,
+            chat_id="919811122233@c.us",
+            whatsapp_name="Alice U1",
+            account_phone="+919003619221",
+        )
+
+        self.client.force_authenticate(user=self.user1)
+        fake_waha = MagicMock()
+        fake_waha.get_session_status.return_value = {"status": "WORKING"}
+        fake_waha.get_groups.return_value = []
+        with patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("whatsapp.services.get_waha_client", return_value=fake_waha):
+            own_status = self.client.get(f"/api/whatsapp/status/?session_name={u1_det_name}")
+            self.assertEqual(own_status.status_code, status.HTTP_200_OK)
+            self.assertEqual(own_status.data["session"]["session_name"], u1_det_name)
+
+            other_status = self.client.get(f"/api/whatsapp/status/?session_name={u2_det_name}")
+            self.assertEqual(other_status.status_code, status.HTTP_404_NOT_FOUND)
+
+            own_convs = self.client.get(f"/api/whatsapp/conversations/?session_id={active_u1.pk}")
+            self.assertEqual(own_convs.status_code, status.HTTP_200_OK)
+            self.assertEqual(len(own_convs.data), 1)
+
+            other_convs = self.client.get(f"/api/whatsapp/conversations/?session_id={u2_session.pk}")
+            self.assertEqual(other_convs.status_code, status.HTTP_404_NOT_FOUND)
+
+        # 3. create_group rejects 'default' and does not fall back to 'default'
+        client_inst = WAHAClient()
+        with self.assertRaises(WAHAServiceError):
+            client_inst.create_group("default", "Test Group", ["919811122233"])
+
+
 
 
 

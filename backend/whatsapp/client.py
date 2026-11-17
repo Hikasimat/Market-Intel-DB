@@ -867,10 +867,14 @@ class WAHAClient:
             "participants": formatted_str_participants,
         }
 
-        # Try session endpoint then global endpoint with both schemas
+        if not session_name or session_name == "default":
+            raise WAHAServiceError(
+                "A user-owned WhatsApp session is required to create a group.",
+                status_code=400,
+            )
+
+        # Try session endpoint then global endpoint with both schemas for the caller's session only.
         sessions_to_try = [session_name]
-        if session_name != "default":
-            sessions_to_try.append("default")
 
         last_error = None
         for sess in sessions_to_try:

@@ -265,6 +265,15 @@ def reconcile_connected_session(
         old_digits = normalize_phone_digits(old_phone or "")
         was_ready = locked.status == WhatsAppSession.Status.READY
 
+        # Deactivate any stale unowned session still claiming this same phone number
+        if new_digits:
+            for stale in WhatsAppSession.objects.filter(owner__isnull=True, is_active=True).exclude(pk=locked.pk):
+                if normalize_phone_digits(stale.phone_number or "") == new_digits:
+                    stale.is_active = False
+                    stale.status = WhatsAppSession.Status.DISCONNECTED
+                    stale.stopped_at = stale.stopped_at or timezone.now()
+                    stale.save(update_fields=["is_active", "status", "stopped_at", "updated_at"])
+
         # Same number or first-time phone binding
         if not new_digits or not old_digits or old_digits == new_digits:
             update_fields = []
@@ -1245,6 +1254,7 @@ def register_opt_out(
     prospect_contact=None,
     registered_by=None,
     trigger_message: str = "",
+    session=None,
 ) -> WhatsAppOptOut:
     """
     Register a recipient opt-out.
@@ -1278,14 +1288,15 @@ def register_opt_out(
             action=WhatsAppAuditLog.Action.OPT_OUT_REGISTERED,
             performed_by=registered_by,
             prospect_contact=prospect_contact,
+            session_name=session.session_name if session else "",
             result_detail=f"Opt-out registered for {phone_digits}. Reason: {reason}",
             success=True,
         )
 
-        active_sess = WhatsAppSession.objects.filter(is_active=True).first()
-        if active_sess:
-            active_sess.opt_out_count += 1
-            active_sess.save(update_fields=["opt_out_count"])
+        target_sess = session or (get_or_create_user_session(registered_by, create=False) if registered_by else None)
+        if target_sess:
+            target_sess.opt_out_count += 1
+            target_sess.save(update_fields=["opt_out_count"])
 
     return opt_out
 
