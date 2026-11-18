@@ -131,22 +131,105 @@ class MeetingProvidersStatusView(_CalendarBase):
 
 
 
+def _crm_meetings_as_events(user, existing_ids=None, existing_links=None, time_min=None, time_max=None):
+    """
+    Serialize accessible CRM Meeting records (e.g. WhatsApp-scheduled Google Meet or Zoom
+    meetings) into CalendarEventsView event dictionaries, skipping any already represented
+    in Google Calendar so they appear cleanly without duplicates.
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    from django.db.models import Q
+    from django.utils.dateparse import parse_datetime
+    from prospects.models import Meeting
+
+    existing_ids = set(existing_ids or ())
+    existing_links = set(existing_links or ())
+
+    qs = Meeting.objects.select_related('prospect', 'prospect_contact', 'created_by').filter(is_completed=False)
+    role = getattr(getattr(user, 'profile', None), 'role', None)
+    if not user.is_superuser and role in ('PRE', 'LQ'):
+        qs = qs.filter(
+            Q(created_by=user)
+            | Q(google_calendar_owner=user)
+            | Q(prospect__created_by=user.username)
+            | Q(prospect__lead_qualification__assigned_lq=user)
+        )
+
+    if time_min:
+        dt_min = parse_datetime(time_min)
+        if dt_min:
+            qs = qs.filter(scheduled_datetime__gte=dt_min)
+    if time_max:
+        dt_max = parse_datetime(time_max)
+        if dt_max:
+            qs = qs.filter(scheduled_datetime__lte=dt_max)
+
+    added = []
+    for m in qs.order_by('scheduled_datetime'):
+        if m.google_event_id and m.google_event_id in existing_ids:
+            continue
+        if m.meeting_link and m.meeting_link in existing_links:
+            continue
+
+        try:
+            tz = ZoneInfo(m.timezone or 'UTC')
+        except Exception:
+            tz = ZoneInfo('UTC')
+        start_local = m.scheduled_datetime.astimezone(tz)
+        end_local = start_local + timedelta(minutes=30)
+
+        company = m.prospect.company_name if m.prospect else ''
+        contact_name = m.prospect_contact.contact_name if m.prospect_contact else ''
+        summary = company or contact_name or 'Scheduled Meeting'
+        if m.meeting_provider == 'ZOOM' and 'zoom' not in summary.lower():
+            summary = f"{summary} (Zoom)"
+
+        attendees = []
+        if m.prospect_contact and m.prospect_contact.official_email:
+            attendees.append({'email': m.prospect_contact.official_email})
+
+        added.append({
+            'id': m.google_event_id or m.calendar_event_id or f"crm_meeting_{m.id}",
+            'meeting_id': m.id,
+            'summary': summary,
+            'description': m.agenda or '',
+            'start': start_local.isoformat(),
+            'end': end_local.isoformat(),
+            'meet_url': m.meeting_link or '',
+            'html_link': m.meeting_link or '',
+            'meeting_provider': m.meeting_provider,
+            'timezone': m.timezone or 'UTC',
+            'company_name': company,
+            'contact_name': contact_name,
+            'attendees': attendees,
+            'recording_file': m.recording_file.url if m.recording_file else None,
+            'recording_status': m.recording_status,
+        })
+    return added
+
+
 class CalendarEventsView(_CalendarBase):
     """
-    Fetch events directly from Google Calendar primary calendar for the authenticated user.
+    Fetch events directly from Google Calendar primary calendar for the authenticated user,
+    merged with any CRM-scheduled meetings (Zoom, WhatsApp Meet/Zoom).
     """
     def get(self, request):
+        time_min = request.query_params.get('time_min')
+        time_max = request.query_params.get('time_max')
         creds = get_calendar_credentials(request.user)
         if not creds:
+            crm_events = _crm_meetings_as_events(
+                request.user,
+                time_min=time_min,
+                time_max=time_max,
+            )
             return Response({
                 "is_connected": False,
                 "email": None,
-                "events": [],
+                "events": crm_events,
                 "detail": "Google Calendar is not connected."
             }, status=status.HTTP_200_OK)
-
-        time_min = request.query_params.get('time_min')
-        time_max = request.query_params.get('time_max')
 
         try:
             events = list_events(creds, time_min=time_min, time_max=time_max)
@@ -197,6 +280,17 @@ class CalendarEventsView(_CalendarBase):
                         e['transcription_status'] = 'COMPLETED'
                         e['speaker_segments'] = job.speaker_segments or []
                         e['transcript_segments'] = job.transcript_segments or []
+
+            extra_crm = _crm_meetings_as_events(
+                request.user,
+                existing_ids=event_ids,
+                existing_links=meet_urls,
+                time_min=time_min,
+                time_max=time_max,
+            )
+            if extra_crm:
+                events.extend(extra_crm)
+                events.sort(key=lambda ev: str(ev.get('start') or ''))
 
             return Response({
                 "is_connected": True,

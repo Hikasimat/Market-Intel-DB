@@ -29,6 +29,8 @@ class StrictOutcome:
     reply_text: str = ""
     model_used: str = ""
     skip_reason: str = ""  # non-empty => do not send anything
+    was_refused: bool = False
+    refusal_reason: str = ""
 
 
 def _message_text(m) -> str:
@@ -116,4 +118,9 @@ def maybe_generate_strict_reply(session, conversation, incoming, history_msgs, *
 
     if not result.can_send or not result.reply_text:
         return StrictOutcome(skip_reason=result.refusal_reason or "rag_unavailable")
-    return StrictOutcome(reply_text=result.reply_text, model_used=f"rag:{result.model_used or 'refusal'}")
+    return StrictOutcome(
+        reply_text=result.reply_text,
+        model_used=f"rag:{result.model_used or 'refusal'}",
+        was_refused=(result.status == "REFUSED"),
+        refusal_reason=result.refusal_reason or "",
+    )

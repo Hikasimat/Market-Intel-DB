@@ -3,8 +3,9 @@ import { useDispatch, useSelector } from 'react-redux';
 import { fetchLqPipeline, completePreTask } from '../features/lqPipeline/lqPipelineSlice';
 import ProspectForm from '../components/prospects/ProspectForm';
 import SearchableSelect from '../components/common/SearchableSelect';
-import { AlertTriangle, CheckCircle, FileEdit, Building2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle, FileEdit, Building2, Mail, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from 'react-toastify';
+import api from '../services/api';
 
 const PreTasksPage = () => {
   const dispatch = useDispatch();
@@ -64,6 +65,25 @@ const PreTasksPage = () => {
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [managerUserFilter, setManagerUserFilter] = useState('ALL');
 
+  // Automated PRE Tasks (Incoming Email Replies & WhatsApp Escalations)
+  const [preTasks, setPreTasks] = useState([]);
+  const [preTasksLoading, setPreTasksLoading] = useState(false);
+  const [expandedPreTaskId, setExpandedPreTaskId] = useState(null);
+  const [completingPreTaskId, setCompletingPreTaskId] = useState(null);
+
+  const loadPreTasks = async () => {
+    setPreTasksLoading(true);
+    try {
+      const res = await api.get('/pre-tasks/', { params: { status: activeTab } });
+      const data = Array.isArray(res.data) ? res.data : (res.data?.results || []);
+      setPreTasks(data);
+    } catch (err) {
+      console.error('Failed to load PRE tasks', err);
+    } finally {
+      setPreTasksLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'PENDING') {
       dispatch(fetchLqPipeline({ pre_task_status: 'ISSUE_SENT_TO_PRE' }));
@@ -71,7 +91,25 @@ const PreTasksPage = () => {
       // Fetch all tasks for the user so we can see historically completed tasks
       dispatch(fetchLqPipeline({}));
     }
+    loadPreTasks();
   }, [dispatch, activeTab]);
+
+  const handleCompletePreTaskItem = async (taskId) => {
+    setCompletingPreTaskId(taskId);
+    try {
+      await api.post(`/pre-tasks/${taskId}/complete/`);
+      toast.success('PRE task marked as completed.');
+      loadPreTasks();
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Failed to complete PRE task.');
+    } finally {
+      setCompletingPreTaskId(null);
+    }
+  };
+
+  const filteredPreTasks = isManager && managerUserFilter !== 'ALL'
+    ? preTasks.filter((t) => t.assigned_pre_username === managerUserFilter)
+    : preTasks;
 
   // Filter tasks locally based on tab and date
   let tasks = [];
@@ -313,6 +351,146 @@ const PreTasksPage = () => {
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Email Reply & WhatsApp Escalation PRE Tasks */}
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden mt-3">
+        <div className="px-4 py-2.5 bg-slate-50/90 border-b border-slate-100 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Mail className="w-4 h-4 text-indigo-600" />
+            <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+              {activeTab === 'COMPLETED' ? 'Completed AI & Email Follow-up Tasks' : 'Email Reply & WhatsApp Escalation Tasks'}
+            </h3>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
+              {filteredPreTasks.length}
+            </span>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr className="bg-slate-50/60 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-100">
+                <th className="px-3.5 py-2">Source & Contact</th>
+                <th className="px-3.5 py-2">Task & Conversation History</th>
+                {isManager && <th className="px-3.5 py-2">Assigned PRE</th>}
+                <th className="px-3.5 py-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {preTasksLoading ? (
+                <tr>
+                  <td colSpan={isManager ? 4 : 3} className="p-6 text-center text-slate-500">Loading tasks...</td>
+                </tr>
+              ) : filteredPreTasks.length === 0 ? (
+                <tr>
+                  <td colSpan={isManager ? 4 : 3} className="p-6 text-center text-slate-500 text-xs">
+                    {activeTab === 'PENDING'
+                      ? 'No pending email reply or WhatsApp escalation tasks.'
+                      : 'No completed email reply or WhatsApp escalation tasks.'}
+                  </td>
+                </tr>
+              ) : filteredPreTasks.map((pt) => {
+                const isExpanded = expandedPreTaskId === pt.id;
+                const isEmailReply = pt.task_type === 'EMAIL_REPLY';
+                const history = Array.isArray(pt.conversation_history) ? pt.conversation_history : [];
+                return (
+                  <tr key={pt.id} className="hover:bg-slate-50/70 transition">
+                    <td className="px-3.5 py-2.5 align-top min-w-[200px]">
+                      <div className="flex flex-col gap-1">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold w-max border ${
+                          isEmailReply
+                            ? 'bg-sky-50 text-sky-700 border-sky-200'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}>
+                          {isEmailReply ? <Mail className="w-3 h-3" /> : <MessageSquare className="w-3 h-3" />}
+                          {isEmailReply ? 'Email Reply' : 'WhatsApp Escalation'}
+                        </span>
+                        <div className="font-bold text-slate-900 text-xs mt-0.5">
+                          {pt.prospect_company_name || pt.company_name || 'Unlinked Contact'}
+                        </div>
+                        <div className="text-[11px] text-slate-600">
+                          {pt.sender_name || 'Unknown Sender'}
+                        </div>
+                        {pt.sender_email && (
+                          <div className="text-[10px] text-slate-500">{pt.sender_email}</div>
+                        )}
+                        {pt.sender_phone && (
+                          <div className="text-[10px] text-slate-500">{pt.sender_phone}</div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3.5 py-2.5 align-top max-w-xl">
+                      <div className="font-bold text-slate-800 text-xs mb-1">{pt.title}</div>
+                      <p className="text-[11px] text-slate-700 whitespace-pre-wrap leading-relaxed bg-slate-50 border border-slate-200/80 rounded-lg p-2">
+                        {pt.description}
+                      </p>
+                      {history.length > 0 && (
+                        <div className="mt-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedPreTaskId(isExpanded ? null : pt.id)}
+                            className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800"
+                          >
+                            {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                            {isExpanded ? 'Hide' : 'View'} Conversation History ({history.length})
+                          </button>
+                          {isExpanded && (
+                            <div className="mt-1.5 space-y-1.5 max-h-60 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-2">
+                              {history.map((msg, idx) => (
+                                <div
+                                  key={msg.id || idx}
+                                  className={`p-2 rounded border text-[10px] ${
+                                    msg.direction === 'INBOUND'
+                                      ? 'bg-white border-sky-200'
+                                      : 'bg-indigo-50/70 border-indigo-100'
+                                  }`}
+                                >
+                                  <div className="flex justify-between items-center font-bold text-slate-600 mb-0.5">
+                                    <span>{msg.direction === 'INBOUND' ? (msg.from_name || msg.sender_name || msg.from_email || 'Sender') : 'Our System / AI'}</span>
+                                    <span>{msg.timestamp ? new Date(msg.timestamp).toLocaleString() : ''}</span>
+                                  </div>
+                                  <div className="text-slate-800 whitespace-pre-wrap">{msg.body || msg.snippet}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    {isManager && (
+                      <td className="px-3.5 py-2.5 align-top">
+                        <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-100">
+                          <span className="text-[9px] font-bold text-indigo-700 uppercase">PRE:</span>
+                          <span className="text-[10px] font-bold text-slate-800">{pt.assigned_pre_username || 'Unassigned'}</span>
+                        </div>
+                        <div className="text-[9px] text-slate-500 mt-1">
+                          {pt.created_at ? new Date(pt.created_at).toLocaleString() : ''}
+                        </div>
+                      </td>
+                    )}
+                    <td className="px-3.5 py-2.5 align-top text-right">
+                      {activeTab === 'PENDING' ? (
+                        <button
+                          type="button"
+                          disabled={completingPreTaskId === pt.id}
+                          onClick={() => handleCompletePreTaskItem(pt.id)}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[10px] font-bold transition inline-flex items-center gap-1 shadow-2xs"
+                        >
+                          <CheckCircle className="w-3 h-3" />
+                          {completingPreTaskId === pt.id ? 'Completing...' : 'Mark Complete'}
+                        </button>
+                      ) : (
+                        <div className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold border border-emerald-200 inline-flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3" /> Completed
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

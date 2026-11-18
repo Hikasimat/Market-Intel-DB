@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { createUser, updateUser } from '../../features/users/userSlice';
 import { X } from 'lucide-react';
 import SearchableSelect from '../common/SearchableSelect';
+import { getAllTimeZoneOptions } from '../../utils/timezone';
 
 const UserForm = ({ isOpen, onClose, userToEdit }) => {
   const dispatch = useDispatch();
@@ -133,19 +134,7 @@ const UserForm = ({ isOpen, onClose, userToEdit }) => {
                 <SearchableSelect 
                   value={formData.timezone} 
                   onChange={(val) => setFormData(prev => ({...prev, timezone: val}))}
-                  options={[
-                    { value: 'UTC', label: 'UTC' },
-                    { value: 'America/New_York', label: 'Eastern Time (US & Canada)' },
-                    { value: 'America/Chicago', label: 'Central Time (US & Canada)' },
-                    { value: 'America/Denver', label: 'Mountain Time (US & Canada)' },
-                    { value: 'America/Los_Angeles', label: 'Pacific Time (US & Canada)' },
-                    { value: 'Europe/London', label: 'London' },
-                    { value: 'Europe/Paris', label: 'Paris' },
-                    { value: 'Asia/Dubai', label: 'Dubai' },
-                    { value: 'Asia/Kolkata', label: 'India (IST)' },
-                    { value: 'Asia/Singapore', label: 'Singapore' },
-                    { value: 'Australia/Sydney', label: 'Sydney' }
-                  ]}
+                  options={getAllTimeZoneOptions()}
                 />
               </div>
             </div>

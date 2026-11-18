@@ -3,6 +3,7 @@ import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { toast } from 'react-toastify';
 import SearchableSelect from '../common/SearchableSelect';
+import { getAllTimeZoneOptions } from '../../utils/timezone';
 import { 
   LogOut, Users, Calendar, Activity, ClipboardList, UserCircle, Mail, 
   LayoutDashboard, Shield, BarChart2, Eye, Settings, X, MessageCircle, 
@@ -541,19 +542,7 @@ const Layout = () => {
                 <SearchableSelect 
                   value={selectedTimezone} 
                   onChange={(val) => setSelectedTimezone(val)}
-                  options={[
-                    { value: 'UTC', label: 'UTC' },
-                    { value: 'America/New_York', label: 'Eastern Time (US & Canada)' },
-                    { value: 'America/Chicago', label: 'Central Time (US & Canada)' },
-                    { value: 'America/Denver', label: 'Mountain Time (US & Canada)' },
-                    { value: 'America/Los_Angeles', label: 'Pacific Time (US & Canada)' },
-                    { value: 'Europe/London', label: 'London' },
-                    { value: 'Europe/Paris', label: 'Paris' },
-                    { value: 'Asia/Dubai', label: 'Dubai' },
-                    { value: 'Asia/Kolkata', label: 'India (IST)' },
-                    { value: 'Asia/Singapore', label: 'Singapore' },
-                    { value: 'Australia/Sydney', label: 'Sydney' }
-                  ]}
+                  options={getAllTimeZoneOptions()}
                 />
                 <p className="text-[10px] text-slate-400 mt-1">Calendar and notifications will be displayed in this time zone.</p>
               </div>

@@ -14,12 +14,12 @@ from rest_framework.permissions import IsAuthenticated
 from .models import (
     Prospect, ProspectOffering, ProspectContact, LeadQualification,
     EmailVerification, AuditReverificationRequest, GovernmentEntity,
-    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment
+    EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment, PreTask
 )
 from .serializers import (
     ProspectSerializer, LeadQualificationSerializer, ProspectContactSerializer,
     AuditReverificationRequestSerializer, GovernmentEntitySerializer,
-    EmailCampaignSerializer, EmailCampaignDetailSerializer
+    EmailCampaignSerializer, EmailCampaignDetailSerializer, PreTaskSerializer
 )
 from .campaign_service import (
     create_campaign,
@@ -2872,5 +2872,69 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PreTaskViewSet(viewsets.ModelViewSet):
+    """
+    Actionable PRE tasks created automatically from incoming email replies
+    and confirmed WhatsApp escalations.
+    """
+    serializer_class = PreTaskSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'patch', 'post', 'head', 'options']
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = PreTask.objects.select_related(
+            'assigned_pre',
+            'prospect',
+            'prospect_contact',
+            'outreach_email',
+            'email_thread',
+            'whatsapp_session',
+            'whatsapp_conversation',
+            'completed_by',
+        ).all()
+
+        role = getattr(getattr(user, 'profile', None), 'role', None)
+        if not user.is_superuser and role == 'PRE':
+            qs = qs.filter(assigned_pre=user)
+
+        status_param = (self.request.query_params.get('status') or '').strip().upper()
+        if status_param in (PreTask.Status.PENDING, PreTask.Status.COMPLETED):
+            qs = qs.filter(status=status_param)
+
+        task_type = (self.request.query_params.get('task_type') or '').strip().upper()
+        if task_type in (PreTask.TaskType.EMAIL_REPLY, PreTask.TaskType.WHATSAPP_ESCALATION):
+            qs = qs.filter(task_type=task_type)
+
+        pre_username = (self.request.query_params.get('assigned_pre') or '').strip()
+        if pre_username:
+            qs = qs.filter(assigned_pre__username=pre_username)
+
+        return qs.order_by('-created_at')
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete(self, request, pk=None):
+        task = self.get_object()
+        notes = (request.data.get('resolution_notes') or '').strip()
+        if task.status != PreTask.Status.COMPLETED:
+            task.status = PreTask.Status.COMPLETED
+            task.completed_at = timezone.now()
+            task.completed_by = request.user
+        if notes:
+            task.resolution_notes = notes
+        task.save(update_fields=['status', 'completed_at', 'completed_by', 'resolution_notes', 'updated_at'])
+        return Response(PreTaskSerializer(task).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='reopen')
+    def reopen(self, request, pk=None):
+        task = self.get_object()
+        task.status = PreTask.Status.PENDING
+        task.completed_at = None
+        task.completed_by = None
+        task.save(update_fields=['status', 'completed_at', 'completed_by', 'updated_at'])
+        return Response(PreTaskSerializer(task).data, status=status.HTTP_200_OK)
+
 
 

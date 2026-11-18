@@ -4,7 +4,7 @@ from .models import (
     Prospect, ProspectOffering, ProspectContact, AuditReverificationRequest,
     ProspectShareholding, GovernmentEntity, ProspectAcquisition,
     EmailCampaign, EmailCampaignRecipient, EmailCampaignAttachment,
-    EmailThread, EmailThreadMessage
+    EmailThread, EmailThreadMessage, PreTask
 )
 
 class ProspectOfferingSerializer(serializers.ModelSerializer):
@@ -536,17 +536,23 @@ class CallbackReminderSerializer(serializers.ModelSerializer):
     def get_key_person_name(self, obj):
         if hasattr(obj, 'prospect_contact') and obj.prospect_contact:
             return obj.prospect_contact.contact_name
-        contacts = list(obj.prospect.key_contacts.all())
-        if contacts:
-            return contacts[0].contact_name
+        if obj.prospect:
+            contacts = list(obj.prospect.key_contacts.all())
+            if contacts:
+                return contacts[0].contact_name
         return None
 
 from .models import Meeting
 
 class MeetingSerializer(serializers.ModelSerializer):
-    company_name = serializers.CharField(source='prospect.company_name', read_only=True)
+    company_name = serializers.SerializerMethodField()
     key_person_name = serializers.SerializerMethodField()
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
+
+    def get_company_name(self, obj):
+        if obj.prospect:
+            return obj.prospect.company_name
+        return None
 
     class Meta:
         model = Meeting
@@ -581,9 +587,10 @@ class MeetingSerializer(serializers.ModelSerializer):
     def get_key_person_name(self, obj):
         if hasattr(obj, 'prospect_contact') and obj.prospect_contact:
             return obj.prospect_contact.contact_name
-        contacts = list(obj.prospect.key_contacts.all())
-        if contacts:
-            return contacts[0].contact_name
+        if obj.prospect:
+            contacts = list(obj.prospect.key_contacts.all())
+            if contacts:
+                return contacts[0].contact_name
         return None
 
 
@@ -1003,4 +1010,61 @@ class EmailThreadDetailSerializer(EmailThreadListSerializer):
 
     class Meta(EmailThreadListSerializer.Meta):
         fields = EmailThreadListSerializer.Meta.fields + ['messages']
+
+
+class PreTaskSerializer(serializers.ModelSerializer):
+    assigned_pre_username = serializers.SerializerMethodField()
+    completed_by_username = serializers.CharField(source='completed_by.username', read_only=True, default='')
+    prospect_company_name = serializers.SerializerMethodField()
+
+    def get_assigned_pre_username(self, obj):
+        if obj.assigned_pre:
+            return obj.assigned_pre.username
+        return obj.assigned_pre_username or ''
+
+    def get_prospect_company_name(self, obj):
+        if obj.prospect:
+            return obj.prospect.company_name
+        return obj.company_name or ''
+
+    class Meta:
+        model = PreTask
+        fields = [
+            'id',
+            'task_type',
+            'status',
+            'title',
+            'description',
+            'assigned_pre',
+            'assigned_pre_username',
+            'prospect',
+            'company_name',
+            'prospect_company_name',
+            'prospect_contact',
+            'sender_name',
+            'sender_email',
+            'sender_phone',
+            'outreach_email',
+            'email_thread',
+            'inbound_message',
+            'whatsapp_session',
+            'whatsapp_conversation',
+            'conversation_history',
+            'metadata',
+            'resolution_notes',
+            'completed_at',
+            'completed_by',
+            'completed_by_username',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'task_type', 'assigned_pre', 'assigned_pre_username',
+            'prospect', 'company_name', 'prospect_company_name', 'prospect_contact',
+            'outreach_email', 'email_thread', 'inbound_message',
+            'whatsapp_session', 'whatsapp_conversation', 'conversation_history',
+            'metadata', 'completed_at', 'completed_by', 'completed_by_username',
+            'created_at', 'updated_at',
+        ]
+
 

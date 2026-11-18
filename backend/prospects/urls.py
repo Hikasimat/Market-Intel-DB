@@ -5,7 +5,7 @@ from .views import (
     ProspectContactViewSet, CommunicationActivityViewSet, CallActivityViewSet,
     OutreachEmailViewSet, EmailTrackingView, EmailLinkClickTrackingView,
     pre_dashboard_stats, AuditReverificationRequestViewSet, GovernmentEntityViewSet,
-    EmailCampaignViewSet
+    EmailCampaignViewSet, PreTaskViewSet
 )
 from .verification_views import EmailVerificationViewSet
 from .manager_views import manager_dashboard
@@ -24,6 +24,7 @@ router.register(r'outreach/calls', CallActivityViewSet, basename='outreach-calls
 router.register(r'outreach/emails', OutreachEmailViewSet, basename='outreach-emails')
 router.register(r'email-campaigns', EmailCampaignViewSet, basename='email-campaigns')
 router.register(r'email-verifications', EmailVerificationViewSet, basename='email-verifications')
+router.register(r'pre-tasks', PreTaskViewSet, basename='pre-tasks')
 
 urlpatterns = [
     path('email-tracking/<uuid:tracking_token>/', EmailTrackingView.as_view(), name='email-tracking'),

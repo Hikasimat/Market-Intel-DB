@@ -90,3 +90,50 @@ class WhatsAppAIReplyLog(models.Model):
 
     def __str__(self):
         return f"AIReply({self.sender_identifier}, {self.status})"
+
+
+class WhatsAppAssistantState(models.Model):
+    """
+    Tracks multi-turn workflow state per WhatsApp conversation so the AI assistant can
+    guide meeting scheduling (date/time, timezone, Zoom vs Google Meet, confirmation)
+    or await sender confirmation before escalating unanswered Vector DB queries to PRE.
+    """
+
+    class Mode(models.TextChoices):
+        IDLE = "IDLE", "Idle"
+        MEETING_SCHEDULING = "MEETING_SCHEDULING", "Meeting Scheduling"
+        ESCALATION_CONFIRMATION = "ESCALATION_CONFIRMATION", "Escalation Confirmation"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.OneToOneField(
+        "whatsapp.WhatsAppConversation",
+        on_delete=models.CASCADE,
+        related_name="assistant_state",
+    )
+    session = models.ForeignKey(
+        "whatsapp.WhatsAppSession",
+        on_delete=models.CASCADE,
+        related_name="assistant_states",
+    )
+    mode = models.CharField(max_length=40, choices=Mode.choices, default=Mode.IDLE, db_index=True)
+    pending_query = models.TextField(blank=True, default="")
+    state_data = models.JSONField(default=dict, blank=True)
+    last_incoming_message_id = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["session", "mode"]),
+        ]
+
+    def reset(self, save: bool = True):
+        self.mode = self.Mode.IDLE
+        self.pending_query = ""
+        self.state_data = {}
+        if save:
+            self.save(update_fields=["mode", "pending_query", "state_data", "updated_at"])
+
+    def __str__(self):
+        return f"WhatsAppAssistantState({self.conversation_id}, mode={self.mode})"
+

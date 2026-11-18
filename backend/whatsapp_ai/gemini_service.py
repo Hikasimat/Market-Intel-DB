@@ -623,19 +623,52 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
     )
 
     try:
-        # Strict RAG (opt-in per session): the answer comes ONLY from the session's knowledge
-        # base. When it is enabled there is no fallback to unrestricted Gemini generation.
-        strict_outcome = _try_strict_rag_reply(session, conversation, incoming, history_msgs, ai_cfg.model_name)
-        if strict_outcome is not None:
-            if strict_outcome.skip_reason:
-                return _skip(f"strict_rag:{strict_outcome.skip_reason}")
-            reply_text, model_used = strict_outcome.reply_text, strict_outcome.model_used
+        from .assistant_workflows import (
+            handle_post_rag_refusal,
+            handle_pre_rag_assistant_workflow,
+        )
+
+        # Check multi-turn AI Assistant workflows first (meeting scheduling, escalation confirmation)
+        pre_outcome = handle_pre_rag_assistant_workflow(
+            session=session,
+            conversation=conversation,
+            incoming=incoming,
+            sender_name=sender_info.get("display_name") or "",
+            sender_phone=sender_info.get("phone_number") or "",
+            model_name=ai_cfg.model_name or "",
+        )
+        if pre_outcome.handled:
+            if pre_outcome.skip_reason:
+                return _skip(pre_outcome.skip_reason)
+            reply_text, model_used = pre_outcome.reply_text, pre_outcome.model_used
         else:
-            reply_text, model_used = generate_gemini_whatsapp_reply(
-                prompt,
-                model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
-                timeout=int(_get_setting("WHATSAPP_AI_TIMEOUT", "15") or 15),
-            )
+            # Strict RAG (opt-in per session): the answer comes ONLY from the session's knowledge
+            # base. When it is enabled there is no fallback to unrestricted Gemini generation.
+            strict_outcome = _try_strict_rag_reply(session, conversation, incoming, history_msgs, ai_cfg.model_name)
+            if strict_outcome is not None:
+                if strict_outcome.skip_reason:
+                    return _skip(f"strict_rag:{strict_outcome.skip_reason}")
+                if strict_outcome.was_refused:
+                    escalation_outcome = handle_post_rag_refusal(
+                        session=session,
+                        conversation=conversation,
+                        incoming=incoming,
+                        refusal_reason=strict_outcome.refusal_reason,
+                        sender_name=sender_info.get("display_name") or "",
+                        sender_phone=sender_info.get("phone_number") or "",
+                    )
+                    if escalation_outcome is not None and escalation_outcome.handled:
+                        reply_text, model_used = escalation_outcome.reply_text, escalation_outcome.model_used
+                    else:
+                        reply_text, model_used = strict_outcome.reply_text, strict_outcome.model_used
+                else:
+                    reply_text, model_used = strict_outcome.reply_text, strict_outcome.model_used
+            else:
+                reply_text, model_used = generate_gemini_whatsapp_reply(
+                    prompt,
+                    model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
+                    timeout=int(_get_setting("WHATSAPP_AI_TIMEOUT", "15") or 15),
+                )
     except Exception as exc:
         logger.warning("Gemini WhatsApp auto-reply generation failed for msg %s: %s", incoming.pk, exc)
         log_entry.status = WhatsAppAIReplyLog.Status.FAILED

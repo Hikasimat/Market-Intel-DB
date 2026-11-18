@@ -546,14 +546,13 @@ class UserMeView(APIView):
         
         timezone_val = request.data.get('timezone')
         if timezone_val:
-            import zoneinfo
-            try:
-                zoneinfo.ZoneInfo(timezone_val)
-                profile.timezone = timezone_val
-                profile.save(update_fields=['timezone'])
-            except Exception:
+            from .timezone_utils import normalize_timezone
+            normalized_tz = normalize_timezone(timezone_val)
+            if not normalized_tz:
                 from rest_framework import status
                 return Response({'error': 'Invalid timezone'}, status=status.HTTP_400_BAD_REQUEST)
+            profile.timezone = normalized_tz
+            profile.save(update_fields=['timezone'])
         
         return Response({'status': 'updated', 'timezone': profile.timezone})
 

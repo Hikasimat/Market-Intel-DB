@@ -701,6 +701,26 @@ def ingest_fetched_messages(cred, raw_messages: list) -> dict:
                     matched_oe.prospect.lead_qualification.email_status = "Received Response"
                     matched_oe.prospect.lead_qualification.save(update_fields=["email_status"])
 
+            # Automatically create & assign a PRE task when an inbound reply arrives
+            # to a previously sent email (Outreach, Campaign, or Outbound Thread).
+            if direction == EmailThreadMessage.Direction.INBOUND:
+                try:
+                    from .task_service import create_email_reply_pre_task
+                    matched_contact = matched_thread.prospect_contact
+                    if not matched_contact and matched_oe:
+                        rec = matched_oe.recipients.filter(email_address__iexact=from_email).first()
+                        if rec:
+                            matched_contact = rec.prospect_contact
+                    create_email_reply_pre_task(
+                        inbound_message=created_msg,
+                        email_thread=matched_thread,
+                        outreach_email=matched_oe,
+                        prospect=(matched_oe.prospect if matched_oe else matched_thread.prospect),
+                        prospect_contact=matched_contact,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed creating PRE task for inbound email %s: %s", created_msg.id, exc)
+
         synced += 1
         touched_threads.add(matched_thread.id)
 

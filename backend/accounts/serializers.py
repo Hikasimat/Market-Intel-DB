@@ -7,6 +7,13 @@ class UserSerializer(serializers.ModelSerializer):
     timezone = serializers.CharField(source='profile.timezone', required=False)
     is_superuser = serializers.BooleanField(read_only=True)
 
+    def validate_timezone(self, value):
+        from .timezone_utils import normalize_timezone
+        normalized = normalize_timezone(value)
+        if not normalized:
+            raise serializers.ValidationError("Invalid network/IANA time zone.")
+        return normalized
+
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'password', 'role', 'timezone', 'is_superuser']

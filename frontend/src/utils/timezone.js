@@ -81,3 +81,114 @@ export function getZonedDate(dateInput, timeZone) {
         return d;
     }
 }
+
+const FALLBACK_TIMEZONES = [
+    'UTC',
+    'Africa/Cairo',
+    'Africa/Johannesburg',
+    'Africa/Lagos',
+    'Africa/Nairobi',
+    'America/Anchorage',
+    'America/Argentina/Buenos_Aires',
+    'America/Bogota',
+    'America/Chicago',
+    'America/Denver',
+    'America/Halifax',
+    'America/Lima',
+    'America/Los_Angeles',
+    'America/Mexico_City',
+    'America/New_York',
+    'America/Phoenix',
+    'America/Santiago',
+    'America/Sao_Paulo',
+    'America/St_Johns',
+    'America/Toronto',
+    'America/Vancouver',
+    'Asia/Bahrain',
+    'Asia/Bangkok',
+    'Asia/Colombo',
+    'Asia/Dhaka',
+    'Asia/Dubai',
+    'Asia/Hong_Kong',
+    'Asia/Jakarta',
+    'Asia/Karachi',
+    'Asia/Kathmandu',
+    'Asia/Kolkata',
+    'Asia/Kuala_Lumpur',
+    'Asia/Kuwait',
+    'Asia/Manila',
+    'Asia/Muscat',
+    'Asia/Qatar',
+    'Asia/Riyadh',
+    'Asia/Seoul',
+    'Asia/Shanghai',
+    'Asia/Singapore',
+    'Asia/Taipei',
+    'Asia/Tehran',
+    'Asia/Tokyo',
+    'Asia/Yangon',
+    'Australia/Adelaide',
+    'Australia/Brisbane',
+    'Australia/Darwin',
+    'Australia/Melbourne',
+    'Australia/Perth',
+    'Australia/Sydney',
+    'Europe/Amsterdam',
+    'Europe/Athens',
+    'Europe/Berlin',
+    'Europe/Istanbul',
+    'Europe/Lisbon',
+    'Europe/London',
+    'Europe/Madrid',
+    'Europe/Moscow',
+    'Europe/Paris',
+    'Europe/Rome',
+    'Europe/Zurich',
+    'Pacific/Auckland',
+    'Pacific/Honolulu',
+];
+
+let _cachedTimeZoneOptions = null;
+
+function _formatGmtOffset(timeZone, now) {
+    if (timeZone === 'UTC') return 'UTC+00:00';
+    try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            timeZoneName: 'shortOffset',
+        }).formatToParts(now);
+        const tzPart = parts.find((p) => p.type === 'timeZoneName')?.value || '';
+        return tzPart || '';
+    } catch {
+        return '';
+    }
+}
+
+export function getAllTimeZoneOptions() {
+    if (_cachedTimeZoneOptions) return _cachedTimeZoneOptions;
+    let zones;
+    try {
+        zones = typeof Intl?.supportedValuesOf === 'function'
+            ? Intl.supportedValuesOf('timeZone')
+            : FALLBACK_TIMEZONES;
+    } catch {
+        zones = FALLBACK_TIMEZONES;
+    }
+    const zoneSet = new Set(['UTC', ...(zones || [])]);
+    const now = new Date();
+    _cachedTimeZoneOptions = Array.from(zoneSet)
+        .sort((a, b) => {
+            if (a === 'UTC') return -1;
+            if (b === 'UTC') return 1;
+            return a.localeCompare(b);
+        })
+        .map((tz) => {
+            const offset = _formatGmtOffset(tz, now);
+            const displayName = tz.replace(/_/g, ' ');
+            return {
+                value: tz,
+                label: offset ? `${displayName} (${offset})` : displayName,
+            };
+        });
+    return _cachedTimeZoneOptions;
+}

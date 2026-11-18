@@ -217,7 +217,7 @@ class CallbackReminder(models.Model):
         return f"Reminder for {self.prospect.company_name} at {self.scheduled_datetime}"
 
 class Meeting(models.Model):
-    prospect = models.ForeignKey(Prospect, on_delete=models.CASCADE, related_name='meetings')
+    prospect = models.ForeignKey(Prospect, on_delete=models.CASCADE, null=True, blank=True, related_name='meetings')
     prospect_contact = models.ForeignKey(ProspectContact, on_delete=models.CASCADE, null=True, blank=True, related_name='meetings')
     scheduled_datetime = models.DateTimeField()
     meeting_link = models.CharField(max_length=512, blank=True, null=True)
@@ -306,7 +306,8 @@ class Meeting(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"Meeting for {self.prospect.company_name} at {self.scheduled_datetime}"
+        company = self.prospect.company_name if self.prospect else "WhatsApp Contact"
+        return f"Meeting for {company} at {self.scheduled_datetime}"
 
 
 class OutreachEmail(models.Model):
@@ -1000,4 +1001,119 @@ class DailyUserEmailReport(models.Model):
 
     def __str__(self):
         return f"DailyEmailReport({self.user_id}, {self.report_date})"
+
+
+class PreTask(models.Model):
+    """
+    Actionable PRE tasks automatically generated from:
+    - Incoming email replies to previously sent outreach/inbox/campaign emails
+    - Confirmed WhatsApp AI escalations when the Vector DB lacks an answer
+    """
+    class TaskType(models.TextChoices):
+        EMAIL_REPLY = 'EMAIL_REPLY', 'Email Reply Follow-up'
+        WHATSAPP_ESCALATION = 'WHATSAPP_ESCALATION', 'WhatsApp Escalation'
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        COMPLETED = 'COMPLETED', 'Completed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task_type = models.CharField(max_length=32, choices=TaskType.choices, db_index=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)
+
+    title = models.CharField(max_length=300)
+    description = models.TextField(blank=True, default='')
+
+    assigned_pre = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_pre_tasks',
+    )
+    assigned_pre_username = models.CharField(max_length=150, blank=True, default='')
+
+    prospect = models.ForeignKey(
+        'Prospect',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+    company_name = models.CharField(max_length=255, blank=True, default='')
+    prospect_contact = models.ForeignKey(
+        'ProspectContact',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+    sender_name = models.CharField(max_length=255, blank=True, default='')
+    sender_email = models.CharField(max_length=255, blank=True, default='')
+    sender_phone = models.CharField(max_length=100, blank=True, default='')
+
+    outreach_email = models.ForeignKey(
+        'OutreachEmail',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+    email_thread = models.ForeignKey(
+        'EmailThread',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+    inbound_message = models.ForeignKey(
+        'EmailThreadMessage',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+
+    whatsapp_session = models.ForeignKey(
+        'whatsapp.WhatsAppSession',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+    whatsapp_conversation = models.ForeignKey(
+        'whatsapp.WhatsAppConversation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pre_tasks',
+    )
+
+    source_key = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    conversation_history = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    resolution_notes = models.TextField(blank=True, default='')
+    completed_at = models.DateTimeField(null=True, blank=True)
+    completed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='completed_pre_tasks',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['assigned_pre', 'status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"PreTask({self.task_type}, {self.status}, {self.title[:40]})"
+
 
