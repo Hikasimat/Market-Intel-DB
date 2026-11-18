@@ -410,6 +410,18 @@ def generate_gemini_whatsapp_reply(prompt: str, *, model: str = "gemini-3.8-flas
     raise ValueError(last_err or "Gemini WhatsApp reply generation failed.")
 
 
+def _try_strict_rag_reply(session, conversation, incoming, history_msgs, model_name: str = ""):
+    """
+    Returns None when Strict RAG is not enabled for `session` (legacy behaviour unchanged),
+    otherwise a `rag.integration.StrictOutcome` (reply text or skip reason).
+    """
+    try:
+        from rag.integration import maybe_generate_strict_reply
+    except ImportError:  # rag app not installed -> legacy behaviour
+        return None
+    return maybe_generate_strict_reply(session, conversation, incoming, history_msgs, model_name=model_name or "")
+
+
 def _is_uncertain_send_error(exc: Exception) -> bool:
     """
     Return True when a send exception has an uncertain outcome (e.g., read timeout
@@ -611,11 +623,19 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
     )
 
     try:
-        reply_text, model_used = generate_gemini_whatsapp_reply(
-            prompt,
-            model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
-            timeout=int(_get_setting("WHATSAPP_AI_TIMEOUT", "15") or 15),
-        )
+        # Strict RAG (opt-in per session): the answer comes ONLY from the session's knowledge
+        # base. When it is enabled there is no fallback to unrestricted Gemini generation.
+        strict_outcome = _try_strict_rag_reply(session, conversation, incoming, history_msgs, ai_cfg.model_name)
+        if strict_outcome is not None:
+            if strict_outcome.skip_reason:
+                return _skip(f"strict_rag:{strict_outcome.skip_reason}")
+            reply_text, model_used = strict_outcome.reply_text, strict_outcome.model_used
+        else:
+            reply_text, model_used = generate_gemini_whatsapp_reply(
+                prompt,
+                model=ai_cfg.model_name or _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
+                timeout=int(_get_setting("WHATSAPP_AI_TIMEOUT", "15") or 15),
+            )
     except Exception as exc:
         logger.warning("Gemini WhatsApp auto-reply generation failed for msg %s: %s", incoming.pk, exc)
         log_entry.status = WhatsAppAIReplyLog.Status.FAILED

@@ -156,9 +156,17 @@ class CalendarEventsView(_CalendarBase):
             event_ids = [e['id'] for e in events if e.get('id')]
             meetings_by_link = {m.meeting_link: m for m in Meeting.objects.filter(meeting_link__in=meet_urls)}
             meetings_by_event = {m.google_event_id: m for m in Meeting.objects.filter(google_event_id__in=event_ids)}
-            from .models import CalendarEventRecording
+            from .models import CalendarEventRecording, MeetingAutomationJob
             standalone_by_event = {
                 r.event_id: r for r in CalendarEventRecording.objects.filter(user=request.user, event_id__in=event_ids)
+            }
+            jobs_by_event = {
+                j.external_event_id: j
+                for j in MeetingAutomationJob.objects.filter(user=request.user, external_event_id__in=event_ids).order_by('created_at')
+            }
+            jobs_by_link = {
+                j.meeting_link: j
+                for j in MeetingAutomationJob.objects.filter(user=request.user, meeting_link__in=meet_urls).order_by('created_at')
             }
 
             for e in events:
@@ -167,6 +175,7 @@ class CalendarEventsView(_CalendarBase):
                     standalone = standalone_by_event.get(e.get('id'))
                     if standalone:
                         m = standalone
+                job = jobs_by_event.get(e.get('id')) or jobs_by_link.get(e.get('meet_url'))
                 if m:
                     if isinstance(m, Meeting):
                         e['meeting_id'] = m.id
@@ -179,6 +188,15 @@ class CalendarEventsView(_CalendarBase):
                     e['transcript_text'] = getattr(m, 'transcript_text', '') or ''
                     e['speaker_segments'] = getattr(m, 'speaker_segments', []) or []
                     e['transcript_segments'] = getattr(m, 'transcript_segments', []) or []
+                if job:
+                    e['automation_job_id'] = str(job.id)
+                    e['automation_status'] = job.status
+                    e['cbe_job_id'] = job.cbe_job_id
+                    if job.transcript_text and not e.get('transcript_text'):
+                        e['transcript_text'] = job.transcript_text
+                        e['transcription_status'] = 'COMPLETED'
+                        e['speaker_segments'] = job.speaker_segments or []
+                        e['transcript_segments'] = job.transcript_segments or []
 
             return Response({
                 "is_connected": True,

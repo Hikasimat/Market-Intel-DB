@@ -190,7 +190,7 @@ def _get_owned_session(request, session_id=None, session_name=None):
     if not request.user or not request.user.is_authenticated:
         return None
 
-    qs = WhatsAppSession.objects.filter(is_active=True, owner=request.user)
+    qs = WhatsAppSession.objects.filter(is_active=True, owner=request.user).exclude(session_name__startswith="hist_")
     if session_id:
         return qs.filter(pk=session_id).first()
     if session_name:

@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { 
   Building2, AlertTriangle, CheckCircle, Phone, Search, 
   CheckCircle2, AlertCircle, PlayCircle, RefreshCw,
-  FileEdit, Mail, XCircle, Activity, Calendar, ChevronDown, ChevronUp, X
+  FileEdit, Mail, XCircle, Activity, Calendar, ChevronDown, ChevronUp, X, Sparkles
 } from 'lucide-react';
 import { 
   fetchLqPipeline, 
@@ -15,6 +15,7 @@ import {
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import LqWorkspaceModal from '../components/lq/LqWorkspaceModal';
+import BulkCampaignModal from '../components/email/BulkCampaignModal';
 import Pagination from '../components/layout/Pagination';
 import api from '../services/api';
 
@@ -99,6 +100,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
     const userId = user?.id || 'default';
     return sessionStorage.getItem(`lqPipelineFormOpen_${userId}`) === 'true';
   });
+  const [showBulkCampaignModal, setShowBulkCampaignModal] = useState(false);
 
   useEffect(() => {
     const userId = user?.id || 'default';
@@ -353,7 +355,17 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
 
   return (
     <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
-      {showWorkspace && selectedLq ? (
+      {showBulkCampaignModal ? (
+        <BulkCampaignModal
+          isOpen={true}
+          fullPage={true}
+          initialTab="ai_drafts"
+          onClose={() => {
+            setShowBulkCampaignModal(false);
+            dispatch(fetchLqPipeline({ page }));
+          }}
+        />
+      ) : showWorkspace && selectedLq ? (
         <LqWorkspaceModal
           selectedLq={selectedLq}
           initialTab="outreach"
@@ -372,11 +384,21 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
         <>
           {/* Header */}
           <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative overflow-hidden shadow-sm shrink-0">
-        <div className="relative z-10">
-          <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Outreach Workspace</h1>
-          <p className="text-blue-100 text-xs max-w-2xl">Execute outreach communication, log call outcomes, and qualify opportunities.</p>
-        </div>
-      </div>
+            <div className="relative z-10">
+              <h1 className="text-xl md:text-2xl font-black text-white tracking-tight mb-1">Outreach Workspace</h1>
+              <p className="text-blue-100 text-xs max-w-2xl">Execute outreach communication, log call outcomes, and qualify opportunities.</p>
+            </div>
+            <div className="relative z-10 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkCampaignModal(true)}
+                className="px-4 py-2.5 bg-white hover:bg-indigo-50 text-indigo-700 font-extrabold text-xs rounded-xl shadow-md transition flex items-center gap-2 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+                <span>AI Email Campaign (10 / Section)</span>
+              </button>
+            </div>
+          </div>
 
       {/* KPI Cards */}
       {!isManager && (

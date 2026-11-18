@@ -1231,6 +1231,24 @@ const InboxPage = () => {
 
   const finalEmails = (categoryTab === 'primary' && categorizedEmails.length === 0 && !searchQuery) ? displayEmails : categorizedEmails;
 
+  if (showBulkCampaign) {
+    return (
+      <div className="h-full w-full flex flex-col bg-slate-50 overflow-y-auto p-3 sm:p-4 font-sans">
+        <BulkCampaignModal
+          isOpen={true}
+          fullPage={true}
+          initialTab="ai_drafts"
+          onClose={() => setShowBulkCampaign(false)}
+          onSelectRecipientEmail={handleSelectRecipientConversation}
+          onOpenTrackingModal={(tracking) => {
+            setShowBulkCampaign(false);
+            handleOpenTrackingModal(tracking);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="h-full w-full flex flex-col bg-white overflow-hidden font-sans">
       {/* Top Header: Sidebar toggle, Mail title, Search input, Gmail status pill, Bulk Campaign */}

@@ -939,3 +939,74 @@ def ingest_cbe_completed_webhook(
         "utterance_count": len(tr_segments) if isinstance(tr_segments, list) else 0,
         "speaker_segment_count": len(speaker_segments) if isinstance(speaker_segments, list) else 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Background Meeting Automation Scheduler (auto-runs in server runtime)
+# ---------------------------------------------------------------------------
+
+import threading
+
+_SCHEDULER_LOCK = threading.Lock()
+_SCHEDULER_THREAD: Optional[threading.Thread] = None
+_SCHEDULER_STOP = threading.Event()
+
+
+def should_autostart_meeting_scheduler() -> bool:
+    import sys
+
+    if "test" in sys.argv:
+        return False
+    enabled = _get_env("CBE_MEETING_SCHEDULER_ENABLED", "true").lower()
+    if enabled in ("0", "false", "no", "off"):
+        return False
+    excluded = {
+        "migrate", "makemigrations", "collectstatic", "shell", "shell_plus",
+        "dbshell", "createsuperuser", "changepassword", "check", "test",
+        "dumpdata", "loaddata", "showmigrations", "sqlmigrate", "flush",
+    }
+    argv = [str(a).lower() for a in sys.argv]
+    if any(cmd in argv for cmd in excluded):
+        return False
+    if "runserver" in argv:
+        return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
+    return True
+
+
+def _meeting_scheduler_loop() -> None:
+    from django.db import connection
+
+    interval = max(10, int(_get_env("CBE_SCHEDULER_POLL_SECONDS", "20") or 20))
+    logger.info("CBE Meeting Automation background scheduler started (poll=%ss).", interval)
+    if _SCHEDULER_STOP.wait(3.0):
+        return
+    while not _SCHEDULER_STOP.is_set():
+        try:
+            res = process_due_scheduled_meetings()
+            if res.get("dispatched") or res.get("created_jobs"):
+                logger.info("CBE Meeting Scheduler tick: %s", res)
+        except Exception as exc:
+            logger.debug("CBE Meeting Scheduler cycle skipped: %s", exc)
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        _SCHEDULER_STOP.wait(interval)
+
+
+def start_meeting_scheduler() -> bool:
+    global _SCHEDULER_THREAD
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+            return False
+        _SCHEDULER_STOP.clear()
+        t = threading.Thread(
+            target=_meeting_scheduler_loop,
+            name="cbe-meeting-automation-scheduler",
+            daemon=True,
+        )
+        t.start()
+        _SCHEDULER_THREAD = t
+        return True
+

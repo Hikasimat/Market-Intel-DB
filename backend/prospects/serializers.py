@@ -428,6 +428,7 @@ class LeadQualificationSerializer(serializers.ModelSerializer):
     prospect = ProspectSerializer(read_only=True)
     emails_sent_count = serializers.SerializerMethodField()
     calls_logged_count = serializers.SerializerMethodField()
+    latest_email_content = serializers.SerializerMethodField()
 
     def get_emails_sent_count(self, obj):
         if hasattr(obj, 'emails_sent_annotated'):
@@ -441,6 +442,68 @@ class LeadQualificationSerializer(serializers.ModelSerializer):
         from .models import CommunicationActivity
         return CommunicationActivity.objects.filter(prospect=obj.prospect, activity_type='CALL').count()
 
+    def get_latest_email_content(self, obj):
+        from .models import OutreachEmail, EmailCampaignRecipient
+        if not getattr(obj, 'prospect_id', None):
+            return None
+
+        # 1. Check latest sent OutreachEmail (created by direct outreach or campaign send)
+        sent_oe = (
+            OutreachEmail.objects
+            .prefetch_related('recipients')
+            .filter(prospect_id=obj.prospect_id, status__in=['SENT', 'RECEIVED RESPONSE', 'OPENED'])
+            .order_by('-sent_at', '-created_at')
+            .first()
+        )
+        if sent_oe:
+            to_addrs = [r.email_address for r in sent_oe.recipients.all() if r.recipient_type == 'TO' and r.email_address]
+            cc_addrs = [r.email_address for r in sent_oe.recipients.all() if r.recipient_type == 'CC' and r.email_address]
+            camp_rec = (
+                EmailCampaignRecipient.objects
+                .select_related('campaign')
+                .filter(outreach_email=sent_oe)
+                .first()
+            )
+            return {
+                'source': 'CAMPAIGN_SENT' if camp_rec else 'OUTREACH_SENT',
+                'status': sent_oe.status,
+                'subject': sent_oe.subject or '',
+                'body': sent_oe.body or '',
+                'sent_at': sent_oe.sent_at.isoformat() if sent_oe.sent_at else None,
+                'to_emails': to_addrs,
+                'cc_emails': cc_addrs,
+                'campaign_id': str(camp_rec.campaign_id) if camp_rec else None,
+                'campaign_name': camp_rec.campaign.name if camp_rec and camp_rec.campaign else None,
+                'section_number': camp_rec.section_number if camp_rec else None,
+            }
+
+        # 2. Check latest EmailCampaignRecipient (SENT, SENDING, PENDING, or AI DRAFT) for this prospect
+        camp_rec = (
+            EmailCampaignRecipient.objects
+            .select_related('campaign', 'outreach_email')
+            .filter(prospect_id=obj.prospect_id)
+            .exclude(campaign__status='CANCELLED')
+            .order_by('-sent_at', '-created_at')
+            .first()
+        )
+        if camp_rec:
+            subj = (camp_rec.custom_subject or '').strip() or (camp_rec.campaign.subject if camp_rec.campaign else '')
+            body = (camp_rec.custom_body or '').strip() or (camp_rec.campaign.body if camp_rec.campaign else '')
+            return {
+                'source': 'CAMPAIGN_SENT' if camp_rec.status == 'SENT' else 'CAMPAIGN_DRAFT',
+                'status': camp_rec.status,
+                'subject': subj,
+                'body': body,
+                'sent_at': camp_rec.sent_at.isoformat() if camp_rec.sent_at else None,
+                'to_emails': [camp_rec.email_address] if camp_rec.email_address else [],
+                'cc_emails': [],
+                'campaign_id': str(camp_rec.campaign_id),
+                'campaign_name': camp_rec.campaign.name if camp_rec.campaign else None,
+                'section_number': camp_rec.section_number,
+            }
+
+        return None
+
     class Meta:
         model = LeadQualification
         fields = [
@@ -449,8 +512,8 @@ class LeadQualificationSerializer(serializers.ModelSerializer):
             'email_status', 'budget', 'authority', 'need', 'timeline',
             'verification_checklist', 'issue_category', 'issue_details',
             'completed_tasks_log',
-            'emails_sent_count', 'calls_logged_count', 'attended_meeting',
-            'created_at', 'updated_at'
+            'emails_sent_count', 'calls_logged_count', 'latest_email_content',
+            'attended_meeting', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'prospect', 'pre_task_status', 'created_at', 'updated_at', 'completed_tasks_log']
 
@@ -733,9 +796,11 @@ class EmailCampaignRecipientSerializer(serializers.ModelSerializer):
         model = EmailCampaignRecipient
         fields = [
             'id', 'email_address', 'recipient_name', 'prospect', 'prospect_company_name',
-            'prospect_contact', 'prospect_contact_name', 'queue_order', 'status',
-            'attempt_count', 'scheduled_for', 'last_attempt_at', 'sent_at',
-            'error_message', 'outreach_email', 'tracking', 'reply', 'created_at'
+            'prospect_contact', 'prospect_contact_name', 'section_number',
+            'custom_subject', 'custom_body', 'outreach_snapshot',
+            'queue_order', 'status', 'attempt_count', 'scheduled_for',
+            'last_attempt_at', 'sent_at', 'error_message', 'outreach_email',
+            'tracking', 'reply', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -743,9 +808,11 @@ class EmailCampaignRecipientSerializer(serializers.ModelSerializer):
 class EmailCampaignSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     total_count = serializers.IntegerField(read_only=True)
+    draft_count = serializers.IntegerField(read_only=True)
     sent_count = serializers.IntegerField(read_only=True)
     failed_count = serializers.IntegerField(read_only=True)
     pending_count = serializers.IntegerField(read_only=True)
+    sections_count = serializers.SerializerMethodField()
     attachments_count = serializers.SerializerMethodField()
 
     def get_created_by_name(self, obj):
@@ -756,28 +823,74 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
     def get_attachments_count(self, obj):
         return obj.attachments.count()
 
+    def get_sections_count(self, obj):
+        total = obj.total_count
+        return (total + 9) // 10 if total > 0 else 0
+
     class Meta:
         model = EmailCampaign
         fields = [
             'id', 'name', 'sender_email', 'subject', 'interval_seconds', 'open_tracking_enabled',
-            'status', 'total_count', 'sent_count', 'failed_count', 'pending_count',
-            'attachments_count', 'started_at', 'paused_at', 'completed_at', 'cancelled_at',
-            'last_sent_at', 'next_eligible_at', 'created_at', 'updated_at', 'created_by_name'
-        ]
-        read_only_fields = [
-            'id', 'sender_email', 'status', 'total_count', 'sent_count', 'failed_count',
-            'pending_count', 'attachments_count', 'started_at', 'paused_at', 'completed_at',
+            'status', 'total_count', 'draft_count', 'sent_count', 'failed_count', 'pending_count',
+            'sections_count', 'attachments_count', 'started_at', 'paused_at', 'completed_at',
             'cancelled_at', 'last_sent_at', 'next_eligible_at', 'created_at', 'updated_at',
             'created_by_name'
+        ]
+        read_only_fields = [
+            'id', 'sender_email', 'status', 'total_count', 'draft_count', 'sent_count',
+            'failed_count', 'pending_count', 'sections_count', 'attachments_count',
+            'started_at', 'paused_at', 'completed_at', 'cancelled_at', 'last_sent_at',
+            'next_eligible_at', 'created_at', 'updated_at', 'created_by_name'
         ]
 
 
 class EmailCampaignDetailSerializer(EmailCampaignSerializer):
     recipients = EmailCampaignRecipientSerializer(many=True, read_only=True)
     attachments = EmailCampaignAttachmentSerializer(many=True, read_only=True)
+    sections = serializers.SerializerMethodField()
+
+    def get_sections(self, obj):
+        recs = list(obj.recipients.all().order_by('queue_order'))
+        by_sec = {}
+        for r in recs:
+            s_num = r.section_number or ((r.queue_order // 10) + 1)
+            by_sec.setdefault(s_num, []).append(r)
+
+        sections_list = []
+        for s_num in sorted(by_sec.keys()):
+            items = by_sec[s_num]
+            total = len(items)
+            drafts = sum(1 for r in items if r.status == 'DRAFT')
+            pending = sum(1 for r in items if r.status in ('PENDING', 'SENDING', 'RETRY_PENDING'))
+            sent = sum(1 for r in items if r.status == 'SENT')
+            failed = sum(1 for r in items if r.status == 'FAILED')
+
+            if pending > 0:
+                sec_status = 'SENDING'
+            elif drafts > 0 and sent == 0 and failed == 0:
+                sec_status = 'DRAFT'
+            elif sent == total and total > 0:
+                sec_status = 'COMPLETED'
+            elif sent + failed == total and total > 0:
+                sec_status = 'COMPLETED_WITH_ERRORS'
+            else:
+                sec_status = 'PARTIAL'
+
+            sections_list.append({
+                'section_number': s_num,
+                'label': f"Section {s_num}",
+                'total_count': total,
+                'draft_count': drafts,
+                'pending_count': pending,
+                'sent_count': sent,
+                'failed_count': failed,
+                'status': sec_status,
+                'can_send': (drafts > 0 or failed > 0) and obj.status != 'CANCELLED',
+            })
+        return sections_list
 
     class Meta(EmailCampaignSerializer.Meta):
-        fields = EmailCampaignSerializer.Meta.fields + ['body', 'template_id', 'signature_id', 'recipients', 'attachments']
+        fields = EmailCampaignSerializer.Meta.fields + ['body', 'template_id', 'signature_id', 'sections', 'recipients', 'attachments']
 
 
 class EmailThreadMessageSerializer(serializers.ModelSerializer):

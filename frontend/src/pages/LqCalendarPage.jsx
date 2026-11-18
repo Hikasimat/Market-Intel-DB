@@ -1376,10 +1376,25 @@ export default function LqCalendarPage() {
                 )}
 
                 {/* Description */}
-                {/* Google Meet audio recording stored in Market Intel DB */}
+                {/* Google Meet audio recording & CBE Transcript stored in Market Intel DB */}
                 {selectedEvent.meet_url && (
-                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-                    <span className="font-bold text-slate-800 text-xs">Meeting Audio Record</span>
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-800 text-xs">Meeting Bot &amp; Audio Record</span>
+                      {(selectedEvent.automation_status || selectedEvent.transcription_status) && (
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            selectedEvent.automation_status === "COMPLETED" || selectedEvent.transcription_status === "COMPLETED"
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : selectedEvent.automation_status === "PROCESSING" || selectedEvent.automation_status === "DISPATCHED"
+                              ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                              : "bg-slate-100 text-slate-600 border-slate-200"
+                          }`}
+                        >
+                          Bot: {selectedEvent.automation_status || selectedEvent.transcription_status}
+                        </span>
+                      )}
+                    </div>
                     {selectedEvent.recording_file ? (
                       <div className="space-y-2">
                         <audio
@@ -1409,10 +1424,20 @@ export default function LqCalendarPage() {
                           {syncingRecording ? "Fetching from Google Meet..." : "Fetch Audio from Google Meet"}
                         </button>
                         <span className="text-[11px] text-slate-400">
-                          {selectedEvent.recording_status === "PROCESSING"
-                            ? "Google is still processing the recording"
-                            : "Available after the meeting ends (recording must be on)"}
+                          {selectedEvent.recording_status === "PROCESSING" || selectedEvent.automation_status === "PROCESSING"
+                            ? "Bot is in meeting / processing recording & transcript"
+                            : "Available after the meeting ends"}
                         </span>
+                      </div>
+                    )}
+                    {selectedEvent.transcript_text && (
+                      <div className="pt-2 border-t border-slate-200/80 space-y-1">
+                        <span className="text-[11px] font-bold text-slate-700 block">
+                          Meeting Transcript (Speaker Diarized)
+                        </span>
+                        <div className="p-2.5 bg-white rounded-xl border border-slate-200 text-[11px] text-slate-700 whitespace-pre-wrap max-h-44 overflow-y-auto leading-relaxed">
+                          {selectedEvent.transcript_text}
+                        </div>
                       </div>
                     )}
                   </div>

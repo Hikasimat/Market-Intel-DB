@@ -1,0 +1,26 @@
+[Unit]
+Description=MarketIntel RAG Document Ingestion Background Worker
+After=network.target marketintel.service
+
+[Service]
+Type=simple
+User=marketintel
+Group=marketintel
+WorkingDirectory=/opt/marketintel/repo/backend
+
+# Load production environment from the .env file
+EnvironmentFile=/opt/marketintel/.env
+
+# Run dedicated RAG ingestion worker (polls SQS when RAG_QUEUE_BACKEND=sqs, or DB queue when local)
+ExecStart=/opt/marketintel/venv/bin/python manage.py run_rag_worker --poll-interval 3
+
+# Restart policy: recover automatically if killed or on unhandled crash
+Restart=on-failure
+RestartSec=5s
+
+# Security and isolation
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

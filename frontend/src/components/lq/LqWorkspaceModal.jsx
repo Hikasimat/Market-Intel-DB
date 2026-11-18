@@ -128,13 +128,22 @@ export default function LqWorkspaceModal({
         const res = await api.get(`/lq-pipeline/${lqId}/`);
         if (res.data) {
           setCurrentLq(res.data);
+          const latest = res.data.latest_email_content;
+          if (latest) {
+            if (latest.subject) setEmailSubject(latest.subject);
+            if (latest.body) setEmailBody(latest.body);
+            if (latest.to_emails?.length > 0) setToEmails(latest.to_emails);
+            if (latest.cc_emails?.length > 0) setCcEmails(latest.cc_emails);
+          }
           if (res.data.prospect) {
             setCurrentProspect(res.data.prospect);
-            const keyContactWithEmail = res.data.prospect.key_contacts?.find(c => c.official_email && c.official_email.trim());
-            if (keyContactWithEmail) {
-              setToEmails([keyContactWithEmail.official_email]);
-            } else if (res.data.prospect.official_email_address) {
-              setToEmails([res.data.prospect.official_email_address]);
+            if (!latest?.to_emails?.length) {
+              const keyContactWithEmail = res.data.prospect.key_contacts?.find(c => c.official_email && c.official_email.trim());
+              if (keyContactWithEmail) {
+                setToEmails([keyContactWithEmail.official_email]);
+              } else if (res.data.prospect.official_email_address) {
+                setToEmails([res.data.prospect.official_email_address]);
+              }
             }
           }
           dispatch({ type: 'lqPipeline/setCachedDetail', payload: res.data });
@@ -158,12 +167,20 @@ export default function LqWorkspaceModal({
   // Initialize from prop, but will be overridden by fresh fetch below
   const [emailProgress, setEmailProgress] = useState(selectedLq?.email_status || 'Not Sent');
   const [emailCollapsed, setEmailCollapsed] = useState(selectedLq?.email_status && selectedLq.email_status !== 'Not Sent');
-  const defaultToEmail = prospect?.key_contacts?.length > 0 && prospect.key_contacts[0].official_email ? prospect.key_contacts[0].official_email : '';
-  const [toEmails, setToEmails] = useState(defaultToEmail ? [defaultToEmail] : []);
-  const [ccEmails, setCcEmails] = useState([]);
+  const defaultToEmail = prospect?.key_contacts?.length > 0 && prospect.key_contacts[0].official_email ? prospect.key_contacts[0].official_email : (prospect?.official_email_address || '');
+  const [toEmails, setToEmails] = useState(
+    selectedLq?.latest_email_content?.to_emails?.length > 0
+      ? selectedLq.latest_email_content.to_emails
+      : (defaultToEmail ? [defaultToEmail] : [])
+  );
+  const [ccEmails, setCcEmails] = useState(selectedLq?.latest_email_content?.cc_emails || []);
   const [customRecipientInput, setCustomRecipientInput] = useState('');
-  const [emailSubject, setEmailSubject] = useState(`Company Introduction & Solutions Overview — ${prospect.company_name || ''}`);
-  const [emailBody, setEmailBody] = useState(`Dear ${prospect.company_name || 'Team'},\n\nWe are pleased to introduce our solution portfolio tailored for ${prospect.primary_industries || 'your industry'}. We would love to schedule a brief introductory discussion to explore potential alignment.\n\nBest regards,\nLead Qualification Team`);
+  const [emailSubject, setEmailSubject] = useState(
+    selectedLq?.latest_email_content?.subject || `Company Introduction & Solutions Overview — ${prospect.company_name || ''}`
+  );
+  const [emailBody, setEmailBody] = useState(
+    selectedLq?.latest_email_content?.body || `Dear ${prospect.company_name || 'Team'},\n\nWe are pleased to introduce our solution portfolio tailored for ${prospect.primary_industries || 'your industry'}. We would love to schedule a brief introductory discussion to explore potential alignment.\n\nBest regards,\nLead Qualification Team`
+  );
   const [templateSelection, setTemplateSelection] = useState({ templateId: '', signatureId: '', baseBody: null });
   const [openTrackingEnabled, setOpenTrackingEnabled] = useState(true);
   const [attachments, setAttachments] = useState([]);
@@ -272,12 +289,19 @@ export default function LqWorkspaceModal({
   // This ensures that email_status and communication history are NOT stale from props
   useEffect(() => {
     if (selectedLq?.id && prospect?.id) {
-      // Fetch fresh LQ data to get persisted email_status
+      // Fetch fresh LQ data to get persisted email_status & latest campaign/outreach email content
       api.get(`/lq-pipeline/${selectedLq.id}/`)
         .then(res => {
           const freshStatus = res.data?.email_status || 'Not Sent';
           setEmailProgress(freshStatus);
           setEmailCollapsed(freshStatus !== 'Not Sent');
+          const latestContent = res.data?.latest_email_content;
+          if (latestContent) {
+            if (latestContent.subject) setEmailSubject(latestContent.subject);
+            if (latestContent.body) setEmailBody(latestContent.body);
+            if (latestContent.to_emails?.length > 0) setToEmails(latestContent.to_emails);
+            if (latestContent.cc_emails?.length > 0) setCcEmails(latestContent.cc_emails);
+          }
         })
         .catch(err => console.error('Failed to fetch fresh LQ data', err));
 
@@ -307,6 +331,11 @@ export default function LqWorkspaceModal({
         if (res.data?.email_status && res.data.email_status !== emailProgress) {
           setEmailProgress(res.data.email_status);
         }
+        if (res.data?.latest_email_content) {
+          setCurrentLq(res.data);
+          if (res.data.latest_email_content.subject) setEmailSubject(res.data.latest_email_content.subject);
+          if (res.data.latest_email_content.body) setEmailBody(res.data.latest_email_content.body);
+        }
       } catch (e) {
         // Silent background check
       }
@@ -319,6 +348,11 @@ export default function LqWorkspaceModal({
     try {
       const logs = await dispatch(fetchCommunications(prospect.id)).unwrap();
       setOutreachLogs(logs);
+      const latestSentMail = logs.find(log => log.activity_type === 'EMAIL_SENT')?.outreach_email_detail;
+      if (latestSentMail) {
+        if (latestSentMail.subject) setEmailSubject(latestSentMail.subject);
+        if (latestSentMail.body) setEmailBody(latestSentMail.body);
+      }
       const cid = contactId !== undefined ? contactId : selectedContactId;
       const relevantLogs = cid
         ? logs.filter(log => log.prospect_contact === cid && log.activity_type === 'CALL')
@@ -1157,7 +1191,13 @@ export default function LqWorkspaceModal({
                               </button>
                             )}
                           </div>
-                          <p className="text-xs text-slate-300 mt-0.5">{isEmailSent ? '' : 'Send introductory email to enable call outcomes.'}</p>
+                          <p className="text-xs text-slate-300 mt-0.5 truncate max-w-xl">
+                            {isEmailSent
+                              ? (currentLq?.latest_email_content?.campaign_name
+                                  ? `Sent via Campaign: ${currentLq.latest_email_content.campaign_name} • ${emailSubject}`
+                                  : `Subject: ${emailSubject}`)
+                              : 'Send introductory email to enable call outcomes.'}
+                          </p>
                         </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -1461,6 +1501,24 @@ export default function LqWorkspaceModal({
                           setEmailBody={setEmailBody}
                           disabled={isEmailSent}
                         />
+                        {currentLq?.latest_email_content?.campaign_name && (
+                          <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200/80 flex items-center justify-between gap-2 text-xs">
+                            <div className="flex items-center gap-2 text-indigo-900">
+                              <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                              <span>
+                                <strong>Synced with Campaign:</strong> {currentLq.latest_email_content.campaign_name}
+                                {currentLq.latest_email_content.section_number ? ` (Section ${currentLq.latest_email_content.section_number})` : ''}
+                              </span>
+                            </div>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              currentLq.latest_email_content.status === 'SENT'
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                : 'bg-indigo-100 text-indigo-800 border-indigo-300'
+                            }`}>
+                              {currentLq.latest_email_content.status === 'SENT' ? 'Sent via Campaign' : `Campaign ${currentLq.latest_email_content.status}`}
+                            </span>
+                          </div>
+                        )}
                         <div>
                           <label className="block font-extrabold text-slate-800 mb-1 uppercase tracking-wider text-[10px]">Email Subject</label>
                           <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} disabled={isEmailSent} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-900 text-xs disabled:bg-slate-100 disabled:text-slate-500" />

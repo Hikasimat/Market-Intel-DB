@@ -14,15 +14,16 @@ import GeminiEmailPromptBox from './GeminiEmailPromptBox';
 import AttachmentLibraryModal from './AttachmentLibraryModal';
 
 const STEPS = [
+  { id: 'ai_drafts', label: '✨ AI Outreach Drafts (10/Section)' },
   { id: 'compose', label: '1. Compose' },
   { id: 'recipients', label: '2. Recipients' },
   { id: 'confirm', label: '3. Review' },
   { id: 'monitor', label: 'Campaign Monitor' }
 ];
 
-export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEmail, onOpenTrackingModal }) {
+export default function BulkCampaignModal({ isOpen = true, onClose, onSelectRecipientEmail, onOpenTrackingModal, initialTab = 'ai_drafts', fullPage = false }) {
   const navigate = useNavigate();
-  const [currentTab, setCurrentTab] = useState('compose');
+  const [currentTab, setCurrentTab] = useState(initialTab || 'ai_drafts');
 
   // Form State
   const [campaignName, setCampaignName] = useState('');
@@ -33,6 +34,31 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [showAttachmentLibrary, setShowAttachmentLibrary] = useState(false);
+
+  // AI Outreach Analysis & Section Drafting State
+  const [unsentAnalysis, setUnsentAnalysis] = useState({
+    records: [],
+    total_unsent: 0,
+    section_size: 10,
+    estimated_sections: 0,
+    portfolio: { portfolio_ready: false, portfolio_documents: [], portfolio_chunks_count: 0 },
+  });
+  const [loadingUnsent, setLoadingUnsent] = useState(false);
+  const [unsentSearch, setUnsentSearch] = useState('');
+  const [selectedUnsentProspectIds, setSelectedUnsentProspectIds] = useState([]);
+  const [aiPrompt, setAiPrompt] = useState(
+    'Analyze each outreach company (name, mobile number, email, product offerings, and primary industries) alongside our company portfolio from the Vector DB and write a tailored, high-converting B2B outreach email.'
+  );
+  const [aiTone, setAiTone] = useState('professional');
+  const [generatingAiDrafts, setGeneratingAiDrafts] = useState(false);
+  const [activeSectionNumber, setActiveSectionNumber] = useState(1);
+  const [draftEdits, setDraftEdits] = useState({}); // { [recipientId]: { custom_subject, custom_body, dirty } }
+  const [savingDraftId, setSavingDraftId] = useState(null);
+  const [regeneratingDraftId, setRegeneratingDraftId] = useState(null);
+  const [sendingSectionNum, setSendingSectionNum] = useState(null);
+  const [liveListenerEnabled, setLiveListenerEnabled] = useState(true);
+  const [lastLiveCheckAt, setLastLiveCheckAt] = useState(null);
+  const liveSyncInFlightRef = useRef(false);
 
   // Recipients State
   const [directorySearch, setDirectorySearch] = useState('');
@@ -50,6 +76,106 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
 
   // Poll timer
   const pollTimerRef = useRef(null);
+  const liveListenerTimerRef = useRef(null);
+
+  const applyCampaignDetailWithPreservedEdits = useCallback((data) => {
+    if (!data) return;
+    setActiveCampaignDetail(data);
+    const nextEdits = {};
+    (data?.recipients || []).forEach(r => {
+      nextEdits[r.id] = {
+        custom_subject: r.custom_subject || data.subject || '',
+        custom_body: r.custom_body || data.body || '',
+        dirty: false,
+      };
+    });
+    setDraftEdits(prev => {
+      const merged = { ...nextEdits };
+      Object.keys(prev).forEach(k => {
+        if (prev[k]?.dirty && merged[k]) {
+          merged[k] = prev[k];
+        }
+      });
+      return merged;
+    });
+  }, []);
+
+  // Fetch Unsent Outreach Analysis
+  const fetchUnsentOutreach = useCallback(async (searchQuery = '') => {
+    setLoadingUnsent(true);
+    try {
+      const res = await api.get(`/email-campaigns/unsent-outreach/?search=${encodeURIComponent(searchQuery)}`);
+      const data = res.data || {};
+      const recs = data.records || [];
+      setUnsentAnalysis({
+        records: recs,
+        total_unsent: data.total_unsent ?? recs.length,
+        section_size: data.section_size || 10,
+        estimated_sections: data.estimated_sections ?? Math.ceil(recs.length / 10),
+        portfolio: data.portfolio || { portfolio_ready: false, portfolio_documents: [], portfolio_chunks_count: 0 },
+      });
+      setSelectedUnsentProspectIds(prev => {
+        const validSet = new Set(recs.map(r => r.prospect_id).filter(Boolean));
+        const kept = prev.filter(id => validSet.has(id));
+        return kept.length > 0 ? kept : Array.from(validSet);
+      });
+      if (data.checked_at) {
+        setLastLiveCheckAt(data.checked_at);
+      }
+    } catch (err) {
+      console.error('Failed to analyze unsent outreach records', err);
+    } finally {
+      setLoadingUnsent(false);
+    }
+  }, []);
+
+  // Live Sent-Mail Check & Automatic AI Drafting Sync
+  const runLiveSentMailSync = useCallback(async ({ autoDraft = true, silent = true, campaignId = null } = {}) => {
+    if (liveSyncInFlightRef.current) return;
+    liveSyncInFlightRef.current = true;
+    if (!silent) setLoadingUnsent(true);
+    try {
+      const res = await api.post('/email-campaigns/live-sync/', {
+        auto_draft: autoDraft,
+        campaign_id: campaignId,
+        user_prompt: aiPrompt,
+        tone: aiTone,
+      });
+      const data = res.data || {};
+      const recs = data.records || [];
+      setUnsentAnalysis({
+        records: recs,
+        total_unsent: data.total_unsent ?? recs.length,
+        section_size: data.section_size || 10,
+        estimated_sections: data.estimated_sections ?? Math.ceil(recs.length / 10),
+        portfolio: data.portfolio || { portfolio_ready: false, portfolio_documents: [], portfolio_chunks_count: 0 },
+      });
+      setSelectedUnsentProspectIds(prev => {
+        const validSet = new Set(recs.map(r => r.prospect_id).filter(Boolean));
+        const kept = prev.filter(id => validSet.has(id));
+        return kept.length > 0 ? kept : Array.from(validSet);
+      });
+      if (data.checked_at) {
+        setLastLiveCheckAt(data.checked_at);
+      }
+      if (data.active_campaign) {
+        applyCampaignDetailWithPreservedEdits(data.active_campaign);
+      }
+      if (data.pruned_sent_drafts > 0) {
+        toast.info(`Live Sent-Mail Check: Removed ${data.pruned_sent_drafts} draft(s) for outreach companies that already received an email.`);
+        fetchCampaigns();
+      }
+      if (data.newly_drafted_count > 0) {
+        toast.success(`Live AI Drafter: Automatically drafted ${data.newly_drafted_count} customized email(s) for unsent outreach records!`);
+        fetchCampaigns();
+      }
+    } catch (err) {
+      console.error('Live sent-mail & auto-draft sync error', err);
+    } finally {
+      liveSyncInFlightRef.current = false;
+      if (!silent) setLoadingUnsent(false);
+    }
+  }, [aiPrompt, aiTone, applyCampaignDetailWithPreservedEdits]);
 
   // Fetch Directory
   const fetchDirectory = useCallback(async (searchQuery = '') => {
@@ -86,7 +212,25 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
     setLoadingDetail(true);
     try {
       const res = await api.get(`/email-campaigns/${campaignId}/`);
-      setActiveCampaignDetail(res.data);
+      const data = res.data;
+      setActiveCampaignDetail(data);
+      const nextEdits = {};
+      (data?.recipients || []).forEach(r => {
+        nextEdits[r.id] = {
+          custom_subject: r.custom_subject || data.subject || '',
+          custom_body: r.custom_body || data.body || '',
+          dirty: false,
+        };
+      });
+      setDraftEdits(prev => {
+        const merged = { ...nextEdits };
+        Object.keys(prev).forEach(k => {
+          if (prev[k]?.dirty && merged[k]) {
+            merged[k] = prev[k];
+          }
+        });
+        return merged;
+      });
     } catch (err) {
       console.error('Failed to load campaign detail', err);
     } finally {
@@ -99,20 +243,43 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
     if (isOpen) {
       fetchDirectory('');
       fetchCampaigns().then((list) => {
-        // If an active campaign exists, start on monitor tab
-        const active = list.find(c => ['RUNNING', 'QUEUED', 'PAUSED'].includes(c.status));
+        const active = list.find(c => ['DRAFT', 'RUNNING', 'QUEUED', 'PAUSED'].includes(c.status));
         if (active) {
           fetchCampaignDetail(active.id);
         }
+        runLiveSentMailSync({
+          autoDraft: true,
+          silent: false,
+          campaignId: active?.id || null,
+        });
       });
     } else {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      if (liveListenerTimerRef.current) clearInterval(liveListenerTimerRef.current);
     }
-  }, [isOpen, fetchDirectory, fetchCampaigns, fetchCampaignDetail]);
+  }, [isOpen, fetchDirectory, fetchCampaigns, fetchCampaignDetail]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Live polling for active campaign monitor
+  // Live Sent-Mail Check & Automatic AI Drafting Listener (runs every 7s while modal is open)
   useEffect(() => {
-    if (isOpen && currentTab === 'monitor' && activeCampaignDetail?.id) {
+    if (isOpen && liveListenerEnabled) {
+      liveListenerTimerRef.current = setInterval(() => {
+        if (!unsentSearch.trim() && !generatingAiDrafts) {
+          runLiveSentMailSync({
+            autoDraft: true,
+            silent: true,
+            campaignId: activeCampaignDetail?.id || null,
+          });
+        }
+      }, 7000);
+      return () => {
+        if (liveListenerTimerRef.current) clearInterval(liveListenerTimerRef.current);
+      };
+    }
+  }, [isOpen, liveListenerEnabled, unsentSearch, generatingAiDrafts, activeCampaignDetail?.id, runLiveSentMailSync]);
+
+  // Live polling for active campaign monitor or section sending
+  useEffect(() => {
+    if (isOpen && (currentTab === 'monitor' || currentTab === 'ai_drafts') && activeCampaignDetail?.id) {
       const isLive = ['RUNNING', 'QUEUED', 'PAUSED'].includes(activeCampaignDetail.status);
       if (isLive) {
         pollTimerRef.current = setInterval(() => {
@@ -357,6 +524,185 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
     }
   };
 
+  // Toggle selection of an unsent outreach prospect
+  const handleToggleUnsentProspect = (prospectId) => {
+    setSelectedUnsentProspectIds(prev =>
+      prev.includes(prospectId) ? prev.filter(id => id !== prospectId) : [...prev, prospectId]
+    );
+  };
+
+  // Generate AI Customized Drafts (10 per Section)
+  const handleGenerateAiDrafts = async () => {
+    const targetIds = selectedUnsentProspectIds.length > 0
+      ? selectedUnsentProspectIds
+      : unsentAnalysis.records.map(r => r.prospect_id).filter(Boolean);
+
+    if (targetIds.length === 0) {
+      return toast.error('No unsent outreach records selected to generate drafts for.');
+    }
+
+    const effectiveName = campaignName.trim() || `AI Outreach Campaign (${targetIds.length} Companies)`;
+    setGeneratingAiDrafts(true);
+    const toastId = toast.loading(
+      `Google Gemini is analyzing ${targetIds.length} outreach record(s) & Vector DB portfolio to generate customized drafts (10 per section)...`
+    );
+
+    try {
+      const formData = new FormData();
+      formData.append('name', effectiveName);
+      formData.append('user_prompt', aiPrompt);
+      formData.append('tone', aiTone);
+      formData.append('open_tracking_enabled', String(openTrackingEnabled));
+      formData.append('prospect_ids', JSON.stringify(targetIds));
+
+      if (templateSelection.templateId) {
+        formData.append('template_id', templateSelection.templateId);
+      }
+      if (templateSelection.signatureId) {
+        formData.append('signature_id', templateSelection.signatureId);
+      }
+      attachments.forEach(file => {
+        formData.append('attachments', file);
+      });
+
+      const res = await api.post('/email-campaigns/generate-ai-drafts/', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      toast.dismiss(toastId);
+      const created = res.data;
+      const createdList = created.created_campaigns || [created];
+      const totalDrafted = createdList.reduce((sum, c) => sum + (c.total_count || 0), 0);
+      const totalSecs = createdList.reduce((sum, c) => sum + (c.sections?.length || Math.ceil((c.total_count || 0) / 10)), 0);
+      toast.success(
+        createdList.length > 1
+          ? `Generated ${totalDrafted} customized drafts across ${createdList.length} campaigns (max 50/campaign • ${totalSecs} sections total)!`
+          : `Generated ${created.total_count} customized email drafts across ${totalSecs} section(s)! Review each section below and click Send.`
+      );
+
+      setActiveCampaignDetail(created);
+      setActiveSectionNumber(1);
+      const initEdits = {};
+      (created.recipients || []).forEach(r => {
+        initEdits[r.id] = {
+          custom_subject: r.custom_subject || created.subject || '',
+          custom_body: r.custom_body || created.body || '',
+          dirty: false,
+        };
+      });
+      setDraftEdits(initEdits);
+      fetchCampaigns();
+    } catch (err) {
+      toast.dismiss(toastId);
+      const msg = err.response?.data?.error || 'Failed to generate AI customized email drafts';
+      toast.error(msg);
+    } finally {
+      setGeneratingAiDrafts(false);
+    }
+  };
+
+  // Update local draft edit state
+  const handleLocalDraftChange = (recipientId, field, value) => {
+    setDraftEdits(prev => {
+      const existing = prev[recipientId] || {};
+      return {
+        ...prev,
+        [recipientId]: {
+          ...existing,
+          [field]: value,
+          dirty: true,
+        },
+      };
+    });
+  };
+
+  // Save a single edited draft
+  const handleSaveDraftEdit = async (recipientId) => {
+    if (!activeCampaignDetail?.id) return;
+    const edit = draftEdits[recipientId];
+    if (!edit) return;
+    setSavingDraftId(recipientId);
+    try {
+      const res = await api.patch(`/email-campaigns/${activeCampaignDetail.id}/update-draft/`, {
+        recipient_id: recipientId,
+        custom_subject: edit.custom_subject,
+        custom_body: edit.custom_body,
+      });
+      if (res.data?.campaign) {
+        setActiveCampaignDetail(res.data.campaign);
+      }
+      setDraftEdits(prev => ({
+        ...prev,
+        [recipientId]: { ...edit, dirty: false },
+      }));
+      toast.success('Customized draft saved.');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to save draft changes');
+    } finally {
+      setSavingDraftId(null);
+    }
+  };
+
+  // Regenerate a single draft with Google Gemini + Vector DB portfolio
+  const handleRegenerateSingleDraft = async (recipientId) => {
+    if (!activeCampaignDetail?.id) return;
+    setRegeneratingDraftId(recipientId);
+    try {
+      const res = await api.post(`/email-campaigns/${activeCampaignDetail.id}/regenerate-draft/`, {
+        recipient_id: recipientId,
+        user_prompt: aiPrompt,
+        tone: aiTone,
+      });
+      const updatedRec = res.data?.recipient;
+      if (res.data?.campaign) {
+        setActiveCampaignDetail(res.data.campaign);
+      }
+      if (updatedRec) {
+        setDraftEdits(prev => ({
+          ...prev,
+          [recipientId]: {
+            custom_subject: updatedRec.custom_subject || '',
+            custom_body: updatedRec.custom_body || '',
+            dirty: false,
+          },
+        }));
+      }
+      toast.success('Regenerated customized draft with Google Gemini!');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to regenerate draft');
+    } finally {
+      setRegeneratingDraftId(null);
+    }
+  };
+
+  // Send a specific section (10 customized drafts with 90-second interval)
+  const handleSendSection = async (sectionNum) => {
+    if (!activeCampaignDetail?.id) return;
+    const sectionRecs = (activeCampaignDetail.recipients || []).filter(
+      r => (r.section_number || Math.floor((r.queue_order || 0) / 10) + 1) === sectionNum
+    );
+    const updatedDraftsPayload = sectionRecs.map(r => ({
+      recipient_id: r.id,
+      custom_subject: draftEdits[r.id]?.custom_subject ?? r.custom_subject ?? activeCampaignDetail.subject,
+      custom_body: draftEdits[r.id]?.custom_body ?? r.custom_body ?? activeCampaignDetail.body,
+    }));
+
+    setSendingSectionNum(sectionNum);
+    try {
+      const res = await api.post(`/email-campaigns/${activeCampaignDetail.id}/send-section/`, {
+        section_number: sectionNum,
+        updated_drafts: updatedDraftsPayload,
+      });
+      setActiveCampaignDetail(res.data);
+      fetchCampaigns();
+      toast.success(`Section ${sectionNum} (${sectionRecs.length} customized emails) is now sending with a 90-second interval between each email!`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || `Failed to start sending Section ${sectionNum}`);
+    } finally {
+      setSendingSectionNum(null);
+    }
+  };
+
   // Calculate approximate duration for confirmation
   const totalRecipientsCount = selectedRecipients.length;
   const estimatedSeconds = Math.max(0, (totalRecipientsCount - 1) * 90);
@@ -368,10 +714,10 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
     : `${estimatedMinutes} min ${estimatedRemainingSecs} sec`;
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-5xl h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className={fullPage ? "w-full flex-1 flex flex-col min-h-[calc(100vh-2rem)]" : "fixed inset-0 z-50 bg-slate-50 flex flex-col w-screen h-screen overflow-hidden"}>
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 w-full flex-1 flex flex-col overflow-hidden">
         
-        {/* Top Header - Google Workspace Style */}
+        {/* Top Header - Full Page Campaign Workspace */}
         <div className="px-6 py-4 bg-white border-b border-slate-200/80 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center">
@@ -379,24 +725,27 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-semibold text-slate-900 tracking-tight">Bulk Email Campaign</h2>
+                <h2 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight">AI Email Campaign Workspace</h2>
                 <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-200/60 flex items-center gap-1">
-                  <Clock className="w-3 h-3" /> 90s pacing
+                  <Clock className="w-3 h-3" /> 90s pacing • 10 Drafts / Section
                 </span>
               </div>
               <p className="text-xs text-slate-500">
-                Paced sequential delivery protecting your sender reputation and deliverability.
+                Live sent-mail check, Google Gemini customized outreach email drafting, and section-based 90-second paced sending.
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-slate-700 rounded-full hover:bg-slate-100 transition cursor-pointer"
-            title="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 rounded-xl bg-slate-100 hover:bg-slate-200 transition flex items-center gap-1.5 cursor-pointer"
+              title="Back"
+            >
+              <X className="w-4 h-4" />
+              <span>Back</span>
+            </button>
+          )}
         </div>
 
         {/* Step Navigation Bar - Google Segmented Tabs */}
@@ -442,6 +791,600 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
 
         {/* Body Content */}
         <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
+
+          {/* TAB 0: AI OUTREACH DRAFTS & SECTION REVIEW/SEND (10 PER SECTION) */}
+          {currentTab === 'ai_drafts' && (
+            <div className="space-y-6">
+              {/* Top Panel: Outreach Data Analysis & Gemini Draft Generator */}
+              <div className="bg-white rounded-2xl border border-indigo-200/80 shadow-xs p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                      <Sparkles className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                          AI-Powered Outreach Analysis & Customized Email Drafting
+                        </h3>
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                          10 Drafts / Section • 90s Interval
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setLiveListenerEnabled(prev => !prev)}
+                          className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
+                            liveListenerEnabled
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : 'bg-slate-100 text-slate-500 border-slate-200'
+                          }`}
+                          title="Toggle live sent-mail check & automatic AI drafting for unsent outreach records"
+                        >
+                          <span className={`w-2 h-2 rounded-full ${liveListenerEnabled ? 'bg-emerald-500 animate-ping' : 'bg-slate-400'}`} />
+                          <span>
+                            {liveListenerEnabled ? 'Live Sent-Mail Listener: ON' : 'Live Sent-Mail Listener: PAUSED'}
+                          </span>
+                          {lastLiveCheckAt && (
+                            <span className="text-[10px] opacity-75">
+                              • {new Date(lastLiveCheckAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Continuously checks sent mail across Outreach, Inbox, and Campaigns so Google Gemini only drafts customized emails for unsent outreach records (grouped into 10 drafts per section).
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => runLiveSentMailSync({ autoDraft: true, silent: false, campaignId: activeCampaignDetail?.id || null })}
+                    disabled={loadingUnsent}
+                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full text-xs font-medium flex items-center gap-1.5 self-start sm:self-center transition cursor-pointer shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingUnsent ? 'animate-spin' : ''}`} />
+                    <span>Sync Sent Mail & Auto-Draft</span>
+                  </button>
+                </div>
+
+                {/* Summary Cards: Unsent Outreach Count, Sections, Vector DB Portfolio */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-100">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-600">
+                      Unsent Outreach Records
+                    </span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-slate-900">{unsentAnalysis.total_unsent}</span>
+                      <span className="text-xs text-slate-600">
+                        ({selectedUnsentProspectIds.length} selected for drafting)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-blue-50/60 border border-blue-100">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-600">
+                      Campaigns & Sections (50 / Camp • 10 / Sec)
+                    </span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-slate-900">
+                        {Math.ceil((selectedUnsentProspectIds.length || unsentAnalysis.total_unsent || 0) / 50) || 0}
+                      </span>
+                      <span className="text-xs text-slate-600">
+                        campaign(s) • {Math.ceil((selectedUnsentProspectIds.length || unsentAnalysis.total_unsent || 0) / 10)} section(s)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className={`p-3.5 rounded-xl border ${
+                    unsentAnalysis.portfolio?.portfolio_ready
+                      ? 'bg-emerald-50/60 border-emerald-200'
+                      : 'bg-amber-50/60 border-amber-200'
+                  }`}>
+                    <span className={`text-[11px] font-semibold uppercase tracking-wider ${
+                      unsentAnalysis.portfolio?.portfolio_ready ? 'text-emerald-700' : 'text-amber-700'
+                    }`}>
+                      Vector DB Company Portfolio
+                    </span>
+                    <div className="mt-1">
+                      {unsentAnalysis.portfolio?.portfolio_ready ? (
+                        <>
+                          <p className="text-xs font-bold text-emerald-900 flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{unsentAnalysis.portfolio.portfolio_documents.length} Portfolio Doc(s) Ready ({unsentAnalysis.portfolio.portfolio_chunks_count} Chunks)</span>
+                          </p>
+                          <p className="text-[11px] text-emerald-700 truncate mt-0.5" title={unsentAnalysis.portfolio.portfolio_documents.join(', ')}>
+                            {unsentAnalysis.portfolio.portfolio_documents.join(', ')}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-xs font-medium text-amber-800">
+                          Using outreach company profile + AI prompt (upload portfolio docs in Knowledge Base for deeper RAG grounding)
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Campaign Name, Tone & AI Prompt Configuration */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-1">
+                  <div className="md:col-span-5">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Campaign Name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Q4 AI Personalized Outreach Campaign"
+                      value={campaignName}
+                      onChange={(e) => setCampaignName(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition"
+                    />
+                  </div>
+                  <div className="md:col-span-3">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Writing Tone
+                    </label>
+                    <select
+                      value={aiTone}
+                      onChange={(e) => setAiTone(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition"
+                    >
+                      <option value="professional">Professional B2B</option>
+                      <option value="executive">Executive & Strategic</option>
+                      <option value="concise">Short & Direct</option>
+                      <option value="friendly">Warm & Consultative</option>
+                      <option value="followup">Follow-Up</option>
+                    </select>
+                  </div>
+                  <div className="md:col-span-4 flex items-end">
+                    <OpenTrackingToggle
+                      id="ai-draft-campaign-open-tracking"
+                      checked={openTrackingEnabled}
+                      onChange={setOpenTrackingEnabled}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Google Gemini Customization Instructions (Combined with Each Company's Outreach Data & Vector DB Portfolio)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    placeholder="Instructions for how Google Gemini should pitch our portfolio to each outreach company..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition"
+                  />
+                </div>
+
+                {/* Unsent Outreach Records Table Preview (Collapsible/Scrollable) */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-50/40">
+                  <div className="px-4 py-2.5 bg-slate-100/80 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Building2 className="w-4 h-4 text-indigo-600" />
+                      <span className="text-xs font-bold text-slate-800">
+                        Eligible Outreach Records with Unsent Emails ({unsentAnalysis.records.length})
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Filter outreach companies..."
+                          value={unsentSearch}
+                          onChange={(e) => {
+                            setUnsentSearch(e.target.value);
+                            fetchUnsentOutreach(e.target.value);
+                          }}
+                          className="bg-white border border-slate-200 rounded-full pl-8 pr-3 py-1 text-xs text-slate-800 outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedUnsentProspectIds(unsentAnalysis.records.map(r => r.prospect_id))}
+                        className="px-2.5 py-1 bg-white border border-slate-200 rounded-full text-[11px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedUnsentProspectIds([])}
+                        className="px-2.5 py-1 bg-white border border-slate-200 rounded-full text-[11px] font-semibold text-slate-500 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-48 overflow-y-auto divide-y divide-slate-200/60 bg-white">
+                    {loadingUnsent ? (
+                      <div className="p-6 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <RefreshCw className="w-4 h-4 animate-spin" /> Analyzing outreach database for unsent emails...
+                      </div>
+                    ) : unsentAnalysis.records.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        All outreach records in your pipeline have already been sent emails, or no matching unsent records were found.
+                      </div>
+                    ) : (
+                      unsentAnalysis.records.map((rec, idx) => {
+                        const checked = selectedUnsentProspectIds.includes(rec.prospect_id);
+                        const campIdx = Math.floor(idx / 50) + 1;
+                        const secIdx = (Math.floor(idx / 10) % 5) + 1;
+                        return (
+                          <div
+                            key={rec.prospect_id || rec.email}
+                            onClick={() => handleToggleUnsentProspect(rec.prospect_id)}
+                            className={`px-4 py-2.5 flex items-center justify-between gap-3 text-xs cursor-pointer transition ${
+                              checked ? 'bg-indigo-50/40 hover:bg-indigo-50/70' : 'hover:bg-slate-50 opacity-60'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              {checked ? (
+                                <CheckSquare className="w-4 h-4 text-indigo-600 shrink-0" />
+                              ) : (
+                                <Square className="w-4 h-4 text-slate-300 shrink-0" />
+                              )}
+                              <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-mono text-[10px] font-semibold shrink-0">
+                                Camp {campIdx} • Sec {secIdx}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-slate-900 truncate">{rec.company_name}</span>
+                                  {rec.primary_industries && (
+                                    <span className="px-2 py-0.2 rounded-full text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                                      {rec.primary_industries}
+                                    </span>
+                                  )}
+                                  {rec.phone_number && (
+                                    <span className="text-[11px] text-slate-500 font-mono">
+                                      📞 {rec.phone_number}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 text-[11px] text-slate-500 truncate mt-0.5">
+                                  <span className="font-medium text-slate-700">✉️ {rec.email}</span>
+                                  {rec.offerings?.length > 0 && (
+                                    <span className="text-slate-400 truncate">
+                                      • Offerings: {rec.offerings.join(', ')}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Generate Button */}
+                <div className="flex items-center justify-between pt-2">
+                  <p className="text-xs text-slate-500">
+                    Generates <span className="font-semibold text-slate-800">{selectedUnsentProspectIds.length}</span> unique customized email draft(s) grouped into{' '}
+                    <span className="font-semibold text-slate-800">{Math.ceil((selectedUnsentProspectIds.length || 0) / 10)}</span> section(s) of 10.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleGenerateAiDrafts}
+                    disabled={generatingAiDrafts || selectedUnsentProspectIds.length === 0}
+                    className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-semibold text-xs rounded-full shadow-sm hover:shadow-md transition flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                  >
+                    {generatingAiDrafts ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Generating Customized Drafts with Gemini...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        <span>
+                          Generate {selectedUnsentProspectIds.length} Customized Draft(s) ({Math.ceil((selectedUnsentProspectIds.length || 0) / 10)} Section{Math.ceil((selectedUnsentProspectIds.length || 0) / 10) === 1 ? '' : 's'})
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Bottom Panel: Section-Based Review & Independent Section Send (10 Drafts per Section) */}
+              {activeCampaignDetail && (activeCampaignDetail.sections?.length > 0 || activeCampaignDetail.recipients?.length > 0) && (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-bold text-slate-900 text-base">
+                          {activeCampaignDetail.name}
+                        </h3>
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                          {activeCampaignDetail.total_count} Total Drafts • {activeCampaignDetail.sections?.length || Math.ceil((activeCampaignDetail.total_count || 0) / 10)} Section(s)
+                        </span>
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          {activeCampaignDetail.sent_count} Sent
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Review the 10 customized email drafts in each section below. Click a section&apos;s Send button to start sending that section&apos;s 10 emails with a 90-second interval.
+                      </p>
+                    </div>
+
+                    {/* Campaign Selector if multiple campaigns exist */}
+                    {campaigns.length > 1 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500 font-medium">Campaign:</span>
+                        <select
+                          value={activeCampaignDetail.id}
+                          onChange={(e) => {
+                            setActiveSectionNumber(1);
+                            fetchCampaignDetail(e.target.value);
+                          }}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-800 outline-none focus:border-indigo-500"
+                        >
+                          {campaigns.map(c => (
+                            <option key={c.id} value={c.id}>
+                              {c.name} ({c.sent_count}/{c.total_count} sent)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Section Selector Pills (Section 1: 10 drafts, Section 2: 10 drafts, ...) */}
+                  {(() => {
+                    const sectionsList = activeCampaignDetail.sections || [];
+                    const currentSecMeta = sectionsList.find(s => s.section_number === activeSectionNumber) || sectionsList[0] || {
+                      section_number: 1,
+                      label: 'Section 1',
+                      total_count: (activeCampaignDetail.recipients || []).length,
+                      draft_count: (activeCampaignDetail.recipients || []).filter(r => r.status === 'DRAFT').length,
+                      pending_count: (activeCampaignDetail.recipients || []).filter(r => ['PENDING', 'SENDING', 'RETRY_PENDING'].includes(r.status)).length,
+                      sent_count: (activeCampaignDetail.recipients || []).filter(r => r.status === 'SENT').length,
+                      failed_count: (activeCampaignDetail.recipients || []).filter(r => r.status === 'FAILED').length,
+                      status: activeCampaignDetail.status,
+                      can_send: true,
+                    };
+                    const currentSecNum = currentSecMeta.section_number;
+                    const sectionRecipients = (activeCampaignDetail.recipients || []).filter(
+                      r => (r.section_number || Math.floor((r.queue_order || 0) / 10) + 1) === currentSecNum
+                    );
+
+                    return (
+                      <>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {sectionsList.map((sec) => {
+                            const isActive = sec.section_number === currentSecNum;
+                            const badgeColor =
+                              sec.status === 'COMPLETED'
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                : sec.status === 'SENDING'
+                                ? 'bg-blue-100 text-blue-800 border-blue-300 animate-pulse'
+                                : 'bg-amber-50 text-amber-800 border-amber-200';
+                            return (
+                              <button
+                                key={sec.section_number}
+                                type="button"
+                                onClick={() => setActiveSectionNumber(sec.section_number)}
+                                className={`px-4 py-2 rounded-xl border text-xs font-semibold transition flex items-center gap-2 cursor-pointer ${
+                                  isActive
+                                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                                }`}
+                              >
+                                <span>Section {sec.section_number} ({sec.total_count} Drafts)</span>
+                                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold border ${
+                                  isActive ? 'bg-white/20 text-white border-white/30' : badgeColor
+                                }`}>
+                                  {sec.status === 'COMPLETED'
+                                    ? 'Sent'
+                                    : sec.status === 'SENDING'
+                                    ? `Sending (${sec.sent_count}/${sec.total_count})`
+                                    : `${sec.draft_count} Ready`}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Section Header Bar with Independent SEND SECTION Button */}
+                        <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-900 to-indigo-950 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                          <div>
+                            <div className="flex items-center gap-2.5">
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-500/30 border border-indigo-400/40 text-indigo-200">
+                                Section {currentSecNum}
+                              </span>
+                              <h4 className="font-bold text-sm sm:text-base">
+                                {sectionRecipients.length} Customized Email Draft(s) in Section {currentSecNum}
+                              </h4>
+                            </div>
+                            <p className="text-xs text-slate-300 mt-1">
+                              Sent: <strong className="text-emerald-300">{currentSecMeta.sent_count}</strong> •{' '}
+                              In Queue: <strong className="text-blue-300">{currentSecMeta.pending_count}</strong> •{' '}
+                              Unsent Drafts: <strong className="text-amber-300">{currentSecMeta.draft_count}</strong> •{' '}
+                              Pacing: <strong className="text-white">90-second interval between emails</strong>
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {currentSecMeta.pending_count > 0 ? (
+                              <div className="px-4 py-2 rounded-full bg-blue-500/20 border border-blue-400/40 text-blue-200 text-xs font-semibold flex items-center gap-2">
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                <span>
+                                  Sending Section {currentSecNum} ({currentSecMeta.sent_count}/{currentSecMeta.total_count}) • 90s Interval
+                                </span>
+                              </div>
+                            ) : currentSecMeta.sent_count === currentSecMeta.total_count && currentSecMeta.total_count > 0 ? (
+                              <div className="px-4 py-2 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-200 text-xs font-semibold flex items-center gap-1.5">
+                                <CheckCircle2 className="w-4 h-4" />
+                                <span>Section {currentSecNum} Completed ({currentSecMeta.sent_count} Sent)</span>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleSendSection(currentSecNum)}
+                                disabled={sendingSectionNum === currentSecNum || !currentSecMeta.can_send}
+                                className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-full shadow-md transition flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                <span>
+                                  {sendingSectionNum === currentSecNum
+                                    ? `Starting Section ${currentSecNum}...`
+                                    : `Send Section ${currentSecNum} (${currentSecMeta.draft_count || sectionRecipients.length} Emails • 90s Interval)`}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* List of 10 Customized Email Drafts in Current Section */}
+                        <div className="space-y-4">
+                          {sectionRecipients.map((rec, idxInSec) => {
+                            const snap = rec.outreach_snapshot || {};
+                            const editState = draftEdits[rec.id] || {
+                              custom_subject: rec.custom_subject || activeCampaignDetail.subject || '',
+                              custom_body: rec.custom_body || activeCampaignDetail.body || '',
+                              dirty: false,
+                            };
+                            const isSent = rec.status === 'SENT';
+                            const isQueued = ['PENDING', 'SENDING', 'RETRY_PENDING'].includes(rec.status);
+
+                            return (
+                              <div
+                                key={rec.id}
+                                className={`rounded-2xl border p-4 transition space-y-3 ${
+                                  isSent
+                                    ? 'bg-emerald-50/30 border-emerald-200'
+                                    : isQueued
+                                    ? 'bg-blue-50/30 border-blue-200'
+                                    : 'bg-white border-slate-200 hover:border-indigo-200 shadow-2xs'
+                                }`}
+                              >
+                                {/* Draft Card Header: Company Outreach Metadata & Status */}
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                                  <div className="space-y-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-mono text-[11px] font-bold">
+                                        Section {currentSecNum} • Draft #{idxInSec + 1}
+                                      </span>
+                                      <h5 className="font-bold text-slate-900 text-sm">
+                                        {snap.company_name || rec.prospect_company_name || rec.recipient_name || rec.email_address}
+                                      </h5>
+                                      <span className="text-xs text-slate-600 font-medium">
+                                        ({rec.email_address})
+                                      </span>
+                                      {snap.phone_number && (
+                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[11px] font-mono">
+                                          📞 {snap.phone_number}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Analyzed Outreach Details Chips */}
+                                    <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-500">
+                                      {snap.primary_industries && (
+                                        <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100 font-medium">
+                                          Industry: {snap.primary_industries}
+                                        </span>
+                                      )}
+                                      {snap.offerings?.length > 0 && (
+                                        <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-100 font-medium">
+                                          Offerings: {snap.offerings.slice(0, 4).join(', ')}
+                                        </span>
+                                      )}
+                                      {snap.portfolio_sources?.length > 0 && (
+                                        <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium">
+                                          📚 Portfolio: {snap.portfolio_sources.join(', ')}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Draft Actions & Status Badge */}
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    {!isSent && !isQueued && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRegenerateSingleDraft(rec.id)}
+                                          disabled={regeneratingDraftId === rec.id}
+                                          className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-full text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                          title="Re-generate this customized email draft using Google Gemini"
+                                        >
+                                          <RefreshCw className={`w-3 h-3 ${regeneratingDraftId === rec.id ? 'animate-spin' : ''}`} />
+                                          <span>{regeneratingDraftId === rec.id ? 'Regenerating...' : 'Regenerate'}</span>
+                                        </button>
+                                        {editState.dirty && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSaveDraftEdit(rec.id)}
+                                            disabled={savingDraftId === rec.id}
+                                            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                          >
+                                            <Check className="w-3 h-3" />
+                                            <span>{savingDraftId === rec.id ? 'Saving...' : 'Save Edit'}</span>
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${
+                                      isSent
+                                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                        : isQueued
+                                        ? 'bg-blue-100 text-blue-800 border-blue-300'
+                                        : rec.status === 'FAILED'
+                                        ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                        : 'bg-amber-50 text-amber-800 border-amber-200'
+                                    }`}>
+                                      {isSent
+                                        ? `Sent ${rec.sent_at ? new Date(rec.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`
+                                        : isQueued
+                                        ? 'Queued (90s Interval)'
+                                        : rec.status === 'DRAFT'
+                                        ? 'Ready for Review'
+                                        : rec.status}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {/* Editable Customized Subject & Body */}
+                                <div className="space-y-2">
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                                      Customized Subject Line
+                                    </label>
+                                    <input
+                                      type="text"
+                                      disabled={isSent || isQueued}
+                                      value={editState.custom_subject}
+                                      onChange={(e) => handleLocalDraftChange(rec.id, 'custom_subject', e.target.value)}
+                                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-900 focus:bg-white focus:border-indigo-500 outline-none disabled:opacity-70"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                                      Customized Email Body
+                                    </label>
+                                    <textarea
+                                      rows={5}
+                                      disabled={isSent || isQueued}
+                                      value={editState.custom_body}
+                                      onChange={(e) => handleLocalDraftChange(rec.id, 'custom_body', e.target.value)}
+                                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 leading-relaxed focus:bg-white focus:border-indigo-500 outline-none resize-y disabled:opacity-70"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* TAB 1: COMPOSE */}
           {currentTab === 'compose' && (
@@ -967,7 +1910,18 @@ export default function BulkCampaignModal({ isOpen, onClose, onSelectRecipientEm
                       </div>
 
                       {/* Control buttons */}
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveSectionNumber(1);
+                            setCurrentTab('ai_drafts');
+                          }}
+                          className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-semibold text-xs rounded-full transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Review Sections & Send (10/Sec)</span>
+                        </button>
                         {['RUNNING', 'QUEUED'].includes(activeCampaignDetail.status) && (
                           <button
                             type="button"

@@ -810,6 +810,84 @@ def generate_daily_user_email_report(
 # Gemini AI Personalized Email Generation (Outreach, Inbox, Campaign)
 # ---------------------------------------------------------------------------
 
+def _retrieve_company_portfolio_from_vector_db(
+    *,
+    user,
+    crm_ctx: Dict[str, Any],
+    user_prompt: str = "",
+) -> Tuple[str, List[str]]:
+    """
+    Query our PostgreSQL + pgvector RAG Knowledge Base (`rag` app) to retrieve
+    our company portfolio, products, services, pricing, and value proposition
+    relevant to the target outreach company's industry and offerings.
+    Returns (portfolio_text, source_document_names).
+    """
+    try:
+        from rag.models import KnowledgeBase, KnowledgeDocumentChunk
+        from rag.services import knowledge_base_service, retrieval_service
+
+        if user and getattr(user, "is_authenticated", False):
+            kb_qs = knowledge_base_service.accessible_knowledge_bases(user).filter(is_active=True)
+        else:
+            kb_qs = KnowledgeBase.objects.filter(is_active=True)
+
+        ready_kbs = [kb for kb in kb_qs if knowledge_base_service.ready_documents(kb).exists()]
+        if not ready_kbs:
+            return "", []
+
+        query_parts = [
+            crm_ctx.get("company_name") or "",
+            crm_ctx.get("industry") or "",
+            crm_ctx.get("offering_type") or "",
+            " ".join((crm_ctx.get("products") or []) + (crm_ctx.get("services") or []) + (crm_ctx.get("solutions") or [])),
+            user_prompt or "",
+            "company portfolio products services solutions pricing capabilities",
+        ]
+        search_query = " ".join(p.strip() for p in query_parts if p and p.strip())[:800]
+
+        chunks_text: List[str] = []
+        source_names: List[str] = []
+
+        try:
+            res = retrieval_service.retrieve(
+                ready_kbs,
+                query_text=search_query,
+                user=user if (user and getattr(user, "is_authenticated", False)) else None,
+                top_k=5,
+                threshold=0.05,
+            )
+            chosen = res.chunks or res.candidates[:5]
+            for c in chosen:
+                chunks_text.append(f"[{c.document_name}] {c.text[:900]}")
+                if c.document_name and c.document_name not in source_names:
+                    source_names.append(c.document_name)
+        except Exception as vec_exc:
+            logger.debug("Vector similarity search fallback to direct ready chunks: %s", vec_exc)
+
+        if not chunks_text:
+            db_chunks = (
+                KnowledgeDocumentChunk.objects
+                .select_related("document")
+                .filter(
+                    knowledge_base__in=ready_kbs,
+                    knowledge_base__is_active=True,
+                    document__status="READY",
+                    document__is_active=True,
+                )
+                .order_by("document_id", "chunk_index")[:5]
+            )
+            for ch in db_chunks:
+                doc_name = ch.document.original_filename
+                chunks_text.append(f"[{doc_name}] {ch.text[:900]}")
+                if doc_name and doc_name not in source_names:
+                    source_names.append(doc_name)
+
+        return "\n\n".join(chunks_text)[:3500], source_names
+    except Exception as exc:
+        logger.debug("Portfolio vector DB lookup skipped: %s", exc)
+        return "", []
+
+
 def _resolve_prospect_and_recipient_context(
     *,
     prospect_id: Optional[str] = None,
@@ -818,6 +896,7 @@ def _resolve_prospect_and_recipient_context(
     recipient_name: str = "",
     industry: str = "",
     country: str = "",
+    phone_number: str = "",
 ) -> Dict[str, Any]:
     """
     Gather rich CRM context from Prospect / ProspectContact records when available,
@@ -830,13 +909,17 @@ def _resolve_prospect_and_recipient_context(
         "recipient_name": (recipient_name or "").strip(),
         "recipient_designation": "",
         "recipient_email": "",
+        "phone_number": (phone_number or "").strip(),
         "industry": (industry or "").strip(),
         "country": (country or "").strip(),
+        "address": "",
         "offering_type": "",
         "products": [],
         "services": [],
         "solutions": [],
         "website": "",
+        "company_structure": "",
+        "ownership_sector": "",
         "prospect_obj": None,
     }
 
@@ -890,8 +973,13 @@ def _resolve_prospect_and_recipient_context(
             ctx["industry"] = prospect.primary_industries or ""
         if not ctx["country"]:
             ctx["country"] = prospect.country_head_office or ""
+        if not ctx["phone_number"]:
+            ctx["phone_number"] = prospect.official_phone_number or ""
+        ctx["address"] = prospect.complete_address or ""
         ctx["offering_type"] = prospect.primary_offering_type or ""
         ctx["website"] = prospect.official_website_url or ""
+        ctx["company_structure"] = prospect.company_structure or ""
+        ctx["ownership_sector"] = prospect.ownership_sector or ""
 
         try:
             offerings = list(prospect.offerings.all())
@@ -916,6 +1004,8 @@ def _resolve_prospect_and_recipient_context(
             ctx["recipient_designation"] = contact.designation
         if not ctx["recipient_email"] and contact.official_email:
             ctx["recipient_email"] = contact.official_email
+        if not ctx["phone_number"] and getattr(contact, "phone_number", None):
+            ctx["phone_number"] = contact.phone_number
 
     return ctx
 
@@ -947,19 +1037,29 @@ def _build_personalized_email_prompt(
         desig = f" ({crm_ctx['recipient_designation']})" if crm_ctx.get("recipient_designation") else ""
         context_lines.append(f"- Recipient Name: {crm_ctx['recipient_name']}{desig}")
     if crm_ctx.get("recipient_email"):
-        context_lines.append(f"- Recipient Email: {crm_ctx['recipient_email']}")
+        context_lines.append(f"- Prospect Email Address: {crm_ctx['recipient_email']}")
+    if crm_ctx.get("phone_number"):
+        context_lines.append(f"- Prospect Mobile / Phone Number: {crm_ctx['phone_number']}")
     if crm_ctx.get("industry"):
-        context_lines.append(f"- Primary Industry: {crm_ctx['industry']}")
+        context_lines.append(f"- Primary Industries: {crm_ctx['industry']}")
     if crm_ctx.get("country"):
         context_lines.append(f"- Country / Location: {crm_ctx['country']}")
+    if crm_ctx.get("address"):
+        context_lines.append(f"- Complete Address: {crm_ctx['address']}")
+    if crm_ctx.get("website"):
+        context_lines.append(f"- Official Website: {crm_ctx['website']}")
+    if crm_ctx.get("company_structure"):
+        context_lines.append(f"- Company Structure: {crm_ctx['company_structure']}")
+    if crm_ctx.get("ownership_sector"):
+        context_lines.append(f"- Ownership Sector: {crm_ctx['ownership_sector']}")
     if crm_ctx.get("offering_type"):
         context_lines.append(f"- Primary Offering Type: {crm_ctx['offering_type']}")
     if crm_ctx.get("products"):
-        context_lines.append(f"- Prospect Products: {', '.join(crm_ctx['products'])}")
+        context_lines.append(f"- Prospect Product Offerings: {', '.join(crm_ctx['products'])}")
     if crm_ctx.get("services"):
-        context_lines.append(f"- Prospect Services: {', '.join(crm_ctx['services'])}")
+        context_lines.append(f"- Prospect Service Offerings: {', '.join(crm_ctx['services'])}")
     if crm_ctx.get("solutions"):
-        context_lines.append(f"- Prospect Solutions: {', '.join(crm_ctx['solutions'])}")
+        context_lines.append(f"- Prospect Solution Offerings: {', '.join(crm_ctx['solutions'])}")
     if campaign_name:
         context_lines.append(f"- Campaign Name: {campaign_name}")
     if sender_company:
@@ -991,20 +1091,31 @@ def _build_personalized_email_prompt(
             f"Current Body:\n{current_body[:1500]}\n"
         )
 
+    portfolio_section = ""
+    if crm_ctx.get("portfolio_text"):
+        portfolio_section = (
+            "\nOur Company Portfolio & Offerings (Retrieved from Vector DB Knowledge Base):\n"
+            f"{crm_ctx['portfolio_text']}\n"
+        )
+
     return (
         "You are an expert B2B sales and executive communication copywriter powered by Google Gemini AI.\n"
         f"{mode_instruction}\n\n"
         "RULES:\n"
-        "1. Follow the user's prompt instructions carefully.\n"
-        f"2. Write in a {tone or 'professional'} tone.\n"
-        "3. Personalize the email naturally using the provided Prospect / Recipient Context when relevant.\n"
+        "1. Analyze the Prospect's company name, mobile/phone number, email, product/service/solution offerings, "
+        "and primary industries carefully.\n"
+        "2. When 'Our Company Portfolio & Offerings (Retrieved from Vector DB Knowledge Base)' is provided below, "
+        "connect our company's specific products, services, and strengths from our portfolio to the prospect company's "
+        "business, industry, and offerings.\n"
+        f"3. Write in a {tone or 'professional'} tone.\n"
         "4. Do NOT use fake placeholder brackets like [Your Name] or [Company Name] when real names are available; "
         f"sign off with '{sender_name}' (unless the user prompt specifies otherwise).\n"
         "5. Return STRICTLY valid JSON with two keys:\n"
-        '   - "subject": A compelling, concise email subject line.\n'
-        '   - "body": The complete plain-text email body with clean paragraph breaks (\\n\\n).\n\n'
-        "Prospect & Sender Context:\n"
+        '   - "subject": A compelling, concise, personalized email subject line for this specific company.\n'
+        '   - "body": The complete plain-text customized email body with clean paragraph breaks (\\n\\n).\n\n'
+        "Target Outreach Company & Sender Context:\n"
         + ("\n".join(context_lines) if context_lines else "- General B2B recipient")
+        + portfolio_section
         + draft_section
         + f"\nUser Prompt / Instructions:\n{user_prompt.strip()}\n"
     )
@@ -1095,35 +1206,56 @@ def _generate_fallback_personalized_email(
     else:
         if company and industry:
             loc_str = f" in {country}" if country else ""
-            off_str = f", with a focus on {', '.join(offerings[:2])}" if offerings else ""
+            off_str = f", particularly your offerings in {', '.join(offerings[:3])}" if offerings else ""
             body_paragraphs.append(
                 f"I hope this email finds you well. I have been following {company}'s work across the {industry} sector{loc_str}{off_str}, and I wanted to reach out directly."
             )
         elif company:
+            off_str = f" and your focus on {', '.join(offerings[:3])}" if offerings else ""
             body_paragraphs.append(
-                f"I hope this email finds you well. I am reaching out to introduce our team and explore how we can support {company}'s key initiatives."
+                f"I hope this email finds you well. I am reaching out after reviewing {company}'s business profile{off_str} to explore how our portfolio can support your key initiatives."
             )
         else:
             body_paragraphs.append(
                 "I hope this email finds you well. I am reaching out to introduce our team and share how we help organizations streamline operations, accelerate growth, and achieve measurable results."
             )
 
+        portfolio_text = (crm_ctx.get("portfolio_text") or "").strip()
+        portfolio_snippet = ""
+        if portfolio_text:
+            clean_port = re.sub(r"\[[^\]]+\]\s*", "", portfolio_text).strip()
+            first_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", clean_port) if len(s.strip()) > 20]
+            if first_sentences:
+                portfolio_snippet = " ".join(first_sentences[:2])[:320]
+
         if topic_cleaned and len(topic_cleaned) > 10:
+            if portfolio_snippet:
+                body_paragraphs.append(
+                    f"Based on our company portfolio ({portfolio_snippet}), our goal is to help {company or 'your team'} {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned} with solutions tailored to your {industry or 'business'} operations."
+                )
+            else:
+                body_paragraphs.append(
+                    f"Our goal is to help {company or 'your team'} {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned}, delivering tailored solutions that align with your business objectives."
+                )
+        elif portfolio_snippet:
             body_paragraphs.append(
-                f"Our goal is to help your team {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned}, delivering tailored solutions that align with your business objectives."
+                f"From our company portfolio — {portfolio_snippet} — we see strong synergy with {company or 'your organization'}'s {industry or 'core'} offerings."
             )
         else:
             body_paragraphs.append(
                 "We specialize in delivering tailored solutions that help teams improve efficiency, reduce operational friction, and drive sustainable ROI."
             )
 
+    phone_num = (crm_ctx.get("phone_number") or "").strip()
     if tone == "concise":
+        call_note = f" (or I can reach out to your office at {phone_num})" if phone_num else ""
         body_paragraphs.append(
-            "Would you be open to a brief 10-minute call this week to see if there is a fit?"
+            f"Would you be open to a brief 10-minute call this week{call_note} to see if there is a fit?"
         )
     else:
+        call_note = f" — or let me know if {phone_num} is a convenient number for a quick introductory call" if phone_num else ""
         body_paragraphs.append(
-            "Would you be available for a brief 15-minute introductory call this week to explore potential alignment? If another colleague is the best point of contact for this discussion, please feel free to point me in their direction."
+            f"Would you be available for a brief 15-minute introductory call this week{call_note} to explore potential alignment? If another colleague is the best point of contact for this discussion, please feel free to point me in their direction."
         )
 
     signoff = "Warm regards," if tone == "friendly" else "Best regards,"
@@ -1139,16 +1271,20 @@ def _call_gemini_for_email_generation(prompt: str, api_key: str, model: str, tim
     cached_winner = cache.get("gemini_working_free_model")
     for cand in [
         cached_winner,
+        "gemini-flash-lite-latest",
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-2.5-flash-lite",
         model,
     ]:
-        if cand and cand not in candidate_models and cand != "gemini-3.8-flash":
+        if cand and cand not in candidate_models:
             candidate_models.append(cand)
-    candidate_models = candidate_models[:2]
+    candidate_models = candidate_models[:5]
 
-    per_req_timeout = max(4, min(int(timeout or 8), 8))
+    per_req_timeout = max(6, min(int(timeout or 12), 15))
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -1218,6 +1354,7 @@ def generate_personalized_email(
     recipient_name: str = "",
     industry: str = "",
     country: str = "",
+    phone_number: str = "",
     campaign_name: str = "",
     current_subject: str = "",
     current_body: str = "",
@@ -1240,7 +1377,14 @@ def generate_personalized_email(
         recipient_name=recipient_name,
         industry=industry,
         country=country,
+        phone_number=phone_number,
     )
+    portfolio_text, portfolio_sources = _retrieve_company_portfolio_from_vector_db(
+        user=user, crm_ctx=crm_ctx, user_prompt=user_prompt
+    )
+    if portfolio_text:
+        crm_ctx["portfolio_text"] = portfolio_text
+        crm_ctx["portfolio_sources"] = portfolio_sources
 
     llm_prompt = _build_personalized_email_prompt(
         user=user,
@@ -1323,7 +1467,10 @@ def generate_personalized_email(
         "context_used": {
             "company_name": crm_ctx.get("company_name") or "",
             "recipient_name": crm_ctx.get("recipient_name") or "",
+            "phone_number": crm_ctx.get("phone_number") or "",
             "industry": crm_ctx.get("industry") or "",
             "country": crm_ctx.get("country") or "",
+            "offerings": (crm_ctx.get("products") or []) + (crm_ctx.get("services") or []) + (crm_ctx.get("solutions") or []),
+            "portfolio_sources": crm_ctx.get("portfolio_sources") or [],
         },
     }

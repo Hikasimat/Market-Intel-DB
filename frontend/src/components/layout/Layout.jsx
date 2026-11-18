@@ -113,10 +113,20 @@ const Layout = () => {
         subItems: [
           { path: '/prospects', label: 'Prospect Directory', exact: true },
           { path: '/prospects?tab=outreach', label: 'Outreach', exact: true },
+          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
         ]
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
-      { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+      { 
+        path: '/inbox', 
+        label: 'Email', 
+        icon: Mail, 
+        badge: unreadCount > 0 ? unreadCount : null,
+        subItems: [
+          { path: '/inbox', label: 'Email Inbox', exact: true },
+          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
+        ]
+      },
       { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
       { path: '/government-entities', label: 'Government Entities', icon: Building2 },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
@@ -134,10 +144,20 @@ const Layout = () => {
         subItems: [
           { path: '/prospects', label: 'Prospect Directory', exact: true },
           { path: '/prospects?tab=outreach', label: 'Outreach', exact: true },
+          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
         ]
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
-      { path: '/inbox', label: 'Email', icon: Mail, badge: unreadCount > 0 ? unreadCount : null },
+      { 
+        path: '/inbox', 
+        label: 'Email', 
+        icon: Mail, 
+        badge: unreadCount > 0 ? unreadCount : null,
+        subItems: [
+          { path: '/inbox', label: 'Email Inbox', exact: true },
+          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
+        ]
+      },
       { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
       { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
@@ -159,6 +179,11 @@ const Layout = () => {
   if (user?.is_superuser && !primaryNavItems.some(item => item.path === '/users')) {
     primaryNavItems.push(
       { path: '/users', label: 'User Management', icon: Users }
+    );
+  }
+  if (user?.is_superuser && !primaryNavItems.some(item => item.path === '/whatsapp?kb=1')) {
+    primaryNavItems.push(
+      { path: '/whatsapp?kb=1', label: 'AI Knowledge Base', icon: Layers }
     );
   }
 

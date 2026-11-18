@@ -686,9 +686,14 @@ class EmailCampaign(models.Model):
     def pending_count(self):
         return self.recipients.filter(status__in=['PENDING', 'SENDING', 'RETRY_PENDING']).count()
 
+    @property
+    def draft_count(self):
+        return self.recipients.filter(status='DRAFT').count()
+
 
 class EmailCampaignRecipient(models.Model):
     class Status(models.TextChoices):
+        DRAFT = 'DRAFT', 'Draft'
         PENDING = 'PENDING', 'Pending'
         SENDING = 'SENDING', 'Sending'
         SENT = 'SENT', 'Sent'
@@ -701,6 +706,10 @@ class EmailCampaignRecipient(models.Model):
     recipient_name = models.CharField(max_length=255, blank=True, null=True)
     prospect = models.ForeignKey(Prospect, on_delete=models.SET_NULL, null=True, blank=True, related_name='campaign_recipients')
     prospect_contact = models.ForeignKey(ProspectContact, on_delete=models.SET_NULL, null=True, blank=True, related_name='campaign_recipients')
+    section_number = models.PositiveIntegerField(default=1, db_index=True)
+    custom_subject = models.CharField(max_length=512, blank=True, default='')
+    custom_body = models.TextField(blank=True, default='')
+    outreach_snapshot = models.JSONField(default=dict, blank=True)
     queue_order = models.PositiveIntegerField(default=0)
     status = models.CharField(max_length=50, choices=Status.choices, default=Status.PENDING)
     attempt_count = models.PositiveIntegerField(default=0)

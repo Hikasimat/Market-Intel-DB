@@ -10,6 +10,11 @@ from rest_framework.test import APIClient
 from accounts.models import GoogleMailCredentials, UserProfile
 from prospects.campaign_service import (
     create_campaign,
+    create_ai_drafted_campaign,
+    get_unsent_outreach_records,
+    sync_live_unsent_outreach_ai_drafts,
+    send_campaign_section,
+    update_campaign_recipient_draft,
     send_single_campaign_recipient,
     process_campaign_queue,
     pause_campaign,
@@ -24,6 +29,7 @@ from prospects.models import (
     CommunicationActivity,
     Prospect,
     ProspectContact,
+    ProspectOffering,
 )
 
 User = get_user_model()
@@ -445,3 +451,355 @@ class BulkEmailCampaignTests(TestCase):
         # Other user cannot cancel campaign
         res_cancel = other_client.post(f'/api/email-campaigns/{campaign.id}/cancel/')
         self.assertEqual(res_cancel.status_code, 404)
+
+    def test_unsent_outreach_analysis_excludes_already_sent_prospects(self):
+        """Test 16: Analyzes outreach data and identifies only records where emails have not been sent."""
+        # Create 2 unsent prospects and 1 already-sent prospect for lq_user
+        p_unsent_1 = Prospect.objects.create(
+            company_name='Alpha Robotics Ltd',
+            country_head_office='UAE',
+            complete_address='Dubai Silicon Oasis',
+            official_phone_number='+971 50 111 2233',
+            official_email_address='contact@alpharobotics.ae',
+            primary_industries='Industrial Automation',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=self.user.username,
+        )
+        ProspectOffering.objects.create(
+            prospect=p_unsent_1,
+            offering_type='PRODUCT',
+            name='Autonomous Warehouse Drones',
+        )
+
+        p_sent = Prospect.objects.create(
+            company_name='Beta Logistics LLC',
+            country_head_office='UAE',
+            complete_address='Jebel Ali',
+            official_phone_number='+971 50 999 8877',
+            official_email_address='info@betalogistics.ae',
+            primary_industries='Supply Chain',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Services',
+            created_by=self.user.username,
+        )
+        OutreachEmail.objects.create(
+            prospect=p_sent,
+            created_by=self.user,
+            from_email='lq@example.com',
+            subject='Already Sent Email',
+            body='Sent previously',
+            status='SENT',
+        )
+
+        analysis = get_unsent_outreach_records(self.user)
+        company_names = [r['company_name'] for r in analysis['records']]
+        self.assertIn('Alpha Robotics Ltd', company_names)
+        self.assertNotIn('Beta Logistics LLC', company_names)
+
+        alpha_rec = next(r for r in analysis['records'] if r['company_name'] == 'Alpha Robotics Ltd')
+        self.assertEqual(alpha_rec['phone_number'], '+971 50 111 2233')
+        self.assertEqual(alpha_rec['email'], 'contact@alpharobotics.ae')
+        self.assertEqual(alpha_rec['primary_industries'], 'Industrial Automation')
+        self.assertIn('Autonomous Warehouse Drones', alpha_rec['offerings'])
+
+    @mock.patch('accounts.oauth_services.GmailOAuthService.send_message')
+    def test_ai_drafts_grouped_into_sections_of_10_and_sent_per_section_with_90s_interval(self, mock_send):
+        """
+        Test 17:
+        - Generates customized AI email drafts for 15 unsent outreach records (using Vector DB portfolio + outreach data)
+        - Organizes into Section 1 (10 drafts) and Section 2 (5 drafts), all starting in DRAFT status
+        - User reviews & edits a draft in Section 1, then clicks Send on Section 1
+        - Only Section 1 (10 emails) transitions to PENDING and sends with 90-second intervals using each recipient's custom draft
+        - Section 2 (5 emails) remains in DRAFT status until its own Send button is clicked
+        """
+        mock_send.return_value = {'id': 'gmail_sec_msg', 'threadId': 'th_sec'}
+
+        # Seed a ready Vector DB Knowledge Base document + chunk so portfolio retrieval is exercised
+        from rag.models import KnowledgeBase, KnowledgeDocument, KnowledgeDocumentChunk
+        kb = KnowledgeBase.objects.create(
+            name='Our Company Portfolio',
+            is_active=True,
+            owner=self.user,
+        )
+        doc = KnowledgeDocument.objects.create(
+            knowledge_base=kb,
+            original_filename='company_portfolio.pdf',
+            file_type='pdf',
+            file_size=2048,
+            storage_key='rag_kb/test/company_portfolio.pdf',
+            checksum_sha256='a' * 64,
+            status='READY',
+            total_chunks=1,
+            is_active=True,
+            created_by=self.user,
+        )
+        KnowledgeDocumentChunk.objects.create(
+            document=doc,
+            knowledge_base=kb,
+            chunk_index=0,
+            text='MarketIntel Enterprise AI Suite: Automated B2B intelligence, predictive analytics, and ERP integration.',
+            token_count=20,
+            content_checksum='b' * 64,
+            embedding=[0.01] * 1024,
+            embedding_model='amazon.titan-embed-text-v2:0',
+            embedding_dimension=1024,
+        )
+
+        # Create 15 unsent outreach prospects for lq_user
+        created_ids = []
+        for idx in range(1, 16):
+            p = Prospect.objects.create(
+                company_name=f'Outreach Co {idx:02d}',
+                country_head_office='United Arab Emirates',
+                complete_address=f'Building {idx}, Business Bay',
+                official_phone_number=f'+971 55 000 {idx:04d}',
+                official_email_address=f'contact{idx:02d}@outreachco{idx:02d}.com',
+                primary_industries=f'Industry Sector {idx}',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Solutions',
+                created_by=self.user.username,
+            )
+            ProspectOffering.objects.create(
+                prospect=p,
+                offering_type='PRODUCT',
+                name=f'Specialized Product {idx}',
+            )
+            created_ids.append(str(p.id))
+
+        campaign = create_ai_drafted_campaign(
+            user=self.user,
+            name='AI Sectioned Outreach Campaign',
+            user_prompt='Pitch our MarketIntel Enterprise AI Suite tailored to their offerings and industry.',
+            tone='professional',
+            prospect_ids=created_ids,
+        )
+
+        self.assertEqual(campaign.status, EmailCampaign.Status.DRAFT)
+        self.assertEqual(campaign.total_count, 15)
+        self.assertEqual(campaign.draft_count, 15)
+        self.assertEqual(campaign.pending_count, 0)
+
+        sec1_recs = list(campaign.recipients.filter(section_number=1).order_by('queue_order'))
+        sec2_recs = list(campaign.recipients.filter(section_number=2).order_by('queue_order'))
+        self.assertEqual(len(sec1_recs), 10)
+        self.assertEqual(len(sec2_recs), 5)
+
+        # Verify each draft has a customized subject, body, and outreach_snapshot with portfolio source
+        for r in sec1_recs + sec2_recs:
+            self.assertEqual(r.status, EmailCampaignRecipient.Status.DRAFT)
+            self.assertTrue(bool(r.custom_subject))
+            self.assertTrue(bool(r.custom_body))
+            self.assertIn(r.outreach_snapshot['company_name'], r.custom_body)
+            self.assertIn('company_portfolio.pdf', r.outreach_snapshot.get('portfolio_sources', []))
+
+        # Worker should NOT send anything while recipients are in DRAFT status
+        self.assertEqual(process_campaign_queue(max_jobs=10), 0)
+        self.assertEqual(mock_send.call_count, 0)
+
+        # User edits the first draft in Section 1 during review
+        first_rec = sec1_recs[0]
+        update_campaign_recipient_draft(
+            campaign=campaign,
+            recipient_id=str(first_rec.id),
+            custom_subject='Custom Reviewed Subject for Outreach Co',
+            custom_body='Custom Reviewed Body for Outreach Co with our portfolio details.',
+        )
+
+        # User clicks Send on Section 1 ONLY
+        send_campaign_section(campaign=campaign, section_number=1, user=self.user)
+        campaign.refresh_from_db()
+        self.assertIn(campaign.status, [EmailCampaign.Status.QUEUED, EmailCampaign.Status.RUNNING])
+        self.assertEqual(campaign.recipients.filter(section_number=1, status=EmailCampaignRecipient.Status.PENDING).count(), 10)
+        # Section 2 must still be in DRAFT status!
+        self.assertEqual(campaign.recipients.filter(section_number=2, status=EmailCampaignRecipient.Status.DRAFT).count(), 5)
+
+        # Send first email in Section 1
+        sent_ok = send_single_campaign_recipient(first_rec.id)
+        self.assertTrue(sent_ok)
+        first_rec.refresh_from_db()
+        self.assertEqual(first_rec.status, EmailCampaignRecipient.Status.SENT)
+        self.assertEqual(first_rec.outreach_email.subject, 'Custom Reviewed Subject for Outreach Co')
+        self.assertEqual(first_rec.outreach_email.body, 'Custom Reviewed Body for Outreach Co with our portfolio details.')
+
+        # Second email in Section 1 must be scheduled 90 seconds after first email
+        second_rec = sec1_recs[1]
+        second_rec.refresh_from_db()
+        campaign.refresh_from_db()
+        self.assertEqual(second_rec.scheduled_for, campaign.last_sent_at + timedelta(seconds=90))
+
+        # Cannot send second email before 90 seconds have elapsed
+        self.assertFalse(send_single_campaign_recipient(second_rec.id))
+
+    def test_live_sent_mail_listener_prunes_sent_and_autodrafts_new_unsent_outreach(self):
+        """
+        Test 18:
+        - Live listener auto-drafts unsent outreach records into a campaign
+        - When an email is sent to one of those outreach records via Outreach Workspace / Inbox,
+          the live sent-mail check immediately prunes that recipient's unapproved DRAFT from the campaign
+        - When a new unsent outreach prospect is added, the live listener automatically drafts a
+          customized email for it and appends it into the campaign sections
+        """
+        p1 = Prospect.objects.create(
+            company_name='Gamma Solar Systems',
+            country_head_office='UAE',
+            complete_address='Masdar City',
+            official_phone_number='+971 50 333 4444',
+            official_email_address='hello@gammasolar.ae',
+            primary_industries='Renewable Energy',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=self.user.username,
+        )
+        p2 = Prospect.objects.create(
+            company_name='Delta Cloud FinTech',
+            country_head_office='UAE',
+            complete_address='DIFC',
+            official_phone_number='+971 50 555 6666',
+            official_email_address='contact@deltacloud.ae',
+            primary_industries='Financial Services',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Solutions',
+            created_by=self.user.username,
+        )
+
+        # 1. Run live sync -> automatically creates AI Outreach Campaign with 2 unsent drafts
+        sync1 = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True)
+        camp = sync1['active_campaign']
+        self.assertIsNotNone(camp)
+        self.assertEqual(camp.recipients.filter(status='DRAFT').count(), 2)
+
+        # 2. Now simulate sending an outreach email to Gamma Solar Systems outside the campaign
+        OutreachEmail.objects.create(
+            prospect=p1,
+            created_by=self.user,
+            from_email='lq@example.com',
+            subject='Direct Outreach Sent to Gamma',
+            body='Sent directly from Outreach Workspace',
+            status='SENT',
+        )
+
+        # 3. Also create a new unsent outreach company (Epsilon MedTech)
+        p3 = Prospect.objects.create(
+            company_name='Epsilon MedTech',
+            country_head_office='UAE',
+            complete_address='Dubai Healthcare City',
+            official_phone_number='+971 50 777 8888',
+            official_email_address='info@epsilonmed.ae',
+            primary_industries='Healthcare Technology',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=self.user.username,
+        )
+
+        # 4. Run live sync -> Gamma Solar must be pruned (already sent!), and Epsilon MedTech auto-drafted!
+        sync2 = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True, campaign_id=str(camp.id))
+        camp.refresh_from_db()
+        draft_emails = list(camp.recipients.filter(status='DRAFT').values_list('email_address', flat=True))
+        self.assertNotIn('hello@gammasolar.ae', draft_emails)
+        self.assertIn('contact@deltacloud.ae', draft_emails)
+        self.assertIn('info@epsilonmed.ae', draft_emails)
+        self.assertEqual(sync2['newly_drafted_count'], 1)
+
+    @mock.patch('accounts.oauth_services.GmailOAuthService.send_message')
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_campaign_overflow_after_50_creates_second_campaign_and_reflects_on_outreach_mail_content(self, mock_gen, mock_send):
+        """
+        Test 19:
+        - Creating AI drafts for 55 unsent outreach records automatically creates:
+          * Campaign 1 with 50 drafts (5 sections × 10 drafts)
+          * Campaign 2 with 5 drafts (Section 1)
+        - When a new 56th unsent prospect is added later and live sync runs, it goes into Campaign 2 (Section 1, #6)
+          rather than exceeding Campaign 1's 50-record limit.
+        - When a campaign email is sent for a prospect, LeadQualification.email_status updates and
+          LeadQualificationSerializer exposes `latest_email_content` with the exact sent subject, body, and campaign info.
+        """
+        mock_send.return_value = {'id': 'gmail_msg_55', 'threadId': 'th_55'}
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Custom AI Subject for {kw.get('company_name')}",
+            'body': f"Dear {kw.get('company_name')},\n\nTailored pitch for {kw.get('industry')}.",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {'portfolio_sources': ['portfolio.pdf']},
+        }
+
+        from prospects.campaign_service import create_ai_drafted_campaigns
+        from prospects.models import LeadQualification
+        from prospects.serializers import LeadQualificationSerializer
+
+        created_prospects = []
+        for idx in range(1, 56):
+            p = Prospect.objects.create(
+                company_name=f'Scale Co {idx:02d}',
+                country_head_office='UAE',
+                complete_address=f'Office {idx}',
+                official_phone_number=f'+971 50 888 {idx:04d}',
+                official_email_address=f'team{idx:02d}@scaleco{idx:02d}.ae',
+                primary_industries='Technology',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=self.user.username,
+            )
+            created_prospects.append(p)
+
+        campaigns = create_ai_drafted_campaigns(
+            user=self.user,
+            name='Q4 Mass Outreach',
+            prospect_ids=[str(p.id) for p in created_prospects],
+        )
+        self.assertEqual(len(campaigns), 2)
+        camp1, camp2 = campaigns[0], campaigns[1]
+
+        self.assertEqual(camp1.name, 'Q4 Mass Outreach — Campaign 1')
+        self.assertEqual(camp1.recipients.count(), 50)
+        self.assertEqual(sorted(set(camp1.recipients.values_list('section_number', flat=True))), [1, 2, 3, 4, 5])
+
+        self.assertEqual(camp2.name, 'Q4 Mass Outreach — Campaign 2')
+        self.assertEqual(camp2.recipients.count(), 5)
+        self.assertEqual(sorted(set(camp2.recipients.values_list('section_number', flat=True))), [1])
+
+        # Add 56th unsent prospect and verify live sync puts it in Campaign 2 (not Campaign 1 which already has 50)
+        Prospect.objects.create(
+            company_name='Scale Co 56',
+            country_head_office='UAE',
+            complete_address='Office 56',
+            official_phone_number='+971 50 888 0056',
+            official_email_address='team56@scaleco56.ae',
+            primary_industries='Technology',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=self.user.username,
+        )
+        sync_res = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True)
+        self.assertEqual(sync_res['newly_drafted_count'], 1)
+        camp1.refresh_from_db()
+        camp2.refresh_from_db()
+        self.assertEqual(camp1.recipients.count(), 50)
+        self.assertEqual(camp2.recipients.count(), 6)
+
+        # Send Section 1 of Campaign 1 -> first recipient sends -> reflects on Outreach Mail Content
+        send_campaign_section(campaign=camp1, section_number=1, user=self.user)
+        first_rec = camp1.recipients.order_by('queue_order').first()
+        self.assertTrue(send_single_campaign_recipient(first_rec.id))
+
+        lq_obj = LeadQualification.objects.get(prospect=first_rec.prospect)
+        self.assertEqual(lq_obj.email_status, 'Waiting for Response')
+        serialized = LeadQualificationSerializer(lq_obj).data
+        latest = serialized['latest_email_content']
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest['source'], 'CAMPAIGN_SENT')
+        self.assertEqual(latest['campaign_name'], 'Q4 Mass Outreach — Campaign 1')
+        self.assertEqual(latest['section_number'], 1)
+        self.assertIn(first_rec.prospect.company_name, latest['subject'])
+        self.assertIn(first_rec.prospect.company_name, latest['body'])
+
+
+

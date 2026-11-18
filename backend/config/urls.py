@@ -22,6 +22,7 @@ urlpatterns = [
     path('api/', include('prospects.urls')),
     path('api/', include('market_events.urls')),
     path('api/whatsapp/', include('whatsapp.urls')),
+    path('api/rag/', include('rag.urls')),
     path('api/digital-marketing/', include('digital_marketing.urls')),
 
     # Frontend Route Redirection (if OAuth providers callback to backend domain)
@@ -57,4 +58,12 @@ urlpatterns = [
 from django.conf.urls.static import static
 
 if settings.DEBUG:
+    # RAG customer documents live under MEDIA_ROOT/rag_private in local dev: never serve them publicly.
+    from django.http import Http404
+    from django.urls import re_path
+
+    def _block_rag_private(request, path=''):
+        raise Http404
+
+    urlpatterns += [re_path(r'^media/rag_private/(?P<path>.*)$', _block_rag_private)]
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

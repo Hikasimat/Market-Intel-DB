@@ -53,9 +53,11 @@ import {
   FileAudio,
   Reply,
   Share2,
+  BookOpen,
 } from 'lucide-react';
 import api from '../services/api';
 import { useCall } from '../context/CallContext';
+import WhatsAppKnowledgeBaseModal from '../components/whatsapp/WhatsAppKnowledgeBaseModal';
 
 const API_BASE = api.defaults.baseURL || '/api';
 const HOST_URL = (API_BASE && API_BASE.startsWith('http'))
@@ -528,6 +530,15 @@ export default function WhatsappPage() {
 
   // Call Recordings Modal state
   const [showRecordingsModal, setShowRecordingsModal] = useState(false);
+  // AI Knowledge Base (RAG) Modal state
+  const [showKnowledgeBaseModal, setShowKnowledgeBaseModal] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search || '');
+    if (params.get('kb') === '1') {
+      setShowKnowledgeBaseModal(true);
+    }
+  }, [location.search]);
   const [callRecordings, setCallRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
   const [playingRecordingId, setPlayingRecordingId] = useState(null);
@@ -1799,14 +1810,25 @@ export default function WhatsappPage() {
       >
         {/* Top Emerald Header Banner */}
         <div className="bg-[#00a884] h-56 w-full px-8 py-6 text-white flex items-center justify-between shadow-sm">
-          <div className="flex items-center gap-3 max-w-5xl mx-auto w-full">
-            <div className="w-10 h-10 bg-white/20 backdrop-blur rounded-full flex items-center justify-center">
-              <Phone className="w-6 h-6 text-white" />
+          <div className="flex items-center justify-between gap-3 max-w-5xl mx-auto w-full">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-white/20 backdrop-blur rounded-full flex items-center justify-center">
+                <Phone className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold tracking-wide">WHATSAPP WEB</h1>
+                <p className="text-xs text-emerald-100">Market Intelligence CRM Live Communication</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-wide">WHATSAPP WEB</h1>
-              <p className="text-xs text-emerald-100">Market Intelligence CRM Live Communication</p>
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowKnowledgeBaseModal(true)}
+              className="px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-semibold flex items-center gap-2 border border-white/25 transition cursor-pointer"
+              title="Manage WhatsApp AI Knowledge Base (Strict RAG)"
+            >
+              <BookOpen className="w-4 h-4" />
+              <span>AI Knowledge Base</span>
+            </button>
           </div>
         </div>
 
@@ -1968,6 +1990,14 @@ export default function WhatsappPage() {
         <div className="text-center pb-6 text-xs text-slate-500">
           Powered by WAHA & Market Intelligence Lead Quality Engine. Your messages are encrypted and synchronized in real-time.
         </div>
+
+        <WhatsAppKnowledgeBaseModal
+          isOpen={showKnowledgeBaseModal}
+          onClose={() => setShowKnowledgeBaseModal(false)}
+          selectedSession={selectedSession}
+          user={user}
+          onShowToast={showToast}
+        />
       </div>
     );
   }
@@ -2033,6 +2063,14 @@ export default function WhatsappPage() {
           {/* Action Icons */}
           <div className="flex items-center gap-2 text-slate-600">
             <button
+              onClick={() => setShowKnowledgeBaseModal(true)}
+              className="p-2 rounded-full hover:bg-slate-200 transition text-[#00a884]"
+              title="AI Knowledge Base (Strict RAG)"
+            >
+              <BookOpen className="w-5 h-5" />
+            </button>
+
+            <button
               onClick={() => { setNewChatTab('direct'); setShowNewChatModal(true); fetchKeyPeople(); }}
               className="p-2 rounded-full hover:bg-slate-200 transition"
               title="New Chat"
@@ -2082,6 +2120,15 @@ export default function WhatsappPage() {
                     className="w-full text-left px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 text-slate-700"
                   >
                     <Users className="w-4 h-4 text-emerald-600" /> New Group
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowKnowledgeBaseModal(true);
+                      setShowSessionDropdown(false);
+                    }}
+                    className="w-full text-left px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 text-slate-700"
+                  >
+                    <BookOpen className="w-4 h-4 text-emerald-600" /> AI Knowledge Base
                   </button>
                   <button
                     onClick={() => {
@@ -4373,6 +4420,15 @@ export default function WhatsappPage() {
           </div>
         </div>
       )}
+
+      {/* AI Knowledge Base (Strict RAG) Modal */}
+      <WhatsAppKnowledgeBaseModal
+        isOpen={showKnowledgeBaseModal}
+        onClose={() => setShowKnowledgeBaseModal(false)}
+        selectedSession={selectedSession}
+        user={user}
+        onShowToast={showToast}
+      />
 
     </div>
   );

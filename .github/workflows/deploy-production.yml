@@ -237,10 +237,13 @@ jobs:
 
           docker run --rm --env-file /opt/marketintel/.env -v /opt/marketintel/staticfiles:/app/staticfiles "${IMAGE_URI}" python manage.py collectstatic --noinput
 
-          echo "=== [6/8] Restarting Production API Container ==="
+          echo "=== [6/8] Restarting Production API & RAG Worker Containers ==="
           docker rm -f marketintel-api 2>/dev/null || true
+          docker rm -f marketintel-rag-worker 2>/dev/null || true
 
           docker run -d --name marketintel-api --restart unless-stopped --add-host=host.docker.internal:host-gateway --env-file /opt/marketintel/.env -p 127.0.0.1:8000:8000 -v /opt/marketintel/staticfiles:/app/staticfiles --init --stop-timeout 30 --security-opt no-new-privileges:true --log-opt max-size=10m --log-opt max-file=3 "${IMAGE_URI}"
+
+          docker run -d --name marketintel-rag-worker --restart unless-stopped --env-file /opt/marketintel/.env --init --stop-timeout 30 --security-opt no-new-privileges:true --log-opt max-size=10m --log-opt max-file=3 "${IMAGE_URI}" python manage.py run_rag_worker --poll-interval 3
 
           sleep 5
 

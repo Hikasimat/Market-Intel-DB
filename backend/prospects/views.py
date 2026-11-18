@@ -21,7 +21,20 @@ from .serializers import (
     AuditReverificationRequestSerializer, GovernmentEntitySerializer,
     EmailCampaignSerializer, EmailCampaignDetailSerializer
 )
-from .campaign_service import create_campaign, pause_campaign, resume_campaign, cancel_campaign, trigger_background_worker
+from .campaign_service import (
+    create_campaign,
+    create_ai_drafted_campaign,
+    get_unsent_outreach_records,
+    prune_sent_recipients_from_draft_campaigns,
+    sync_live_unsent_outreach_ai_drafts,
+    send_campaign_section,
+    update_campaign_recipient_draft,
+    regenerate_campaign_recipient_draft,
+    pause_campaign,
+    resume_campaign,
+    cancel_campaign,
+    trigger_background_worker,
+)
 
 def apply_lq_distribution_filter(queryset, user, prospect_field_prefix=''):
     """
@@ -2472,7 +2485,7 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
         return qs.filter(created_by=user)
 
     def get_serializer_class(self):
-        if self.action in ['retrieve', 'create']:
+        if self.action in ['retrieve', 'create', 'generate_ai_drafts', 'send_section', 'update_draft', 'regenerate_draft']:
             return EmailCampaignDetailSerializer
         return EmailCampaignSerializer
 
@@ -2632,4 +2645,232 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
                 })
 
         return Response({'results': results[:200], 'total': len(results)})
+
+    @action(detail=False, methods=['get'], url_path='unsent-outreach')
+    def unsent_outreach(self, request):
+        """
+        Analyzes all outreach records accessible to the user and returns every
+        outreach record where an email has not yet been sent, along with full
+        company details (name, mobile number, email, product offerings, primary industries)
+        and Vector DB company portfolio status.
+        Also prunes any DRAFT campaign recipients whose email was already sent.
+        """
+        search = request.query_params.get('search', '').strip()
+        prospect_ids_raw = request.query_params.get('prospect_ids', '').strip()
+        prospect_ids = [p.strip() for p in prospect_ids_raw.split(',') if p.strip()] if prospect_ids_raw else None
+        auto_draft = str(request.query_params.get('auto_draft', '')).lower() in ('1', 'true', 'yes')
+        campaign_id = request.query_params.get('campaign_id') or None
+
+        if auto_draft and not search and not prospect_ids:
+            sync_res = sync_live_unsent_outreach_ai_drafts(
+                user=request.user,
+                auto_draft=True,
+                campaign_id=campaign_id,
+            )
+            payload = dict(sync_res['unsent_analysis'])
+            payload['pruned_sent_drafts'] = sync_res['pruned_sent_drafts']
+            payload['newly_drafted_count'] = sync_res['newly_drafted_count']
+            payload['checked_at'] = sync_res['checked_at']
+            if sync_res['active_campaign']:
+                payload['active_campaign'] = EmailCampaignDetailSerializer(sync_res['active_campaign']).data
+            return Response(payload, status=status.HTTP_200_OK)
+
+        pruned = prune_sent_recipients_from_draft_campaigns(user=request.user)
+        analysis = get_unsent_outreach_records(
+            user=request.user,
+            search=search,
+            prospect_ids=prospect_ids,
+        )
+        analysis['pruned_sent_drafts'] = pruned
+        analysis['checked_at'] = timezone.now().isoformat()
+        return Response(analysis, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get', 'post'], url_path='live-sync')
+    def live_sync(self, request):
+        """
+        Live Sent-Mail Check & Automatic AI Drafting endpoint:
+        1. Checks all sent-mail channels and prunes any DRAFT campaign recipients
+           whose outreach email has already been sent.
+        2. Identifies all outreach records where an email has NOT yet been sent.
+        3. Automatically generates customized Google Gemini + Vector DB portfolio
+           email drafts for any unsent outreach records not yet drafted, grouped
+           into sections of 10 drafts per section.
+        """
+        auto_draft_raw = request.data.get('auto_draft', request.query_params.get('auto_draft', 'true'))
+        auto_draft = str(auto_draft_raw).lower() in ('1', 'true', 'yes')
+        campaign_id = request.data.get('campaign_id') or request.query_params.get('campaign_id') or None
+        user_prompt = (request.data.get('user_prompt') or request.query_params.get('user_prompt') or '').strip()
+        tone = (request.data.get('tone') or request.query_params.get('tone') or 'professional').strip()
+
+        sync_res = sync_live_unsent_outreach_ai_drafts(
+            user=request.user,
+            auto_draft=auto_draft,
+            campaign_id=campaign_id,
+            user_prompt=user_prompt,
+            tone=tone,
+        )
+        active_camp = sync_res['active_campaign']
+        active_camps = sync_res.get('active_campaigns') or ([active_camp] if active_camp else [])
+        return Response({
+            **sync_res['unsent_analysis'],
+            'pruned_sent_drafts': sync_res['pruned_sent_drafts'],
+            'newly_drafted_count': sync_res['newly_drafted_count'],
+            'checked_at': sync_res['checked_at'],
+            'active_campaign': EmailCampaignDetailSerializer(active_camp).data if active_camp else None,
+            'active_campaigns': EmailCampaignDetailSerializer(active_camps, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='generate-ai-drafts')
+    def generate_ai_drafts(self, request):
+        """
+        Analyzes all eligible unsent outreach records, checks our company portfolio
+        in the Vector DB, and uses Google Gemini to generate a unique customized
+        email draft for each outreach record, organized into sections of 10 drafts per section
+        and split automatically into campaigns of up to 50 drafts (5 sections) each.
+        """
+        import json
+
+        user = request.user
+        name = (request.data.get('name') or '').strip()
+        user_prompt = (request.data.get('user_prompt') or request.data.get('prompt') or '').strip()
+        tone = (request.data.get('tone') or 'professional').strip()
+        template_id = request.data.get('template_id') or None
+        signature_id = request.data.get('signature_id') or None
+        open_tracking_raw = request.data.get('open_tracking_enabled', 'true')
+        open_tracking_enabled = str(open_tracking_raw).lower() in ['true', '1', 'yes']
+
+        prospect_ids_raw = request.data.get('prospect_ids')
+        if isinstance(prospect_ids_raw, str):
+            try:
+                prospect_ids = json.loads(prospect_ids_raw)
+            except Exception:
+                prospect_ids = [p.strip() for p in prospect_ids_raw.split(',') if p.strip()]
+        elif isinstance(prospect_ids_raw, list):
+            prospect_ids = prospect_ids_raw
+        else:
+            prospect_ids = None
+
+        recipients_raw = request.data.get('recipients')
+        if isinstance(recipients_raw, str):
+            try:
+                recipients_data = json.loads(recipients_raw)
+            except Exception:
+                recipients_data = []
+        elif isinstance(recipients_raw, list):
+            recipients_data = recipients_raw
+        else:
+            recipients_data = None
+
+        files = request.FILES.getlist('attachments')
+
+        try:
+            campaign = create_ai_drafted_campaign(
+                user=user,
+                name=name,
+                user_prompt=user_prompt,
+                tone=tone,
+                prospect_ids=prospect_ids,
+                recipients_data=recipients_data,
+                template_id=template_id,
+                signature_id=signature_id,
+                open_tracking_enabled=open_tracking_enabled,
+                attachments_files=files,
+                interval_seconds=90,
+            )
+            created_list = getattr(campaign, '_created_campaigns', [campaign])
+            primary_data = EmailCampaignDetailSerializer(campaign).data
+            primary_data['created_campaigns'] = EmailCampaignDetailSerializer(created_list, many=True).data
+            primary_data['created_campaigns_count'] = len(created_list)
+            return Response(primary_data, status=status.HTTP_201_CREATED)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.exception("Error generating AI drafted campaign: %s", exc)
+            return Response(
+                {'error': f"Failed to generate AI email drafts: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=['post'], url_path='send-section')
+    def send_section(self, request, pk=None):
+        """
+        Starts sending the 10 customized email drafts in a specific section (`section_number`)
+        with a 90-second interval between consecutive emails.
+        """
+        campaign = self.get_object()
+        section_number = request.data.get('section_number', 1)
+        updated_drafts = request.data.get('drafts') or request.data.get('updated_drafts') or None
+        try:
+            updated_campaign = send_campaign_section(
+                campaign=campaign,
+                section_number=int(section_number),
+                user=request.user,
+                updated_drafts=updated_drafts,
+            )
+            return Response(EmailCampaignDetailSerializer(updated_campaign).data, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.exception("Error sending campaign section: %s", exc)
+            return Response(
+                {'error': f"Failed to send section: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=['patch', 'post'], url_path='update-draft')
+    def update_draft(self, request, pk=None):
+        """
+        Updates the customized subject and/or body for a single recipient draft in a section.
+        """
+        campaign = self.get_object()
+        recipient_id = request.data.get('recipient_id') or request.data.get('id')
+        custom_subject = request.data.get('custom_subject')
+        custom_body = request.data.get('custom_body')
+        if not recipient_id:
+            return Response({'error': 'recipient_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rec = update_campaign_recipient_draft(
+                campaign=campaign,
+                recipient_id=str(recipient_id),
+                custom_subject=custom_subject,
+                custom_body=custom_body,
+            )
+            from .serializers import EmailCampaignRecipientSerializer
+            return Response({
+                'recipient': EmailCampaignRecipientSerializer(rec).data,
+                'campaign': EmailCampaignDetailSerializer(campaign).data,
+            }, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='regenerate-draft')
+    def regenerate_draft(self, request, pk=None):
+        """
+        Re-runs Google Gemini + Vector DB portfolio lookup to regenerate a single recipient's
+        customized email draft within a section.
+        """
+        campaign = self.get_object()
+        recipient_id = request.data.get('recipient_id') or request.data.get('id')
+        user_prompt = request.data.get('user_prompt') or request.data.get('prompt') or ''
+        tone = request.data.get('tone') or 'professional'
+        if not recipient_id:
+            return Response({'error': 'recipient_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rec = regenerate_campaign_recipient_draft(
+                campaign=campaign,
+                recipient_id=str(recipient_id),
+                user=request.user,
+                user_prompt=user_prompt,
+                tone=tone,
+            )
+            from .serializers import EmailCampaignRecipientSerializer
+            return Response({
+                'recipient': EmailCampaignRecipientSerializer(rec).data,
+                'campaign': EmailCampaignDetailSerializer(campaign).data,
+            }, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
 

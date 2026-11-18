@@ -52,6 +52,12 @@ _EXCLUDED_MANAGE_COMMANDS = frozenset({
     "sqlmigrate",
     "flush",
     "inspectdb",
+    "run_rag_worker",
+    "verify_vector_setup",
+    "evaluate_rag",
+    "reembed_rag",
+    "purge_rag_query_logs",
+    "process_campaign_queue",
 })
 
 
@@ -90,11 +96,13 @@ def _resolve_default_webhook_url() -> str:
     return _get_setting("WHATSAPP_WEBHOOK_PUBLIC_URL", "")
 
 
-def _reconcile_live_waha_sessions(client) -> None:
+def _reconcile_live_waha_sessions(client) -> bool:
     """
     Dynamically discover currently connected (WORKING) sessions in WAHA and reconcile
     them against Market Intel's PostgreSQL WhatsAppSession records (handling account
     disconnect/reconnect switches even when no user is actively polling the QR screen).
+    Returns False when WAHA is unreachable so the caller skips further WAHA HTTP calls
+    in the same cycle.
     """
     from whatsapp.models import WhatsAppSession
     from whatsapp.services import normalize_phone_digits, reconcile_connected_session
@@ -104,10 +112,10 @@ def _reconcile_live_waha_sessions(client) -> None:
         waha_sessions = client.get_all_sessions()
     except Exception as exc:
         logger.debug("WAHA session discovery skipped: %s", exc)
-        return
+        return False
 
     if not isinstance(waha_sessions, list):
-        return
+        return True
 
     for ws in waha_sessions:
         if not isinstance(ws, dict):
@@ -139,6 +147,7 @@ def _reconcile_live_waha_sessions(client) -> None:
             session_obj.status = WhatsAppSession.Status.READY
             session_obj.is_active = True
             session_obj.save(update_fields=["status", "is_active", "updated_at"])
+    return True
 
 
 def _coerce_epoch_dt(raw_ts) -> Optional[datetime]:
@@ -259,9 +268,10 @@ def run_realtime_sync_cycle(*, force_chat_poll: bool = False) -> dict[str, int]:
         from whatsapp.webhooks import sync_recent_waha_messages
 
         client = None
+        waha_reachable = False
         try:
             client = get_waha_client()
-            _reconcile_live_waha_sessions(client)
+            waha_reachable = _reconcile_live_waha_sessions(client)
         except Exception as exc:
             logger.debug("WAHA client/reconcile skipped: %s", exc)
 
@@ -269,12 +279,13 @@ def run_realtime_sync_cycle(*, force_chat_poll: bool = False) -> dict[str, int]:
             WhatsAppSession.objects
             .filter(is_active=True, status=WhatsAppSession.Status.READY)
             .exclude(session_name="")
+            .exclude(session_name__startswith="hist_")
         )
         if not ready_sessions:
             return {"sessions": 0, "synced": 0, "scheduled": 0}
 
         synced_total = 0
-        if client is not None:
+        if client is not None and waha_reachable:
             try:
                 target_url = _resolve_default_webhook_url()
                 if target_url:
@@ -316,6 +327,7 @@ def run_realtime_sync_cycle(*, force_chat_poll: bool = False) -> dict[str, int]:
             "sessions": len(ready_sessions),
             "synced": synced_total,
             "scheduled": scheduled,
+            "waha_reachable": waha_reachable,
         }
     finally:
         _CYCLE_LOCK.release()
@@ -332,8 +344,11 @@ def _listener_loop() -> None:
         return
 
     while not _STOP_EVENT.is_set():
+        wait_secs = poll_interval
         try:
-            run_realtime_sync_cycle()
+            res = run_realtime_sync_cycle()
+            if isinstance(res, dict) and res.get("waha_reachable") is False:
+                wait_secs = max(poll_interval, 30.0)
         except Exception as exc:
             logger.debug("WhatsApp AI listener cycle error: %s", exc)
         finally:
@@ -341,7 +356,7 @@ def _listener_loop() -> None:
                 connection.close()
             except Exception:
                 pass
-        _STOP_EVENT.wait(poll_interval)
+        _STOP_EVENT.wait(wait_secs)
 
 
 def should_autostart_listener() -> bool:
@@ -365,7 +380,7 @@ def should_autostart_listener() -> bool:
     if "runserver" in argv:
         return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
 
-    return True
+    return any(srv in " ".join(argv) for srv in ("gunicorn", "uwsgi", "daphne", "uvicorn", "run_whatsapp_ai_listener"))
 
 
 def start_realtime_listener() -> bool:

@@ -38,12 +38,19 @@ echo "=== [6/8] Restart Gunicorn ==="
 systemctl restart marketintel
 systemctl is-active marketintel && echo "Gunicorn: RUNNING" || echo "Gunicorn: FAILED — check journalctl -u marketintel"
 
-echo "=== [7/8] Restart Campaign Worker ==="
+echo "=== [7/8] Restart Background Workers ==="
 if systemctl is-enabled --quiet marketintel-worker 2>/dev/null || systemctl is-active --quiet marketintel-worker 2>/dev/null; then
     systemctl restart marketintel-worker
     systemctl is-active marketintel-worker && echo "Campaign Worker: RUNNING" || echo "Campaign Worker: FAILED — check journalctl -u marketintel-worker"
 else
     echo "Campaign Worker: service not enabled or installed yet (skipping restart)"
+fi
+
+if systemctl is-enabled --quiet marketintel-rag-worker 2>/dev/null || systemctl is-active --quiet marketintel-rag-worker 2>/dev/null; then
+    systemctl restart marketintel-rag-worker
+    systemctl is-active marketintel-rag-worker && echo "RAG Worker: RUNNING" || echo "RAG Worker: FAILED — check journalctl -u marketintel-rag-worker"
+else
+    echo "RAG Worker: service not enabled or installed yet (skipping restart)"
 fi
 
 echo "=== [8/8] Reload Nginx ==="

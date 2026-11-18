@@ -202,6 +202,7 @@ def get_or_create_user_session(user, create: bool = True) -> Optional[WhatsAppSe
 
     active = (
         WhatsAppSession.objects.filter(owner=user, is_active=True)
+        .exclude(session_name__startswith="hist_")
         .order_by("-last_used_at", "-updated_at", "-id")
         .first()
     )

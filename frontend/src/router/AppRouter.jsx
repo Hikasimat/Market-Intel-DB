@@ -10,6 +10,7 @@ const ProspectsPage = lazy(() => import('../pages/ProspectsPage'));
 const MarketEventsPage = lazy(() => import('../pages/MarketEventsPage'));
 const MarketEventDetailPage = lazy(() => import('../pages/MarketEventDetailPage'));
 const InboxPage = lazy(() => import('../pages/InboxPage'));
+const EmailCampaignsPage = lazy(() => import('../pages/EmailCampaignsPage'));
 const ProspectDetailPage = lazy(() => import('../pages/ProspectDetailPage'));
 const GovernmentEntitiesPage = lazy(() => import('../pages/GovernmentEntitiesPage'));
 const ImportPreviewPage = lazy(() => import('../pages/ImportPreviewPage'));
@@ -168,6 +169,7 @@ const AppRouter = () => {
 
             <Route path="outreach-activity/:prospectId" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><OutreachActivityDetailPage /></RoleRoute>} />
             <Route path="inbox" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><InboxPage /></RoleRoute>} />
+            <Route path="email-campaigns" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><EmailCampaignsPage /></RoleRoute>} />
             <Route path="calendar" element={<RoleRoute allowedRoles={['PRE', 'MANAGER']}><LqCalendarPage /></RoleRoute>} />
             <Route path="whatsapp" element={<RoleRoute allowedRoles={['PRE']}><WhatsappPage /></RoleRoute>} />
             <Route path="settings" element={<RoleRoute allowedRoles={['PRE']}><SettingsPage /></RoleRoute>} />
