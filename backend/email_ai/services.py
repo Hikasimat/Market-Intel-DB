@@ -595,6 +595,8 @@ def generate_daily_user_email_report(
     day_start,
     day_end,
     force: bool = False,
+    timeout_override: Optional[int] = None,
+    max_retries_override: Optional[int] = None,
 ):
     """
     Compute a user's exact daily email counts (received, sent, responded, pending)
@@ -739,8 +741,8 @@ def generate_daily_user_email_report(
         return report
 
     provider, api_key, model = _resolve_provider_and_key()
-    timeout = int(_get_setting("EMAIL_SUMMARY_TIMEOUT", "15") or 15)
-    max_retries = max(1, int(_get_setting("EMAIL_SUMMARY_MAX_RETRIES", "2") or 2))
+    timeout = timeout_override or int(_get_setting("EMAIL_SUMMARY_TIMEOUT", "15") or 15)
+    max_retries = max_retries_override or max(1, int(_get_setting("EMAIL_SUMMARY_MAX_RETRIES", "2") or 2))
 
     if provider in ("gemini", "openai") and not api_key:
         provider = "extractive"

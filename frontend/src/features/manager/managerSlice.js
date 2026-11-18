@@ -29,7 +29,7 @@ export const fetchManagerEmailActivity = createAsyncThunk(
       if (filters.page) params.page = filters.page;
       if (filters.page_size) params.page_size = filters.page_size;
       if (filters.sync) params.sync = 'true';
-      const response = await api.get('/manager-dashboard/email-activity/', { params });
+      const response = await api.get('/manager-dashboard/email-activity/', { params, timeout: 60000 });
       return response.data;
     } catch (err) {
       return rejectWithValue(err.response?.data || err.message);
@@ -70,7 +70,7 @@ export const fetchManagerDailyEmailReport = createAsyncThunk(
       if (params.user_id && params.user_id !== 'all') query.user_id = params.user_id;
       if (params.sync) query.sync = 'true';
       if (params.force) query.force = 'true';
-      const response = await api.get('/manager-dashboard/daily-email-report/', { params: query });
+      const response = await api.get('/manager-dashboard/daily-email-report/', { params: query, timeout: 60000 });
       return response.data;
     } catch (err) {
       return rejectWithValue(err.response?.data || err.message);

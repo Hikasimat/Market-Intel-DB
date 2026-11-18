@@ -513,7 +513,7 @@ def manager_daily_email_report(request):
     force_sync = sync_param in ("1", "true", "yes")
     force_regen = (request.query_params.get("force") or "").strip().lower() in ("1", "true", "yes")
     running_tests = "test" in sys.argv
-    if user_ids and (force_sync or not running_tests):
+    if user_ids and force_sync:
         try:
             sync_authorized_mailboxes(user_ids, force=force_sync, limit=25)
         except Exception:
@@ -527,10 +527,41 @@ def manager_daily_email_report(request):
         "sent_received_responses": 0,
         "pending_responses": 0,
     }
-    for u in authorized_users:
-        report = generate_daily_user_email_report(
-            u, report_date, day_start, day_end, force=force_regen
-        )
+
+    if not running_tests and len(authorized_users) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        from django.db import close_old_connections
+
+        def _build_report_for_user(u):
+            close_old_connections()
+            try:
+                rep = generate_daily_user_email_report(
+                    u,
+                    report_date,
+                    day_start,
+                    day_end,
+                    force=force_regen,
+                    timeout_override=8,
+                    max_retries_override=1,
+                )
+                return u, rep
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=min(4, len(authorized_users))) as pool:
+            computed = list(pool.map(_build_report_for_user, authorized_users))
+    else:
+        computed = [
+            (
+                u,
+                generate_daily_user_email_report(
+                    u, report_date, day_start, day_end, force=force_regen
+                ),
+            )
+            for u in authorized_users
+        ]
+
+    for u, report in computed:
         serialized = _serialize_daily_user_report(u, report)
         user_reports.append(serialized)
         totals["emails_received"] += report.emails_received
