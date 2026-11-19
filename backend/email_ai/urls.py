@@ -6,11 +6,17 @@ from .views import (
     manager_email_activity_detail,
     manager_email_activity_list,
     manager_email_summary_refresh,
+    user_dashboard_live_feed,
+    user_dashboard_live_feed_refresh,
 )
 
 urlpatterns = [
     # Personalized Email AI Generation (Outreach, Inbox Compose, Bulk Campaign)
     path("email-ai/generate/", generate_personalized_email_view, name="email-ai-generate"),
+
+    # Per-User Real-Time Dashboard Listener Feed & AI Recommendations
+    path("email-ai/dashboard-feed/", user_dashboard_live_feed, name="email-ai-dashboard-feed"),
+    path("email-ai/dashboard-feed/refresh/", user_dashboard_live_feed_refresh, name="email-ai-dashboard-feed-refresh"),
 
     # Manager Email Activity & Daily Email AI Report Routes
     path("manager-dashboard/daily-email-report/", manager_daily_email_report, name="manager-daily-email-report"),

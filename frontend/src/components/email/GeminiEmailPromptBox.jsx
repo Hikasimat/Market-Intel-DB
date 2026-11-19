@@ -13,19 +13,19 @@ const TONE_OPTIONS = [
 
 const QUICK_PROMPTS = {
   OUTREACH: [
-    'Introduce our solutions tailored to their industry and request a 15-minute discovery call',
-    'Highlight how we help companies in their sector streamline operations and boost ROI',
-    'Write a concise executive introduction referencing their company profile and offerings',
+    'Introduce our solutions tailored to their industry and products, highlighting measurable business value',
+    'Write a consultative executive outreach connecting our capabilities to their sector initiatives',
+    'Draft a concise, personalized introduction referencing their company profile and inviting their perspective',
   ],
   INBOX: [
-    'Write a personalized business email introducing our team and requesting a quick call',
-    'Draft a polite follow-up checking in on our previous conversation and next steps',
-    'Share a clear overview of our services and ask for the right point of contact',
+    'Write a clear, tailored business email introducing our team and relevant solutions for their company',
+    'Draft a polite, contextual follow-up checking in on our previous conversation without assuming timelines',
+    'Share a concise overview of our capabilities and ask who best handles these initiatives on their team',
   ],
   CAMPAIGN: [
-    'Create a high-converting personalized outreach campaign email with a clear call to action',
-    'Announce our latest enterprise solutions and invite recipients to schedule a walkthrough',
-    'Write a concise B2B partnership outreach message for decision-makers',
+    'Create a polished, value-focused B2B outreach email tailored to decision-makers in their industry',
+    'Introduce our core solutions and invite interested teams to share their priorities or request an overview',
+    'Write an executive B2B partnership introduction emphasizing mutual business outcomes',
   ],
 };
 

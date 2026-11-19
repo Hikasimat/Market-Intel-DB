@@ -608,3 +608,35 @@ def manager_daily_email_report_refresh(request, user_id):
     day_start, day_end = _day_bounds(report_date)
     report = generate_daily_user_email_report(target_user, report_date, day_start, day_end, force=True)
     return Response(_serialize_daily_user_report(target_user, report), status=status.HTTP_200_OK)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 3. Per-User Real-Time Dashboard Listener Feed (Strictly Owner-Scoped)
+# ────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_dashboard_live_feed(request):
+    """
+    GET /api/email-ai/dashboard-feed/?sync=1&force=0
+    Returns the authenticated user's own connected email, incoming mail,
+    outreach activity, pending tasks/meetings, and AI recommendations.
+    Never exposes another user's data or accepts arbitrary user_id overrides.
+    """
+    from .services import build_user_dashboard_live_feed
+
+    sync = str(request.query_params.get("sync") or "").strip().lower() in ("1", "true", "yes")
+    force_ai = str(request.query_params.get("force") or "").strip().lower() in ("1", "true", "yes")
+    payload = build_user_dashboard_live_feed(request.user, sync=sync, force_ai=force_ai)
+    return Response(payload, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def user_dashboard_live_feed_refresh(request):
+    """POST /api/email-ai/dashboard-feed/refresh/ — force live sync + AI recommendation refresh for request.user."""
+    from .services import build_user_dashboard_live_feed
+
+    payload = build_user_dashboard_live_feed(request.user, sync=True, force_ai=True)
+    return Response(payload, status=status.HTTP_200_OK)
+

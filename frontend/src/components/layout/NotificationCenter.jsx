@@ -50,7 +50,6 @@ export default function NotificationCenter() {
 
   // Ref to avoid stale-closure issues in intervals
   const userRef = useRef(user);
-  useRef(() => { userRef.current = user; });
   useEffect(() => { userRef.current = user; }, [user]);
 
   // ─── Reminder logic (unchanged) ─────────────────────────────────────────
@@ -226,6 +225,11 @@ export default function NotificationCenter() {
         userId, mailAccountId, POLL_FOLDER,
         genuinelyNew.map((m) => m.uid)
       );
+
+      // Notify active dashboard live listeners immediately on new incoming email
+      try {
+        window.dispatchEvent(new CustomEvent('marketintel:mail-activity', { detail: { count: genuinelyNew.length } }));
+      } catch (_) {}
 
       // Show mail toast notification(s)
       if (genuinelyNew.length === 1) {

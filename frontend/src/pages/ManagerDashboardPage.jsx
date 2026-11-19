@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchManagerDashboard } from '../features/manager/managerSlice';
 import ManagerEmailActivitySection from '../components/ManagerEmailActivitySection';
+import DashboardLiveListener from '../components/dashboard/DashboardLiveListener';
 import {
   BarChart2, Calendar, Users, CheckCircle, XCircle, Activity,
   Search, ChevronDown, ChevronUp, Eye, TrendingUp, Shield, Zap,
@@ -335,6 +336,9 @@ const ManagerDashboardPage = () => {
               <SummaryCard key={card.title} {...card} />
             ))}
           </div>
+
+          {/* Real-Time Logged-in User Dashboard Listener */}
+          <DashboardLiveListener />
 
           {/* PRE Production + LQ Performance */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">

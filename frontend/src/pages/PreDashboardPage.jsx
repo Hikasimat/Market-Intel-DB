@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Target, Zap, Trophy, Flame, Activity, Users, Star, ArrowUpRight, CheckCircle, TrendingUp, Calendar } from 'lucide-react';
+import { Target, Zap, Trophy, Flame, Activity, Users, CheckCircle, TrendingUp, Calendar } from 'lucide-react';
 import api from '../services/api';
+import DashboardLiveListener from '../components/dashboard/DashboardLiveListener';
 
 const CircularProgress = ({ percentage, colorClass, size = 84, strokeWidth = 6, label }) => {
   const radius = (size - strokeWidth) / 2;
@@ -133,7 +134,10 @@ const PreDashboardPage = () => {
       </div>
 
       <div className="w-full mx-auto space-y-4">
-        
+
+        {/* Real-Time User Dashboard Listener & AI Recommendations */}
+        <DashboardLiveListener />
+
         {/* Top KPI Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
           <MetricCard 

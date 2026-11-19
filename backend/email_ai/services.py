@@ -892,6 +892,7 @@ def _retrieve_company_portfolio_from_vector_db(
 
 def _resolve_prospect_and_recipient_context(
     *,
+    user=None,
     prospect_id: Optional[str] = None,
     recipient_emails: Optional[List[str]] = None,
     company_name: str = "",
@@ -901,10 +902,10 @@ def _resolve_prospect_and_recipient_context(
     phone_number: str = "",
 ) -> Dict[str, Any]:
     """
-    Gather rich CRM context from Prospect / ProspectContact records when available,
-    merged with any explicit context passed from the frontend.
+    Gather rich CRM context from Prospect / ProspectContact / LeadQualification / EmailThread records
+    when available, merged with any explicit context passed from the frontend.
     """
-    from prospects.models import Prospect, ProspectContact
+    from prospects.models import EmailThread, Prospect, ProspectContact
 
     ctx: Dict[str, Any] = {
         "company_name": (company_name or "").strip(),
@@ -922,6 +923,9 @@ def _resolve_prospect_and_recipient_context(
         "website": "",
         "company_structure": "",
         "ownership_sector": "",
+        "operational_status": "",
+        "qualification_notes": "",
+        "prior_thread_summary": "",
         "prospect_obj": None,
     }
 
@@ -982,6 +986,25 @@ def _resolve_prospect_and_recipient_context(
         ctx["website"] = prospect.official_website_url or ""
         ctx["company_structure"] = prospect.company_structure or ""
         ctx["ownership_sector"] = prospect.ownership_sector or ""
+        ctx["operational_status"] = getattr(prospect, "operational_status", "") or ""
+        try:
+            lq = getattr(prospect, "lead_qualification", None)
+            if lq and getattr(lq, "lq_remarks", None):
+                ctx["qualification_notes"] = str(lq.lq_remarks)[:400]
+        except Exception:
+            pass
+        if user and getattr(user, "is_authenticated", False):
+            try:
+                last_thread = (
+                    EmailThread.objects
+                    .filter(owner=user, prospect=prospect)
+                    .order_by("-last_message_at", "-updated_at")
+                    .first()
+                )
+                if last_thread and (last_thread.summary_text or last_thread.last_snippet):
+                    ctx["prior_thread_summary"] = (last_thread.summary_text or last_thread.last_snippet)[:400]
+            except Exception:
+                pass
 
         try:
             offerings = list(prospect.offerings.all())
@@ -1062,6 +1085,10 @@ def _build_personalized_email_prompt(
         context_lines.append(f"- Prospect Service Offerings: {', '.join(crm_ctx['services'])}")
     if crm_ctx.get("solutions"):
         context_lines.append(f"- Prospect Solution Offerings: {', '.join(crm_ctx['solutions'])}")
+    if crm_ctx.get("qualification_notes"):
+        context_lines.append(f"- Qualification / Requirement Notes: {crm_ctx['qualification_notes']}")
+    if crm_ctx.get("prior_thread_summary"):
+        context_lines.append(f"- Previous Email Conversation Summary: {crm_ctx['prior_thread_summary']}")
     if campaign_name:
         context_lines.append(f"- Campaign Name: {campaign_name}")
     if sender_company:
@@ -1071,18 +1098,18 @@ def _build_personalized_email_prompt(
     mode_instruction = ""
     if source_context == "CAMPAIGN":
         mode_instruction = (
-            "This email is for a B2B Email Campaign. Make it engaging, personalized, and suitable "
-            "for business decision-makers."
+            "This email is for a B2B Email Campaign. Make it executive, insightful, and relevant "
+            "to senior business decision-makers."
         )
     elif source_context == "INBOX":
         mode_instruction = (
-            "This email is being composed in the user's business Email Inbox. Make it direct, clear, "
-            "and personalized to the recipient."
+            "This email is being composed directly in the executive's business Email Inbox. Keep it crisp, "
+            "grounded, and tailored to the recipient's organization and role."
         )
     else:
         mode_instruction = (
-            "This email is an outreach email in the Outreach Workspace. Tailor it specifically to the "
-            "prospect company, their industry, and key contact."
+            "This is a personalized B2B outreach email in the Outreach Workspace. Write with the clarity "
+            "and polish of an experienced Business Development Executive."
         )
 
     draft_section = ""
@@ -1101,19 +1128,26 @@ def _build_personalized_email_prompt(
         )
 
     return (
-        "You are an expert B2B sales and executive communication copywriter powered by Google Gemini AI.\n"
+        "You are a seasoned B2B Business Development Executive drafting a direct, high-caliber business email.\n"
         f"{mode_instruction}\n\n"
-        "RULES:\n"
-        "1. Analyze the Prospect's company name, mobile/phone number, email, product/service/solution offerings, "
-        "and primary industries carefully.\n"
-        "2. When 'Our Company Portfolio & Offerings (Retrieved from Vector DB Knowledge Base)' is provided below, "
-        "connect our company's specific products, services, and strengths from our portfolio to the prospect company's "
-        "business, industry, and offerings.\n"
-        f"3. Write in a {tone or 'professional'} tone.\n"
-        "4. Do NOT use fake placeholder brackets like [Your Name] or [Company Name] when real names are available; "
-        f"sign off with '{sender_name}' (unless the user prompt specifies otherwise).\n"
-        "5. Return STRICTLY valid JSON with two keys:\n"
-        '   - "subject": A compelling, concise, personalized email subject line for this specific company.\n'
+        "STRICT WRITING RULES:\n"
+        "1. Carefully analyze the prospect's company name, primary industry, sector/ownership, products/services/solutions, "
+        "requirements/notes, and the contact person's name and role.\n"
+        "2. Connect our relevant capabilities (especially from 'Our Company Portfolio & Offerings' when provided) "
+        "directly to the prospect's specific business activities and commercial value — avoid technical fluff, "
+        "repetitive filler, and generic sales buzzwords.\n"
+        "3. Write with natural executive cadence, clean grammar, and concise paragraphs (typically 2-3 focused paragraphs).\n"
+        "4. Open with a relevant, specific hook tied to the company or conversation context. NEVER use robotic openers "
+        "such as 'I hope this email finds you well' or 'I hope you are having a productive week'.\n"
+        "5. NEVER assume or suggest any unrequested meeting date, day, availability, or timeframe — explicitly "
+        "FORBIDDEN unless the user prompt or prospect explicitly mentions it: 'next week', 'this week', 'tomorrow', "
+        "specific weekdays, or '15-minute introductory call next week'.\n"
+        "6. End with a natural, courteous, low-pressure closing inviting dialogue (e.g., asking for their perspective, "
+        "current priorities, or whether sharing relevant details would be useful) without presuming their calendar.\n"
+        f"7. Tone: {tone or 'professional'}. Do NOT use placeholder brackets like [Your Name] or [Company Name]; "
+        f"sign off naturally as '{sender_name}'.\n"
+        "8. Return STRICTLY valid JSON with two keys:\n"
+        '   - "subject": A crisp, specific, executive email subject line tailored to this organization.\n'
         '   - "body": The complete plain-text customized email body with clean paragraph breaks (\\n\\n).\n\n'
         "Target Outreach Company & Sender Context:\n"
         + ("\n".join(context_lines) if context_lines else "- General B2B recipient")
@@ -1121,6 +1155,59 @@ def _build_personalized_email_prompt(
         + draft_section
         + f"\nUser Prompt / Instructions:\n{user_prompt.strip()}\n"
     )
+
+
+def _enforce_executive_email_standards(
+    subject: str,
+    body: str,
+    *,
+    user_prompt: str = "",
+    current_body: str = "",
+) -> Tuple[str, str]:
+    """
+    Ensure generated email drafts never fabricate unrequested scheduling timeframes
+    (e.g., 'next week', 'this week') or retain robotic template filler unless explicitly
+    requested by the sender or present in the prospect's thread.
+    """
+    prompt_and_ctx = f"{user_prompt or ''}\n{current_body or ''}".lower()
+    cleaned_body = (body or "").strip()
+
+    # Scrub stock filler openers
+    cleaned_body = re.sub(
+        r"\b(?:I hope (?:this email finds you well|you are having a productive week|you're having a great week)\.?)\s*",
+        "",
+        cleaned_body,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove unrequested assumed timeframes unless explicitly specified in prompt/context
+    if "next week" not in prompt_and_ctx:
+        cleaned_body = re.sub(
+            r"\b(?:early\s+|sometime\s+|at some point\s+)?next\s+week\b",
+            "",
+            cleaned_body,
+            flags=re.IGNORECASE,
+        )
+    if "this week" not in prompt_and_ctx:
+        cleaned_body = re.sub(
+            r"\b(?:later\s+|sometime\s+)?this\s+week\b",
+            "",
+            cleaned_body,
+            flags=re.IGNORECASE,
+        )
+    if "tomorrow" not in prompt_and_ctx:
+        cleaned_body = re.sub(
+            r"\btomorrow\b",
+            "",
+            cleaned_body,
+            flags=re.IGNORECASE,
+        )
+
+    # Fix spacing artifacts introduced by timeline removal
+    cleaned_body = re.sub(r"[ \t]{2,}", " ", cleaned_body)
+    cleaned_body = re.sub(r" +([,.;:?!])", r"\1", cleaned_body)
+    cleaned_body = re.sub(r"\n{3,}", "\n\n", cleaned_body).strip()
+    return (subject or "").strip()[:480], cleaned_body[:10000]
 
 
 def _parse_generated_email_json(raw_text: str) -> Optional[Tuple[str, str]]:
@@ -1162,27 +1249,32 @@ def _generate_fallback_personalized_email(
     industry = (crm_ctx.get("industry") or "").strip()
     country = (crm_ctx.get("country") or "").strip()
     offerings = (crm_ctx.get("products") or []) + (crm_ctx.get("services") or []) + (crm_ctx.get("solutions") or [])
+    designation = (crm_ctx.get("recipient_designation") or "").strip()
 
     prompt_clean = (user_prompt or "").strip()
     prompt_low = prompt_clean.lower()
 
-    # Build a tailored subject line based on the user's prompt & context
+    # Build a tailored executive subject line based on the user's prompt & company context
     if "follow-up" in prompt_low or "follow up" in prompt_low or tone == "followup":
-        subject = f"Following Up — {company}" if company else "Quick Follow-Up on Our Previous Conversation"
+        subject = f"Following up — {company}" if company else "Following up on our recent note"
     elif "walkthrough" in prompt_low or "demo" in prompt_low:
-        subject = f"Product Walkthrough & Overview for {company}" if company else "Invitation: Personalized Solution Walkthrough"
+        subject = f"Solution overview for {company}" if company else "Tailored platform overview"
     elif "partnership" in prompt_low or "collaborat" in prompt_low:
-        subject = f"Strategic Partnership Opportunity — {company}" if company else "Exploring a Strategic Partnership"
+        subject = f"Potential collaboration with {company}" if company else "Exploring a business collaboration"
     elif campaign_name:
         subject = f"{campaign_name}{f' — {company}' if company else ''}"
+    elif company and offerings:
+        subject = f"Supporting {company}'s {offerings[0]} initiatives"
+    elif company and industry:
+        subject = f"Perspective on {industry} priorities for {company}"
     elif company:
-        subject = f"Exploring Strategic Alignment & Solutions for {company}"
+        subject = f"Relevant capabilities for {company}"
     else:
-        subject = "Introduction & Opportunity to Connect"
+        subject = "Connecting regarding business priorities"
 
     greeting = f"Dear {recipient_name}," if tone != "friendly" else f"Hi {recipient_name},"
 
-    # Extract core topic from user prompt without echoing raw meta-instructions like "Write a personalized..."
+    # Extract core focus from user prompt cleanly without echoing prompt meta-verbs
     topic_cleaned = re.sub(
         r"^(?:please\s+)?(?:write|draft|create|generate|compose|send)\s+(?:a|an|the)?\s*(?:personalized|polite|concise|short|warm|professional|executive|high-converting|b2b|business)?\s*(?:business\s+|outreach\s+|campaign\s+|follow-up\s+|introduction\s+|introductory\s+)?(?:email|message)?\s*(?:about|regarding|for|to|that|highlighting|introducing|announcing|sharing)?\s*",
         "",
@@ -1195,31 +1287,33 @@ def _generate_fallback_personalized_email(
     if "follow-up" in prompt_low or "follow up" in prompt_low or tone == "followup":
         if company:
             body_paragraphs.append(
-                f"I hope you are having a productive week. I wanted to follow up on our previous outreach regarding {company} and see if you had a chance to review our note."
+                f"I wanted to follow up briefly on my earlier note regarding {company}"
+                + (f" and your work in {', '.join(offerings[:2])}." if offerings else ".")
             )
         else:
             body_paragraphs.append(
-                "I hope you are having a productive week. I wanted to quickly follow up on our previous conversation and check if this is a good time to connect."
+                "I wanted to follow up on our previous exchange and share a quick note in case this remains a priority for your team."
             )
         if topic_cleaned and len(topic_cleaned) > 12:
             body_paragraphs.append(
-                f"Specifically, we would love to discuss {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned} and share how our team can support your upcoming priorities."
+                f"In particular, I would welcome sharing how we approach {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned} for teams with similar priorities."
             )
     else:
         if company and industry:
-            loc_str = f" in {country}" if country else ""
-            off_str = f", particularly your offerings in {', '.join(offerings[:3])}" if offerings else ""
+            loc_str = f" across {country}" if country else ""
+            off_str = f"—particularly in {', '.join(offerings[:3])}—" if offerings else ""
+            role_note = f" Given your role as {designation}," if designation else ""
             body_paragraphs.append(
-                f"I hope this email finds you well. I have been following {company}'s work across the {industry} sector{loc_str}{off_str}, and I wanted to reach out directly."
+                f"Reviewing {company}'s footprint in {industry}{loc_str} {off_str}prompted me to reach out.{role_note} Our work focuses on helping organizations in this space strengthen execution and commercial outcomes without adding operational complexity."
             )
         elif company:
-            off_str = f" and your focus on {', '.join(offerings[:3])}" if offerings else ""
+            off_str = f" across {', '.join(offerings[:3])}" if offerings else ""
             body_paragraphs.append(
-                f"I hope this email finds you well. I am reaching out after reviewing {company}'s business profile{off_str} to explore how our portfolio can support your key initiatives."
+                f"After looking closely at {company}'s business profile{off_str}, I wanted to introduce our capabilities where they intersect with your current market focus."
             )
         else:
             body_paragraphs.append(
-                "I hope this email finds you well. I am reaching out to introduce our team and share how we help organizations streamline operations, accelerate growth, and achieve measurable results."
+                "I am reaching out to share how our team partners with B2B organizations to solve workflow bottlenecks and deliver measurable business outcomes."
             )
 
         portfolio_text = (crm_ctx.get("portfolio_text") or "").strip()
@@ -1228,36 +1322,34 @@ def _generate_fallback_personalized_email(
             clean_port = re.sub(r"\[[^\]]+\]\s*", "", portfolio_text).strip()
             first_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", clean_port) if len(s.strip()) > 20]
             if first_sentences:
-                portfolio_snippet = " ".join(first_sentences[:2])[:320]
+                portfolio_snippet = " ".join(first_sentences[:2])[:280].rstrip(".")
 
         if topic_cleaned and len(topic_cleaned) > 10:
+            topic_phrase = topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned
             if portfolio_snippet:
                 body_paragraphs.append(
-                    f"Based on our company portfolio ({portfolio_snippet}), our goal is to help {company or 'your team'} {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned} with solutions tailored to your {industry or 'business'} operations."
+                    f"Specifically, {portfolio_snippet}. We help teams at {company or 'similar organizations'} address {topic_phrase} with practical, outcome-oriented support tailored to their {industry or 'sector'}."
                 )
             else:
                 body_paragraphs.append(
-                    f"Our goal is to help {company or 'your team'} {topic_cleaned[0].lower() + topic_cleaned[1:] if len(topic_cleaned) > 1 else topic_cleaned}, delivering tailored solutions that align with your business objectives."
+                    f"Specifically, we work with {company or 'growth-focused teams'} on {topic_phrase}, helping leaders turn sector insights into measurable execution."
                 )
         elif portfolio_snippet:
             body_paragraphs.append(
-                f"From our company portfolio — {portfolio_snippet} — we see strong synergy with {company or 'your organization'}'s {industry or 'core'} offerings."
+                f"In particular, {portfolio_snippet}, which aligns closely with {company or 'your team'}'s {industry or 'core'} priorities."
             )
         else:
             body_paragraphs.append(
-                "We specialize in delivering tailored solutions that help teams improve efficiency, reduce operational friction, and drive sustainable ROI."
+                f"We focus on practical, measurable impact—helping {company or 'partner organizations'} streamline critical workflows and accelerate commercial readiness."
             )
 
-    phone_num = (crm_ctx.get("phone_number") or "").strip()
     if tone == "concise":
-        call_note = f" (or I can reach out to your office at {phone_num})" if phone_num else ""
         body_paragraphs.append(
-            f"Would you be open to a brief 10-minute call this week{call_note} to see if there is a fit?"
+            f"If this is relevant to {company or 'your team'}'s current roadmap, I would be glad to share a brief summary tailored to your priorities or connect whenever convenient."
         )
     else:
-        call_note = f" — or let me know if {phone_num} is a convenient number for a quick introductory call" if phone_num else ""
         body_paragraphs.append(
-            f"Would you be available for a brief 15-minute introductory call this week{call_note} to explore potential alignment? If another colleague is the best point of contact for this discussion, please feel free to point me in their direction."
+            f"If exploring how this fits with {company or 'your team'}'s current initiatives is worthwhile, please let me know—or feel free to direct me to the colleague overseeing these areas."
         )
 
     signoff = "Warm regards," if tone == "friendly" else "Best regards,"
@@ -1373,6 +1465,7 @@ def generate_personalized_email(
         source_norm = "OUTREACH"
 
     crm_ctx = _resolve_prospect_and_recipient_context(
+        user=user,
         prospect_id=prospect_id,
         recipient_emails=recipient_emails,
         company_name=company_name,
@@ -1437,9 +1530,16 @@ def generate_personalized_email(
             campaign_name=campaign_name,
         )
         provider = "fallback"
-        used_model = "smart-template-v1"
+        used_model = "smart-template-v2"
         status_val = EmailAIGenerationLog.Status.FALLBACK
         err_msg = "GEMINI_API_KEY not configured; used personalized smart template."
+
+    subject, body = _enforce_executive_email_standards(
+        subject,
+        body,
+        user_prompt=user_prompt,
+        current_body=current_body,
+    )
 
     log_entry = None
     try:
@@ -1476,3 +1576,476 @@ def generate_personalized_email(
             "portfolio_sources": crm_ctx.get("portfolio_sources") or [],
         },
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 3. Per-User Real-Time Dashboard Listener Feed & AI Recommendations
+# ────────────────────────────────────────────────────────────────────────────
+
+def _resolve_user_mailbox_info(user) -> Dict[str, Any]:
+    """Dynamically resolve the authenticated user's connected email address and provider."""
+    from accounts.models import GoogleMailCredentials
+
+    gmail = GoogleMailCredentials.objects.filter(user=user, is_active=True).order_by("-updated_at").first()
+    if gmail and gmail.email:
+        return {
+            "email": gmail.email.strip(),
+            "connected": True,
+            "provider": "Gmail OAuth",
+        }
+
+    try:
+        profile = getattr(user, "profile", None)
+        mail_acc = getattr(profile, "mail_account", None) if profile else None
+        if mail_acc and getattr(mail_acc, "email", None):
+            return {
+                "email": mail_acc.email.strip(),
+                "connected": True,
+                "provider": "Workspace Mailbox",
+            }
+    except Exception:
+        pass
+
+    return {
+        "email": (getattr(user, "email", "") or "").strip(),
+        "connected": False,
+        "provider": "Not connected",
+    }
+
+
+def _build_factual_dashboard_recommendations(
+    *,
+    user,
+    mailbox_info: dict,
+    waiting_threads: list,
+    failed_threads: list,
+    pending_tasks: list,
+    upcoming_meetings: list,
+    recent_inbound: list,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Build strictly grounded, zero-fabrication recommendations from actual user records."""
+    recs: List[Dict[str, Any]] = []
+    user_label = user.get_full_name() or user.username
+
+    if not mailbox_info.get("connected"):
+        recs.append({
+            "title": "Connect your personal business email account",
+            "rationale": "Real-time incoming reply detection and outreach tracking require an active connected mailbox for your user account.",
+            "priority": "high",
+            "action_type": "connect_mailbox",
+            "suggested_action": "Open Settings and connect your Gmail or business mailbox.",
+            "target_route": "/settings",
+            "entity_label": mailbox_info.get("email") or user_label,
+        })
+
+    if recent_inbound:
+        latest_in = recent_inbound[0]
+        who = latest_in.get("company_name") or latest_in.get("sender_name") or latest_in.get("sender_email")
+        recs.append({
+            "title": f"Respond to incoming email from {who}",
+            "rationale": f"Inbound message on \"{latest_in.get('subject') or 'your thread'}\" requires review and response.",
+            "priority": "high",
+            "action_type": "reply_email",
+            "suggested_action": f"Review the latest message from {who} in Inbox and prepare a contextual reply.",
+            "target_route": "/inbox",
+            "entity_label": who,
+        })
+
+    for th in waiting_threads[:2]:
+        who = th.get("company_name") or th.get("correspondent_name") or th.get("correspondent_email")
+        if any(r.get("entity_label") == who for r in recs):
+            continue
+        recs.append({
+            "title": f"Follow up on awaiting thread with {who}",
+            "rationale": th.get("next_action") or f"Thread \"{th.get('subject')}\" has no reply yet.",
+            "priority": "medium",
+            "action_type": "follow_up",
+            "suggested_action": th.get("next_action") or f"Send a courteous follow-up note to {who}.",
+            "target_route": "/inbox",
+            "entity_label": who,
+        })
+
+    if failed_threads:
+        f_th = failed_threads[0]
+        who = f_th.get("company_name") or f_th.get("correspondent_email") or "recipient"
+        recs.append({
+            "title": f"Resolve failed delivery to {who}",
+            "rationale": f"Outreach delivery failed on \"{f_th.get('subject') or 'recent email'}\".",
+            "priority": "high",
+            "action_type": "follow_up",
+            "suggested_action": f"Verify the recipient email address for {who} and resend.",
+            "target_route": "/inbox",
+            "entity_label": who,
+        })
+
+    if pending_tasks:
+        t0 = pending_tasks[0]
+        recs.append({
+            "title": f"Complete pending task: {t0.get('title')}",
+            "rationale": t0.get("description") or f"{len(pending_tasks)} open task(s) assigned to {user_label}.",
+            "priority": "high",
+            "action_type": "resolve_task",
+            "suggested_action": "Open Tasks and resolve or update this pending item.",
+            "target_route": "/pre-tasks",
+            "entity_label": t0.get("company_name") or t0.get("title"),
+        })
+
+    if upcoming_meetings:
+        m0 = upcoming_meetings[0]
+        recs.append({
+            "title": f"Prepare for scheduled {m0.get('meeting_provider') or 'meeting'} with {m0.get('company_name') or 'prospect'}",
+            "rationale": f"Scheduled at {m0.get('meeting_date')} {m0.get('meeting_time')} ({m0.get('timezone')}).",
+            "priority": "medium",
+            "action_type": "prepare_meeting",
+            "suggested_action": "Review prospect profile and meeting agenda ahead of the call.",
+            "target_route": "/calendar",
+            "entity_label": m0.get("company_name") or "Meeting",
+        })
+
+    if not recs:
+        recs.append({
+            "title": "Start targeted B2B outreach",
+            "rationale": "No urgent pending replies or blocked tasks right now.",
+            "priority": "low",
+            "action_type": "follow_up",
+            "suggested_action": "Review qualified prospects and launch personalized outreach.",
+            "target_route": "/prospects",
+            "entity_label": "Prospects",
+        })
+
+    summary_parts = [f"Active monitoring for {mailbox_info.get('email') or user_label}."]
+    if recent_inbound:
+        summary_parts.append(f"{len(recent_inbound)} recent incoming email(s) detected.")
+    if waiting_threads:
+        summary_parts.append(f"{len(waiting_threads)} outreach thread(s) awaiting reply.")
+    if pending_tasks:
+        summary_parts.append(f"{len(pending_tasks)} pending task(s) need attention.")
+    if upcoming_meetings:
+        summary_parts.append(f"{len(upcoming_meetings)} upcoming scheduled meeting(s).")
+    if not (recent_inbound or waiting_threads or pending_tasks or upcoming_meetings):
+        summary_parts.append("Your inbox, tasks, and outreach queue are currently up to date.")
+
+    return " ".join(summary_parts), recs[:5]
+
+
+def _build_dashboard_recommendations_prompt(
+    *,
+    user,
+    mailbox_info: dict,
+    recent_inbound: list,
+    outreach_activity: list,
+    pending_tasks: list,
+    upcoming_meetings: list,
+) -> str:
+    user_label = user.get_full_name() or user.username
+    context_blob = {
+        "user": user_label,
+        "mailbox_email": mailbox_info.get("email"),
+        "mailbox_connected": mailbox_info.get("connected"),
+        "recent_incoming_emails": [
+            {
+                "subject": e["subject"],
+                "from": e["sender_email"],
+                "company": e["company_name"],
+                "snippet": e["snippet"][:180],
+                "sent_at": e["sent_at"],
+            }
+            for e in recent_inbound[:6]
+        ],
+        "outreach_threads": [
+            {
+                "subject": t["subject"],
+                "company": t["company_name"],
+                "correspondent": t["correspondent_email"],
+                "status": t["status"],
+                "last_direction": t["last_direction"],
+                "snippet": t["last_snippet"][:160],
+            }
+            for t in outreach_activity[:6]
+        ],
+        "pending_tasks": [
+            {"title": t["title"], "type": t["task_type"], "company": t["company_name"]}
+            for t in pending_tasks[:5]
+        ],
+        "upcoming_meetings": [
+            {"company": m["company_name"], "provider": m["meeting_provider"], "date": m["meeting_date"], "time": m["meeting_time"]}
+            for m in upcoming_meetings[:4]
+        ],
+    }
+    return (
+        "You are a senior B2B sales operations advisor generating real-time dashboard recommendations "
+        "strictly for the signed-in user.\n"
+        "RULES:\n"
+        "1. Base every recommendation ONLY on the user's real records in the JSON context below. Never invent companies, emails, or dates.\n"
+        "2. Do NOT suggest unrequested meeting dates or assume prospect availability (avoid 'next week', 'this week', 'tomorrow').\n"
+        "3. Return STRICTLY valid JSON with keys:\n"
+        '   - "ai_summary": 2-3 crisp executive sentences summarizing the user\'s current inbox, outreach, and pending action status.\n'
+        '   - "recommendations": array of 2 to 4 objects, each with keys:\n'
+        '     {"title": str, "rationale": str, "priority": "high"|"medium"|"low", '
+        '"action_type": "reply_email"|"follow_up"|"resolve_task"|"prepare_meeting"|"connect_mailbox", '
+        '"suggested_action": str, "target_route": "/inbox"|"/pre-tasks"|"/calendar"|"/prospects"|"/settings", "entity_label": str}.\n\n'
+        f"User Activity JSON:\n{json.dumps(context_blob, ensure_ascii=False)}\n"
+    )
+
+
+def build_user_dashboard_live_feed(user, *, sync: bool = False, force_ai: bool = False) -> Dict[str, Any]:
+    """
+    Build the strictly user-isolated real-time dashboard listener feed:
+      - Signed-in user's connected email address & provider
+      - Real-time incoming emails & outreach thread activity
+      - Pending actions (inbound awaiting reply, failed sends, open PreTasks, upcoming Meetings)
+      - AI-generated recommendations & next actions (cached per activity fingerprint)
+    """
+    import sys
+    from datetime import timedelta as _td
+    from django.core.cache import cache
+    from django.db.models import Q
+    from prospects.models import EmailThread, EmailThreadMessage, Meeting, OutreachEmail, PreTask
+
+    mailbox_info = _resolve_user_mailbox_info(user)
+    running_tests = "test" in sys.argv
+
+    # Rate-limited live sync when requested by dashboard polling
+    if sync and not running_tests and mailbox_info.get("connected"):
+        sync_gate_key = f"dash_live_mail_sync:{user.id}"
+        if cache.add(sync_gate_key, 1, 15):
+            try:
+                from prospects.email_thread_service import (
+                    backfill_outreach_emails_to_threads,
+                    sync_authorized_mailboxes,
+                )
+                backfill_outreach_emails_to_threads([user.id])
+                sync_authorized_mailboxes([user.id], pre_user_id=user.id, force=True, limit=15)
+            except Exception as sync_exc:
+                logger.debug("Dashboard live sync skipped cleanly for user %s: %s", user.id, sync_exc)
+
+    now = timezone.now()
+
+    inbound_qs = (
+        EmailThreadMessage.objects
+        .select_related("thread", "thread__prospect", "thread__prospect_contact")
+        .filter(owner=user, direction=EmailThreadMessage.Direction.INBOUND)
+        .order_by("-sent_at", "-created_at")[:8]
+    )
+    recent_inbound = [
+        {
+            "id": str(m.id),
+            "thread_id": str(m.thread_id),
+            "subject": m.subject or (m.thread.subject if m.thread else "(No Subject)"),
+            "sender_email": m.sender_email or "",
+            "sender_name": m.sender_name or (m.thread.correspondent_name if m.thread else ""),
+            "company_name": m.thread.prospect.company_name if (m.thread and m.thread.prospect) else "",
+            "snippet": (m.snippet or _clean_message_text(m))[:200],
+            "sent_at": (m.sent_at or m.created_at).isoformat() if (m.sent_at or m.created_at) else None,
+            "thread_status": m.thread.status if m.thread else "",
+        }
+        for m in inbound_qs
+    ]
+
+    threads_qs = (
+        EmailThread.objects
+        .select_related("prospect", "prospect_contact")
+        .filter(owner=user)
+        .order_by("-last_message_at", "-updated_at")[:10]
+    )
+    outreach_activity = [
+        {
+            "id": str(th.id),
+            "subject": th.subject or "(No Subject)",
+            "correspondent_email": th.correspondent_email or "",
+            "correspondent_name": th.correspondent_name or "",
+            "company_name": th.prospect.company_name if th.prospect else "",
+            "status": th.status,
+            "last_direction": th.last_direction or "",
+            "last_snippet": (th.last_snippet or "")[:180],
+            "last_message_at": th.last_message_at.isoformat() if th.last_message_at else None,
+            "message_count": th.message_count,
+            "next_action": th.next_action or "",
+        }
+        for th in threads_qs
+    ]
+
+    waiting_threads = [
+        t for t in outreach_activity
+        if t["status"] == EmailThread.Status.WAITING_REPLY or t["last_direction"] == "INBOUND"
+    ]
+    failed_threads = [t for t in outreach_activity if t["status"] == EmailThread.Status.FAILED]
+
+    tasks_qs = (
+        PreTask.objects
+        .select_related("prospect")
+        .filter(assigned_pre=user, status=PreTask.Status.PENDING)
+        .order_by("-created_at")[:8]
+    )
+    pending_tasks = [
+        {
+            "id": str(t.id),
+            "task_type": t.task_type,
+            "title": t.title,
+            "description": (t.description or "")[:200],
+            "company_name": t.company_name or (t.prospect.company_name if t.prospect else ""),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in tasks_qs
+    ]
+
+    meetings_qs = (
+        Meeting.objects
+        .select_related("prospect", "prospect_contact")
+        .filter(
+            Q(created_by=user) | Q(google_calendar_owner=user),
+            scheduled_datetime__gte=now - _td(minutes=15),
+        )
+        .exclude(status="CANCELLED")
+        .order_by("scheduled_datetime")[:5]
+    )
+    upcoming_meetings = [
+        {
+            "id": str(m.id),
+            "company_name": m.prospect.company_name if m.prospect else "Scheduled Call",
+            "meeting_provider": m.meeting_provider,
+            "meeting_date": m.meeting_date.isoformat() if m.meeting_date else "",
+            "meeting_time": m.meeting_time.strftime("%H:%M") if m.meeting_time else "",
+            "timezone": m.timezone or "UTC",
+            "meeting_link": m.meeting_link or "",
+            "scheduled_datetime": m.scheduled_datetime.isoformat() if m.scheduled_datetime else None,
+        }
+        for m in meetings_qs
+    ]
+
+    outreach_today_count = OutreachEmail.objects.filter(
+        created_by=user,
+        created_at__gte=now.replace(hour=0, minute=0, second=0, microsecond=0),
+    ).count()
+
+    pending_actions: List[Dict[str, Any]] = []
+    for t in pending_tasks[:4]:
+        pending_actions.append({
+            "kind": "PRE_TASK",
+            "title": t["title"],
+            "subtitle": t["company_name"] or t["task_type"],
+            "priority": "high",
+            "route": "/pre-tasks",
+            "timestamp": t["created_at"],
+        })
+    for m in upcoming_meetings[:3]:
+        pending_actions.append({
+            "kind": "MEETING",
+            "title": f"{m['meeting_provider']}: {m['company_name']}",
+            "subtitle": f"{m['meeting_date']} {m['meeting_time']} ({m['timezone']})",
+            "priority": "medium",
+            "route": "/calendar",
+            "timestamp": m["scheduled_datetime"],
+        })
+    for ft in failed_threads[:2]:
+        pending_actions.append({
+            "kind": "FAILED_EMAIL",
+            "title": f"Delivery failed: {ft['correspondent_email']}",
+            "subtitle": ft["subject"],
+            "priority": "high",
+            "route": "/inbox",
+            "timestamp": ft["last_message_at"],
+        })
+
+    fingerprint_raw = json.dumps({
+        "email": mailbox_info["email"],
+        "connected": mailbox_info["connected"],
+        "in_ids": [m["id"] for m in recent_inbound[:5]],
+        "th_sig": [(t["id"], t["status"], t["message_count"]) for t in outreach_activity[:5]],
+        "task_ids": [t["id"] for t in pending_tasks[:5]],
+        "mtg_ids": [m["id"] for m in upcoming_meetings[:3]],
+    }, sort_keys=True)
+    fp_hash = hashlib.sha256(fingerprint_raw.encode("utf-8")).hexdigest()[:24]
+    cache_key = f"dash_live_ai:{user.id}:{fp_hash}"
+    cached_ai = None if force_ai else cache.get(cache_key)
+
+    ai_provider = "extractive"
+    if isinstance(cached_ai, dict):
+        ai_summary = cached_ai.get("ai_summary") or ""
+        recommendations = cached_ai.get("recommendations") or []
+        ai_provider = cached_ai.get("provider") or "gemini-cached"
+    else:
+        ai_summary, recommendations = _build_factual_dashboard_recommendations(
+            user=user,
+            mailbox_info=mailbox_info,
+            waiting_threads=waiting_threads,
+            failed_threads=failed_threads,
+            pending_tasks=pending_tasks,
+            upcoming_meetings=upcoming_meetings,
+            recent_inbound=recent_inbound,
+        )
+        api_key = _get_setting("GEMINI_API_KEY", "")
+        has_activity = bool(recent_inbound or outreach_activity or pending_tasks or upcoming_meetings)
+        if api_key and has_activity:
+            try:
+                model = _get_setting("EMAIL_AI_MODEL", _get_setting("EMAIL_SUMMARY_MODEL", "gemini-2.5-flash"))
+                prompt = _build_dashboard_recommendations_prompt(
+                    user=user,
+                    mailbox_info=mailbox_info,
+                    recent_inbound=recent_inbound,
+                    outreach_activity=outreach_activity,
+                    pending_tasks=pending_tasks,
+                    upcoming_meetings=upcoming_meetings,
+                )
+                raw_txt, used_prov, used_mod = _call_gemini(prompt, api_key, model, timeout=8, max_output_tokens=900)
+                fence = re.search(r"\{.*\}", raw_txt or "", re.DOTALL)
+                if fence:
+                    parsed = json.loads(fence.group(0))
+                    if isinstance(parsed, dict) and parsed.get("ai_summary") and isinstance(parsed.get("recommendations"), list):
+                        ai_summary = str(parsed["ai_summary"]).strip()[:1000]
+                        clean_recs = []
+                        valid_routes = {"/inbox", "/pre-tasks", "/calendar", "/prospects", "/settings"}
+                        for item in parsed["recommendations"][:5]:
+                            if not isinstance(item, dict) or not item.get("title"):
+                                continue
+                            route = str(item.get("target_route") or "/inbox").strip()
+                            if route not in valid_routes:
+                                route = "/inbox"
+                            prio = str(item.get("priority") or "medium").lower()
+                            if prio not in ("high", "medium", "low"):
+                                prio = "medium"
+                            clean_recs.append({
+                                "title": str(item.get("title") or "")[:160],
+                                "rationale": str(item.get("rationale") or "")[:300],
+                                "priority": prio,
+                                "action_type": str(item.get("action_type") or "follow_up")[:40],
+                                "suggested_action": str(item.get("suggested_action") or "")[:240],
+                                "target_route": route,
+                                "entity_label": str(item.get("entity_label") or "")[:100],
+                            })
+                        if clean_recs:
+                            recommendations = clean_recs
+                            ai_provider = f"{used_prov}:{used_mod}"
+            except Exception as exc:
+                logger.debug("Dashboard AI recommendation fallback cleanly used for user %s: %s", user.id, exc)
+
+        cache.set(
+            cache_key,
+            {"ai_summary": ai_summary, "recommendations": recommendations, "provider": ai_provider},
+            300,
+        )
+
+    return {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "name": user.get_full_name() or user.username,
+            "role": getattr(getattr(user, "profile", None), "role", ""),
+        },
+        "mailbox": mailbox_info,
+        "metrics": {
+            "incoming_count": len(recent_inbound),
+            "waiting_reply_count": len(waiting_threads),
+            "pending_tasks_count": len(pending_tasks),
+            "upcoming_meetings_count": len(upcoming_meetings),
+            "outreach_sent_today": outreach_today_count,
+        },
+        "incoming_emails": recent_inbound,
+        "outreach_activity": outreach_activity,
+        "pending_actions": pending_actions,
+        "ai_summary": ai_summary,
+        "recommendations": recommendations,
+        "ai_provider": ai_provider,
+        "synced_at": now.isoformat(),
+    }
+

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import api from '../../services/api';
 import { InstagramIcon, FacebookIcon, TwitterXIcon } from '../../components/common/SocialIcons';
+import DashboardLiveListener from '../../components/dashboard/DashboardLiveListener';
 
 const DigitalMarketingDashboardPage = () => {
   const [loading, setLoading] = useState(true);
@@ -402,6 +403,9 @@ const DigitalMarketingDashboardPage = () => {
           </div>
         )}
       </div>
+
+      {/* Real-Time Logged-in User Dashboard Listener */}
+      <DashboardLiveListener />
     </div>
   );
 };
