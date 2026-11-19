@@ -186,8 +186,8 @@ def session_settings_payload(session) -> dict:
         "owner_username": session.owner.username if session.owner else "",
         "phone_number": session.phone_number or "",
         "status": session.status,
-        # No row yet == the legacy default (enabled) applied by whatsapp_ai on first message.
-        "ai_enabled": ai_cfg.enabled if ai_cfg else True,
+        # New/unconfigured sessions default to OFF (False) until explicitly enabled by owner.
+        "ai_enabled": bool(ai_cfg.enabled) if ai_cfg else False,
         "strict_rag_enabled": strict_enabled,
         "refusal_message": rag_cfg.refusal_message if rag_cfg else "",
         "default_refusal_message": conf.refusal_message(),

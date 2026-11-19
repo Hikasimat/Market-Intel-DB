@@ -81,6 +81,7 @@ class WhatsAppSubsystemTestCase(APITestCase):
         self.prospect = Prospect.objects.create(
             company_name="Acme Tech",
             official_email_address="contact@acme.com",
+            created_by=self.lq_user.username,
         )
         self.contact = ProspectContact.objects.create(
             prospect=self.prospect,

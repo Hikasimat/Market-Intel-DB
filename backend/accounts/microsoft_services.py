@@ -400,3 +400,88 @@ def delete_outlook_event(creds, event_id):
     except Exception as e:
         logger.warning("Could not delete Outlook event %s: %s", event_id, e)
 
+
+def list_ms_events(creds, time_min, time_max):
+    """Fetch Outlook calendarView events within [time_min, time_max] normalized to UTC."""
+    from datetime import timezone as _tz
+
+    t_min_utc = time_min.astimezone(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    t_max_utc = time_max.astimezone(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    params = {
+        'startDateTime': t_min_utc,
+        'endDateTime': t_max_utc,
+        '$top': 250,
+        '$select': 'id,subject,start,end,isAllDay,showAs,isCancelled',
+    }
+    token = MicrosoftOAuthService.get_valid_access_token(creds)
+    url = f"{MS_GRAPH_BASE}/me/calendarView?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        method='GET',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json',
+            'Prefer': 'outlook.timezone="UTC"',
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode('utf-8') or '{}')
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8', errors='ignore')
+        logger.warning("Microsoft calendarView failed (%s): %s", e.code, raw[:300])
+        if e.code in (401, 403):
+            creds.is_active = False
+            creds.save(update_fields=['is_active', 'updated_at'])
+            raise MicrosoftAuthError("Microsoft authorization was revoked or expired. Please reconnect.")
+        raise MicrosoftAPIError(f"Microsoft request failed: {raw}", status=e.code)
+    except MicrosoftError:
+        raise
+    except Exception as e:
+        logger.error("Microsoft calendarView network error: %s", e)
+        raise MicrosoftAPIError("Unable to reach Microsoft Graph. Please try again.")
+
+    events = []
+    for item in data.get('value', []) if isinstance(data, dict) else []:
+        if item.get('isCancelled'):
+            continue
+        start_obj = item.get('start') or {}
+        end_obj = item.get('end') or {}
+        s_dt = start_obj.get('dateTime')
+        e_dt = end_obj.get('dateTime')
+        if s_dt and 'T' in s_dt and not s_dt.endswith('Z') and '+' not in s_dt:
+            if (start_obj.get('timeZone') or '').upper() == 'UTC':
+                s_dt = f"{s_dt}Z"
+        if e_dt and 'T' in e_dt and not e_dt.endswith('Z') and '+' not in e_dt:
+            if (end_obj.get('timeZone') or '').upper() == 'UTC':
+                e_dt = f"{e_dt}Z"
+        events.append({
+            'id': item.get('id'),
+            'summary': item.get('subject') or '(No Title)',
+            'start': s_dt,
+            'end': e_dt,
+            'start_timezone': start_obj.get('timeZone') or 'UTC',
+            'show_as': (item.get('showAs') or 'busy').lower(),
+        })
+    return events
+
+
+def check_ms_availability(creds, start_dt, end_dt, *, tz_name: str = 'UTC'):
+    """Check Outlook Calendar availability for [start_dt, end_dt)."""
+    from datetime import timezone as _tz
+    from .calendar_services import collect_busy_intervals_from_events, intervals_overlap
+
+    req_start = start_dt.astimezone(_tz.utc)
+    req_end = end_dt.astimezone(_tz.utc)
+    win_min = req_start - timedelta(hours=14)
+    win_max = req_end + timedelta(hours=14)
+    events = list_ms_events(creds, win_min, win_max)
+    busy = collect_busy_intervals_from_events(events, default_tz=tz_name)
+    conflicts = [b for b in busy if intervals_overlap(req_start, req_end, b[0], b[1])]
+    return {
+        'available': len(conflicts) == 0,
+        'conflicts': conflicts,
+        'busy_intervals': busy,
+    }
+
+

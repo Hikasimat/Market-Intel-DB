@@ -52,6 +52,7 @@ from .views import (
     WhatsAppQRView,
     WhatsAppResetSafetyStopView,
     WhatsAppSafetyEventsView,
+    WhatsAppAIAutoReplyConfigView,
     WhatsAppSendMediaView,
     WhatsAppSendMessageView,
     WhatsAppSessionListView,
@@ -151,6 +152,8 @@ urlpatterns = [
     ),
 
     # -- Configuration (Manager / Super Admin) --------------------------------
+    path("ai-config/", WhatsAppAIAutoReplyConfigView.as_view(), name="whatsapp-ai-config"),
+    path("ai-config/<str:session_id>/", WhatsAppAIAutoReplyConfigView.as_view(), name="whatsapp-ai-config-detail"),
     path("config/", WhatsAppConfigView.as_view(), name="whatsapp-config"),
     path("config/outbound/", WhatsAppSetOutboundView.as_view(), name="whatsapp-outbound"),
     path(

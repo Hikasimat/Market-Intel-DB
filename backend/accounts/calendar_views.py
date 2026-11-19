@@ -234,11 +234,17 @@ class CalendarEventsView(_CalendarBase):
         try:
             events = list_events(creds, time_min=time_min, time_max=time_max)
             # Annotate events with Market Intel DB Meeting recording information
+            from django.db.models import Q
             from prospects.models import Meeting
             meet_urls = [e['meet_url'] for e in events if e.get('meet_url')]
             event_ids = [e['id'] for e in events if e.get('id')]
-            meetings_by_link = {m.meeting_link: m for m in Meeting.objects.filter(meeting_link__in=meet_urls)}
-            meetings_by_event = {m.google_event_id: m for m in Meeting.objects.filter(google_event_id__in=event_ids)}
+            meeting_scope = Meeting.objects.filter(
+                Q(created_by=request.user) | Q(google_calendar_owner=request.user)
+            )
+            if request.user.is_superuser:
+                meeting_scope = Meeting.objects.all()
+            meetings_by_link = {m.meeting_link: m for m in meeting_scope.filter(meeting_link__in=meet_urls)}
+            meetings_by_event = {m.google_event_id: m for m in meeting_scope.filter(google_event_id__in=event_ids)}
             from .models import CalendarEventRecording, MeetingAutomationJob
             standalone_by_event = {
                 r.event_id: r for r in CalendarEventRecording.objects.filter(user=request.user, event_id__in=event_ids)
@@ -383,22 +389,10 @@ class CalendarEventsView(_CalendarBase):
             except Exception as exc:
                 return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Fallback for disconnected / local mock
-        evt_id = f"evt_{uuid.uuid4().hex[:10]}"
         return Response({
-            'success': True,
-            'event': {
-                'id': evt_id,
-                'summary': summary,
-                'description': description,
-                'start': start,
-                'end': end,
-                'meet_url': meet_url or f"https://meet.google.com/{uuid.uuid4().hex[:3]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:3]}",
-                'html_link': 'https://calendar.google.com',
-                'attendees': [{'email': a} if isinstance(a, str) else a for a in attendees],
-                'color_id': color_id,
-            }
-        }, status=status.HTTP_201_CREATED)
+            'error': 'Google Calendar is not connected for your account. Please connect Google Calendar first.',
+            'code': 'calendar_not_connected',
+        }, status=status.HTTP_409_CONFLICT)
 
     def delete(self, request):
         """Delete an event by event_id."""

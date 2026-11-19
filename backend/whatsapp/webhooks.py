@@ -648,11 +648,26 @@ def verify_hmac_signature(request_body: bytes, signature_header: str, algorithm:
     """
     Verify the HMAC signature from WAHA.
     Supports WAHA's cryptographic format (${timestamp}.${rawBody}) as well as raw body.
-    Supports both sha512 and sha256.
+    Supports both sha512 and sha256. Enforces timestamp skew if timestamp is supplied.
     """
+    import time
+
     if not signature_header:
         logger.warning("Webhook received without signature header.")
         return False
+
+    if timestamp:
+        try:
+            ts_val = float(str(timestamp).strip())
+            if ts_val > 1e12:
+                ts_val /= 1000.0
+            max_skew = int(os.environ.get("WHATSAPP_WEBHOOK_MAX_AGE_SECONDS", "300") or 300)
+            if abs(time.time() - ts_val) > max_skew:
+                logger.warning("Webhook timestamp outside allowed skew (%ss).", max_skew)
+                return False
+        except (TypeError, ValueError):
+            logger.warning("Webhook timestamp header malformed.")
+            return False
 
     try:
         secret = _get_webhook_secret()
@@ -831,7 +846,13 @@ def process_webhook_event(
     # 1. HMAC verification
     # -----------------------------------------------------------------------
     from django.conf import settings
-    bypass_hmac = getattr(settings, 'DEBUG', False) and not signature_header
+    has_secret = bool(os.environ.get("WHATSAPP_WEBHOOK_SECRET", "").strip())
+    bypass_hmac = (
+        getattr(settings, 'DEBUG', False)
+        and not signature_header
+        and not has_secret
+        and remote_addr in ("127.0.0.1", "::1", "localhost", "")
+    )
 
     if bypass_hmac:
         logger.warning("Bypassing webhook HMAC verification because DEBUG=True and WAHA sent no signature.")

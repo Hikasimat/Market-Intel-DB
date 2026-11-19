@@ -81,7 +81,9 @@ def _is_fresh_inbound_for_auto_reply(message, session=None) -> bool:
     sess = session or (conversation.session if conversation else None)
     if not sess or not conversation:
         return False
-    if not sess.is_active or sess.status != WhatsAppSession.Status.READY:
+    if not sess.is_active or sess.status != WhatsAppSession.Status.READY or not sess.owner_id:
+        return False
+    if not is_session_ai_enabled(sess):
         return False
 
     existing_log = (
@@ -110,13 +112,28 @@ def _is_fresh_inbound_for_auto_reply(message, session=None) -> bool:
     return not has_newer_reply
 
 
+def is_session_ai_enabled(session) -> bool:
+    """Return persisted per-session AI auto-reply state; defaults to False (OFF) for new sessions."""
+    from .models import WhatsAppAIAutoReplyConfig
+
+    if not session or not getattr(session, "pk", None):
+        return False
+    val = (
+        WhatsAppAIAutoReplyConfig.objects
+        .filter(session_id=session.pk)
+        .values_list("enabled", flat=True)
+        .first()
+    )
+    return bool(val) if val is not None else False
+
+
 def _get_or_create_ai_config(session):
     from .models import WhatsAppAIAutoReplyConfig
 
     cfg, _ = WhatsAppAIAutoReplyConfig.objects.get_or_create(
         session=session,
         defaults={
-            "enabled": True,
+            "enabled": False,
             "reply_to_groups": False,
             "max_history_messages": 20,
             "model_name": _get_setting("WHATSAPP_AI_MODEL", "gemini-3.8-flash"),
@@ -563,6 +580,8 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
 
     if not session.is_active or session.status != WhatsAppSession.Status.READY:
         return _skip(f"session_not_ready:{session.status}")
+    if not session.owner_id:
+        return _skip("session_missing_owner")
 
     ai_cfg = _get_or_create_ai_config(session)
     if not ai_cfg.enabled:
@@ -641,7 +660,9 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
             if pre_outcome.skip_reason:
                 return _skip(pre_outcome.skip_reason)
             reply_text, model_used = pre_outcome.reply_text, pre_outcome.model_used
+            meeting_request_id = getattr(pre_outcome, "meeting_request_id", None)
         else:
+            meeting_request_id = None
             # Strict RAG (opt-in per session): the answer comes ONLY from the session's knowledge
             # base. When it is enabled there is no fallback to unrestricted Gemini generation.
             strict_outcome = _try_strict_rag_reply(session, conversation, incoming, history_msgs, ai_cfg.model_name)
@@ -675,6 +696,38 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
         log_entry.error_message = str(exc)[:1000]
         log_entry.save(update_fields=["status", "error_message", "history_message_count", "sender_identifier", "updated_at"])
         return {"status": "FAILED", "error": str(exc)}
+
+    # Final race-condition guard: re-verify fresh DB ownership, session readiness,
+    # and AI enabled state right before dispatching any message through WAHA.
+    from .models import WhatsAppAIAutoReplyConfig
+
+    fresh_sess = (
+        WhatsAppSession.objects
+        .filter(pk=session.pk)
+        .values("is_active", "status", "owner_id", "session_name")
+        .first()
+    )
+    if (
+        not fresh_sess
+        or not fresh_sess["is_active"]
+        or fresh_sess["status"] != WhatsAppSession.Status.READY
+        or not fresh_sess["owner_id"]
+        or fresh_sess["owner_id"] != session.owner_id
+    ):
+        return _skip("session_disconnected_or_changed_during_processing")
+
+    fresh_enabled = (
+        WhatsAppAIAutoReplyConfig.objects
+        .filter(session_id=session.pk)
+        .values_list("enabled", flat=True)
+        .first()
+    )
+    if not fresh_enabled:
+        return _skip("session_ai_disabled_during_processing")
+
+    fresh_wa_cfg = _get_config()
+    if not fresh_wa_cfg.outbound_enabled or fresh_wa_cfg.safety_stop_active:
+        return _skip("outbound_safety_stopped_during_processing")
 
     # Send strictly through the originating WhatsAppSession and to the exact conversation.chat_id
     client = get_waha_client()
@@ -797,6 +850,10 @@ def process_ai_auto_reply(incoming_message_id) -> Optional[dict[str, Any]]:
             "sender_identifier", "updated_at",
         ])
 
+    if meeting_request_id:
+        from .models import WhatsAppMeetingRequest
+        WhatsAppMeetingRequest.objects.filter(pk=meeting_request_id).update(notification_sent=True)
+
     _write_audit_log(
         action=WhatsAppAuditLog.Action.MESSAGE_SENT,
         performed_by=session.owner,
@@ -877,7 +934,10 @@ def handle_persisted_whatsapp_message(
         return
     if not _is_auto_reply_globally_enabled():
         return
-    if is_history_sync and not _is_fresh_inbound_for_auto_reply(message, session=session):
+    sess = session or getattr(getattr(message, "conversation", None), "session", None)
+    if sess is not None and not is_session_ai_enabled(sess):
+        return
+    if is_history_sync and not _is_fresh_inbound_for_auto_reply(message, session=sess):
         return
     schedule_ai_auto_reply(message.pk)
 
@@ -906,6 +966,8 @@ def catch_up_unreplied_fresh_inbound_messages() -> int:
             conversation__is_deleted=False,
             conversation__session__is_active=True,
             conversation__session__status=WhatsAppSession.Status.READY,
+            conversation__session__owner__isnull=False,
+            conversation__session__ai_auto_reply_config__enabled=True,
             ai_reply_log__isnull=True,
         )
         .order_by("sent_at", "created_at")[:25]

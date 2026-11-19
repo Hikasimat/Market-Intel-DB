@@ -170,6 +170,8 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
             },
         }
 
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=self.session1, defaults={"enabled": True})
+
         with patch.dict("os.environ", {
             "GEMINI_API_KEY": "fake-gemini-key",
             "WHATSAPP_AI_AUTO_REPLY_ENABLED": "true",
@@ -230,6 +232,7 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         self.assertEqual(WhatsAppMessage.objects.filter(conversation=conv1).count(), 3)
 
     def test_opt_out_and_calling_endpoints_remain_intact(self):
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=self.session1, defaults={"enabled": True})
         WhatsAppOptOut.objects.create(phone_digits="919811122233", reason="STOP", is_active=True)
         fake_waha = MagicMock()
         inbound_payload = {
@@ -261,6 +264,7 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
     def test_realtime_sync_cycle_triggers_immediate_reply_and_ignores_stale_history(self):
         from whatsapp_ai.realtime_listener import run_realtime_sync_cycle
 
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=self.session1, defaults={"enabled": True})
         # Ensure user is logged out
         self.client.force_authenticate(user=None)
         now = timezone.now()
@@ -401,6 +405,7 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         # Old session was archived cleanly and a new active READY session exists for +919360239398
         self.session1.refresh_from_db()
         self.assertFalse(self.session1.is_active)
+        # New reconnected session defaults to AI OFF (must NOT auto-reply until explicitly enabled)
         new_sess = WhatsAppSession.objects.get(
             owner=self.user1,
             session_name="wa_u1_connected",
@@ -408,6 +413,37 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         )
         self.assertEqual(new_sess.status, WhatsAppSession.Status.READY)
         self.assertEqual(new_sess.phone_number, "+919360239398")
+        self.assertFalse(
+            WhatsAppAIAutoReplyConfig.objects.filter(session=new_sess, enabled=True).exists()
+        )
+        self.assertEqual(len(captured_prompts), 0)
+        fake_waha.send_text.assert_not_called()
+
+        # Now user1 explicitly enables AI Auto-Reply for the new session and receives a fresh message
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=new_sess, defaults={"enabled": True})
+        follow_payload = {
+            "event": "message",
+            "id": "evt_ai_switch_on_1",
+            "session": new_sess.session_name,
+            "payload": {
+                "id": "false_917025117045@c.us_IN_SWITCH_2",
+                "from": "917025117045@c.us",
+                "to": "919360239398@c.us",
+                "fromMe": False,
+                "pushName": "Fahad",
+                "body": "Hello I am fahad. Is this Plus UAE?",
+                "timestamp": int((now + timedelta(seconds=2)).timestamp()),
+            },
+        }
+        with patch.dict("os.environ", {
+            "GEMINI_API_KEY": "fake-gemini-key",
+            "WHATSAPP_AI_AUTO_REPLY_ENABLED": "true",
+            "WHATSAPP_SERVICE_URL": "http://localhost:3000",
+        }), \
+             patch("whatsapp.client.get_waha_client", return_value=fake_waha), \
+             patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            res_on = self._post_signed_webhook(follow_payload)
+        self.assertEqual(res_on.status_code, status.HTTP_200_OK)
 
         # Prompt referenced the dynamically switched account (+919360239398) and Fahad's message
         self.assertEqual(len(captured_prompts), 1)
@@ -424,6 +460,7 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         self.assertEqual(ai_log.status, WhatsAppAIReplyLog.Status.SENT)
 
     def test_manual_outreach_overrides_stale_incoming_keyword_opt_out(self):
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=self.session1, defaults={"enabled": True})
         # Old keyword opt-out from days earlier
         old_opt = WhatsAppOptOut.objects.create(
             phone_digits="917025117045",
@@ -705,6 +742,8 @@ class WhatsAppGeminiAutoReplyTests(APITestCase):
         from whatsapp.client import WAHAServiceError
         from whatsapp_ai.gemini_service import process_ai_auto_reply
         from whatsapp_ai.realtime_listener import run_realtime_sync_cycle
+
+        WhatsAppAIAutoReplyConfig.objects.update_or_create(session=self.session1, defaults={"enabled": True})
 
         now = timezone.now()
 

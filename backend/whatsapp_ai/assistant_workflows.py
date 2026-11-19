@@ -3,25 +3,25 @@ from datetime import datetime, date, time, timedelta
 import json
 import logging
 import re
-import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone as dj_timezone
 
 from accounts import calendar_services as cal
+from accounts import microsoft_services as ms
 from accounts import zoom_services as zoom
-from accounts.models import GoogleCalendarCredentials, ZoomCredentials
 from accounts.timezone_utils import extract_timezone_from_text, normalize_timezone
 from prospects.models import Meeting, Prospect, ProspectContact
 from prospects.task_service import (
     create_whatsapp_escalation_pre_task,
-    resolve_pre_user,
     resolve_prospect_and_contact_for_phone,
 )
 from rag.constants import REASON_INJECTION_QUESTION
-from .models import WhatsAppAssistantState
+from .models import WhatsAppAssistantState, WhatsAppMeetingRequest
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class AssistantWorkflowOutcome:
     reply_text: str = ""
     model_used: str = ""
     skip_reason: str = ""
+    meeting_request_id: Optional[str] = None
 
 
 def _clean_text(text: str) -> str:
@@ -221,10 +222,49 @@ def _parse_platform_deterministic(text: str) -> Optional[str]:
     lower = text.lower()
     has_zoom = bool(re.search(r"\bzoom\b", lower))
     has_gmeet = bool(re.search(r"\b(google\s*meet|gmeet|g-meet|meet\.google)\b", lower))
-    if has_zoom and not has_gmeet:
-        return "ZOOM"
-    if has_gmeet and not has_zoom:
-        return "GOOGLE_MEET"
+    has_teams = bool(re.search(r"\b(ms\s*teams|microsoft\s*teams|teams|outlook)\b", lower))
+    matches = [p for flag, p in ((has_zoom, "ZOOM"), (has_gmeet, "GOOGLE_MEET"), (has_teams, "MS_TEAMS")) if flag]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _parse_duration_deterministic(text: str) -> Optional[int]:
+    lower = (text or "").lower()
+    if re.search(r"\bhalf\s*(?:an?\s*)?hour\b", lower):
+        return 30
+    m_hr = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:hr|hrs|hour|hours)\b", lower)
+    if m_hr:
+        try:
+            mins = int(round(float(m_hr.group(1)) * 60))
+            if 15 <= mins <= 480:
+                return mins
+        except ValueError:
+            pass
+    m_min = re.search(r"\b(\d{2,3})\s*(?:m|min|mins|minute|minutes)\b", lower)
+    if m_min:
+        try:
+            mins = int(m_min.group(1))
+            if 15 <= mins <= 480:
+                return mins
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_alternative_choice_index(text: str, max_options: int) -> Optional[int]:
+    t = _clean_text(text).lower()
+    if not t or max_options <= 0:
+        return None
+    m = re.match(r"^(?:option\s*|slot\s*|choice\s*|#)?(\d+)(?:\b|[.)])?$", t)
+    if m:
+        idx = int(m.group(1))
+        if 1 <= idx <= max_options:
+            return idx
+    ordinals = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4}
+    for word, idx in ordinals.items():
+        if re.search(rf"\b(?:the\s+)?{word}(?:\s+(?:one|slot|option))?\b", t) and idx <= max_options:
+            return idx
     return None
 
 
@@ -260,7 +300,8 @@ def _extract_with_gemini_fallback(text: str, current_state: dict, model_name: st
         "and return ONLY valid JSON with keys (use null if not mentioned in this message): "
         '{"date": "YYYY-MM-DD or null", "time": "HH:MM (24-hour) or null", '
         '"timezone": "IANA timezone name like Asia/Kolkata or America/New_York or null", '
-        '"platform": "ZOOM or GOOGLE_MEET or null", "email": "email or null", '
+        '"duration_minutes": "integer minutes or null", '
+        '"platform": "ZOOM or GOOGLE_MEET or MS_TEAMS or null", "email": "email or null", '
         '"topic": "short agenda/topic or null", "company_name": "company name or null"}.'
     )
     try:
@@ -292,6 +333,7 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
     parsed_time = _parse_time_deterministic(text)
     parsed_tz = _parse_timezone_deterministic(text, expecting_timezone=expecting_tz)
     parsed_platform = _parse_platform_deterministic(text)
+    parsed_duration = _parse_duration_deterministic(text)
     parsed_email = _extract_email_deterministic(text)
 
     # Call Gemini only when key slots remain ambiguous in freeform text
@@ -318,8 +360,16 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
     if not parsed_tz and llm_slots.get("timezone"):
         parsed_tz = _normalize_timezone(str(llm_slots["timezone"]))
 
-    if not parsed_platform and llm_slots.get("platform") in ("ZOOM", "GOOGLE_MEET"):
+    if not parsed_platform and llm_slots.get("platform") in ("ZOOM", "GOOGLE_MEET", "MS_TEAMS"):
         parsed_platform = llm_slots["platform"]
+
+    if not parsed_duration and llm_slots.get("duration_minutes"):
+        try:
+            d_mins = int(llm_slots["duration_minutes"])
+            if 15 <= d_mins <= 480:
+                parsed_duration = d_mins
+        except (TypeError, ValueError):
+            pass
 
     if not parsed_email and llm_slots.get("email"):
         parsed_email = _extract_email_deterministic(str(llm_slots["email"]))
@@ -333,6 +383,11 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
     )
     if m_topic:
         topic = m_topic.group(1).strip(" .?!,-")[:200]
+    elif re.search(r"\bfor\s+([A-Za-z][^?.!,\n]{2,120})", text, re.IGNORECASE):
+        m_for = re.search(r"\bfor\s+([A-Za-z][^?.!,\n]{2,120})", text, re.IGNORECASE)
+        cand_topic = m_for.group(1).strip(" .?!,-")
+        if cand_topic.lower() not in ("zoom", "google meet", "gmeet", "ms teams", "microsoft teams", "teams", "me", "us", "you"):
+            topic = cand_topic[:200]
     elif llm_slots.get("topic"):
         topic = str(llm_slots["topic"]).strip()[:200]
     elif (
@@ -369,6 +424,11 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
     if parsed_platform and parsed_platform != updated.get("platform"):
         updated["platform"] = parsed_platform
         changed = True
+    if parsed_duration and parsed_duration != updated.get("duration_minutes"):
+        updated["duration_minutes"] = parsed_duration
+        changed = True
+    elif not updated.get("duration_minutes"):
+        updated["duration_minutes"] = int(getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
     if parsed_email and parsed_email != updated.get("email"):
         updated["email"] = parsed_email
         changed = True
@@ -379,8 +439,12 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
         updated["company_name"] = company_mention
         changed = True
 
-    if updated.get("awaiting_details") and (
-        topic or parsed_email or re.search(r"\b(skip|none|no agenda|na|n/a)\b", text, re.IGNORECASE)
+    if (
+        re.search(r"\b(?:skip\s*(?:email|details?)|no\s*email)\b", text, re.IGNORECASE)
+        or (
+            updated.get("awaiting_details")
+            and (topic or parsed_email or re.search(r"\b(skip|none|no agenda|na|n/a)\b", text, re.IGNORECASE))
+        )
     ):
         updated["details_collected"] = True
         updated["awaiting_details"] = False
@@ -392,34 +456,68 @@ def _extract_meeting_slots(text: str, existing: dict, model_name: str = "") -> d
     return updated
 
 
-def _pick_google_calendar_creds(preferred_user):
-    if preferred_user:
-        creds = cal.get_calendar_credentials(preferred_user)
-        if creds:
-            return creds, preferred_user
-    for candidate in GoogleCalendarCredentials.objects.select_related("user").filter(is_active=True).order_by("-updated_at"):
-        creds = cal.get_calendar_credentials(candidate.user)
-        if creds:
-            return creds, candidate.user
-    return None, preferred_user
+def _resolve_session_owner(session):
+    """
+    Strictly resolve the authenticated owner of this WhatsAppSession.
+    Never substitute another user or pick an arbitrary global fallback user.
+    """
+    owner = getattr(session, "owner", None) if session is not None else None
+    if owner and getattr(owner, "is_active", False):
+        return owner
+    return None
 
 
-def _pick_zoom_creds(preferred_user):
-    if preferred_user:
-        creds = zoom.get_zoom_credentials(preferred_user)
-        if creds:
-            return creds, preferred_user
-    active = ZoomCredentials.objects.select_related("user").filter(is_active=True).order_by("-updated_at").first()
-    if active:
-        return active, active.user
-    return None, preferred_user
+def _platform_label(platform: str) -> str:
+    return {
+        "ZOOM": "Zoom",
+        "GOOGLE_MEET": "Google Meet",
+        "MS_TEAMS": "Microsoft Teams",
+    }.get(platform or "", "Google Meet")
+
+
+def _is_valid_meeting_link(url: str) -> bool:
+    import urllib.parse
+
+    if not url or not isinstance(url, str):
+        return False
+    parsed = urllib.parse.urlparse(url.strip())
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def _resolve_owner_platforms(owner) -> Dict[str, Any]:
+    """Return active connected meeting/calendar credentials strictly for `owner`."""
+    if not owner:
+        return {"google": None, "microsoft": None, "zoom": None}
+    return {
+        "google": cal.get_calendar_credentials(owner),
+        "microsoft": ms.get_microsoft_credentials(owner),
+        "zoom": zoom.get_zoom_credentials(owner),
+    }
+
+
+def _available_platform_choices_text(owner) -> str:
+    creds = _resolve_owner_platforms(owner)
+    labels = []
+    if creds["zoom"]:
+        labels.append("*Zoom*")
+    if creds["google"]:
+        labels.append("*Google Meet*")
+    if creds["microsoft"]:
+        labels.append("*Microsoft Teams*")
+    if not labels:
+        return "*Zoom*, *Google Meet*, or *Microsoft Teams*"
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} or {labels[1]}"
+    return f"{', '.join(labels[:-1])}, or {labels[-1]}"
 
 
 def _msg_text(msg) -> str:
     return (getattr(msg, "full_body", "") or getattr(msg, "body_preview", "") or "").strip()
 
 
-def _resolve_conv_crm(conversation, sender_phone: str = "", email: str = "", sender_name: str = ""):
+def _resolve_conv_crm(conversation, sender_phone: str = "", email: str = "", sender_name: str = "", owner=None):
     prospect = getattr(conversation, "prospect", None)
     contact = getattr(conversation, "prospect_contact", None)
     if prospect and contact:
@@ -429,7 +527,375 @@ def _resolve_conv_crm(conversation, sender_phone: str = "", email: str = "", sen
         email=email,
         sender_name=sender_name or getattr(conversation, "whatsapp_name", ""),
     )
-    return prospect or p2, contact or c2
+    resolved_p = prospect or p2
+    resolved_c = contact or c2
+    if not prospect and resolved_p and owner and resolved_p.created_by and resolved_p.created_by != owner.username:
+        return None, None
+    return resolved_p, resolved_c
+
+
+def _collect_owner_local_busy_intervals(owner, window_start_utc, window_end_utc, exclude_request_id=None):
+    """Collect busy intervals from CRM Meeting records and active WhatsAppMeetingRequest locks owned by `owner`."""
+    from datetime import timezone as _dt_tz
+
+    busy = []
+    if not owner:
+        return busy
+
+    default_dur = int(getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
+    meetings = (
+        Meeting.objects
+        .filter(
+            Q(created_by=owner) | Q(google_calendar_owner=owner),
+            scheduled_datetime__gte=window_start_utc - timedelta(hours=8),
+            scheduled_datetime__lte=window_end_utc,
+        )
+        .exclude(status__in=["CANCELLED"])
+        .prefetch_related("whatsapp_requests")
+    )
+    for m in meetings:
+        m_start = m.scheduled_datetime
+        if m_start.tzinfo is None:
+            m_start = m_start.replace(tzinfo=_dt_tz.utc)
+        m_start = m_start.astimezone(_dt_tz.utc)
+        req_dur = default_dur
+        try:
+            linked_req = m.whatsapp_requests.first()
+            if linked_req and linked_req.duration_minutes:
+                req_dur = int(linked_req.duration_minutes)
+        except Exception:
+            pass
+        m_end = m_start + timedelta(minutes=req_dur)
+        busy.append((m_start, m_end, m.agenda or f"CRM Meeting ({m.meeting_provider})"))
+
+    active_reqs = WhatsAppMeetingRequest.objects.filter(
+        user=owner,
+        state__in=[
+            WhatsAppMeetingRequest.State.REVALIDATING_SLOT,
+            WhatsAppMeetingRequest.State.CREATING_MEETING,
+            WhatsAppMeetingRequest.State.SCHEDULED,
+        ],
+        selected_slot_start__lt=window_end_utc,
+        selected_slot_end__gt=window_start_utc,
+    )
+    if exclude_request_id:
+        active_reqs = active_reqs.exclude(pk=exclude_request_id)
+    for r in active_reqs:
+        if r.selected_slot_start and r.selected_slot_end:
+            busy.append((
+                r.selected_slot_start.astimezone(_dt_tz.utc),
+                r.selected_slot_end.astimezone(_dt_tz.utc),
+                r.purpose or "Scheduled WhatsApp Meeting",
+            ))
+    return busy
+
+
+def _suggest_alternative_slots(
+    *,
+    busy_intervals: list,
+    requested_local_dt: datetime,
+    duration_minutes: int,
+    tz_name: str,
+    count: int = 4,
+) -> List[Dict[str, Any]]:
+    """Find up to `count` future non-overlapping slots of length `duration_minutes`."""
+    from datetime import timezone as _dt_tz
+
+    tz = ZoneInfo(tz_name or "UTC")
+    now_utc = dj_timezone.now().astimezone(_dt_tz.utc)
+    suggestions: List[Dict[str, Any]] = []
+    seen_starts = set()
+
+    req_utc = requested_local_dt.astimezone(_dt_tz.utc)
+    base_date = requested_local_dt.date()
+
+    candidate_local_starts: List[datetime] = []
+    for hour in range(9, 19):
+        for minute in (0, 30):
+            cand = datetime.combine(base_date, time(hour, minute), tzinfo=tz)
+            if cand != requested_local_dt and cand.hour * 60 + cand.minute >= requested_local_dt.hour * 60 + requested_local_dt.minute:
+                candidate_local_starts.append(cand)
+    for hour in range(9, 19):
+        for minute in (0, 30):
+            cand = datetime.combine(base_date, time(hour, minute), tzinfo=tz)
+            if cand != requested_local_dt and cand not in candidate_local_starts:
+                candidate_local_starts.append(cand)
+    for day_offset in range(1, 4):
+        d = base_date + timedelta(days=day_offset)
+        for hour in range(9, 18):
+            for minute in (0, 30):
+                candidate_local_starts.append(datetime.combine(d, time(hour, minute), tzinfo=tz))
+
+    for cand_local in candidate_local_starts:
+        cand_start_utc = cand_local.astimezone(_dt_tz.utc)
+        cand_end_utc = cand_start_utc + timedelta(minutes=duration_minutes)
+        if cand_start_utc <= now_utc + timedelta(minutes=5):
+            continue
+        if cand_start_utc == req_utc or cand_start_utc in seen_starts:
+            continue
+        has_conflict = any(
+            cal.intervals_overlap(cand_start_utc, cand_end_utc, b[0], b[1])
+            for b in busy_intervals
+        )
+        if not has_conflict:
+            seen_starts.add(cand_start_utc)
+            end_local = cand_local + timedelta(minutes=duration_minutes)
+            suggestions.append({
+                "index": len(suggestions) + 1,
+                "date": cand_local.date().isoformat(),
+                "time": cand_local.strftime("%H:%M"),
+                "end_time": end_local.strftime("%H:%M"),
+                "timezone": tz_name,
+                "label": f"{cand_local.date().isoformat()} at {cand_local.strftime('%H:%M')} - {end_local.strftime('%H:%M')} ({tz_name})",
+                "start_utc": cand_start_utc.isoformat(),
+                "end_utc": cand_end_utc.isoformat(),
+            })
+            if len(suggestions) >= count:
+                break
+    return suggestions
+
+
+def _evaluate_owner_slot_availability(
+    owner,
+    *,
+    platform: str,
+    local_start_dt: datetime,
+    duration_minutes: int,
+    tz_name: str,
+    exclude_request_id=None,
+) -> Dict[str, Any]:
+    """
+    Strictly check `owner`'s connected provider + calendars + CRM meetings for `[start, start+duration)`.
+    Never falls back to any other user's credentials.
+    """
+    from datetime import timezone as _dt_tz
+
+    if not owner:
+        return {
+            "status": "MISSING_CREDENTIALS",
+            "message": "This WhatsApp session has no authenticated owner account configured for scheduling.",
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+
+    utc_start = local_start_dt.astimezone(_dt_tz.utc)
+    utc_end = utc_start + timedelta(minutes=duration_minutes)
+    if utc_start <= dj_timezone.now().astimezone(_dt_tz.utc) - timedelta(minutes=2):
+        return {
+            "status": "PAST_SLOT",
+            "message": (
+                f"The requested time ({local_start_dt.date().isoformat()} at {local_start_dt.strftime('%H:%M')} {tz_name}) "
+                "is in the past. Please share a future date and time."
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+
+    owner_creds = _resolve_owner_platforms(owner)
+    g_creds = owner_creds["google"]
+    ms_creds = owner_creds["microsoft"]
+    z_creds = owner_creds["zoom"]
+
+    def _other_connected_hint(excluded_platform: str) -> str:
+        alts = []
+        if excluded_platform != "ZOOM" and z_creds:
+            alts.append("*Zoom*")
+        if excluded_platform != "GOOGLE_MEET" and g_creds:
+            alts.append("*Google Meet*")
+        if excluded_platform != "MS_TEAMS" and ms_creds:
+            alts.append("*Microsoft Teams*")
+        if alts:
+            return f" Would you like me to check availability on {' or '.join(alts)} instead?"
+        return ""
+
+    if platform == "GOOGLE_MEET" and not g_creds:
+        return {
+            "status": "MISSING_CREDENTIALS",
+            "message": (
+                f"{owner.get_full_name() or owner.username}'s Google Calendar account is not connected, "
+                "so I cannot check availability or generate a Google Meet link right now."
+                + _other_connected_hint("GOOGLE_MEET")
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+    if platform == "MS_TEAMS" and not ms_creds:
+        return {
+            "status": "MISSING_CREDENTIALS",
+            "message": (
+                f"{owner.get_full_name() or owner.username}'s Microsoft Outlook / Teams account is not connected, "
+                "so I cannot check availability or generate a Teams meeting link right now."
+                + _other_connected_hint("MS_TEAMS")
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+    if platform == "ZOOM" and not z_creds:
+        return {
+            "status": "MISSING_CREDENTIALS",
+            "message": (
+                f"{owner.get_full_name() or owner.username}'s Zoom account is not connected, "
+                "so I cannot generate a Zoom meeting link right now."
+                + _other_connected_hint("ZOOM")
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+
+    win_min = utc_start - timedelta(hours=14)
+    win_max = utc_start + timedelta(days=4)
+    all_busy = _collect_owner_local_busy_intervals(
+        owner,
+        win_min,
+        win_max,
+        exclude_request_id=exclude_request_id,
+    )
+
+    try:
+        if platform == "GOOGLE_MEET":
+            g_res = cal.check_availability(g_creds, utc_start, utc_end, tz_name=tz_name)
+            all_busy.extend(g_res["busy_intervals"])
+        elif platform == "MS_TEAMS":
+            m_res = ms.check_ms_availability(ms_creds, utc_start, utc_end, tz_name=tz_name)
+            all_busy.extend(m_res["busy_intervals"])
+        elif platform == "ZOOM":
+            z_res = zoom.check_zoom_availability(z_creds, utc_start, utc_end)
+            all_busy.extend(z_res["busy_intervals"])
+            if g_creds:
+                g_res = cal.check_availability(g_creds, utc_start, utc_end, tz_name=tz_name)
+                all_busy.extend(g_res["busy_intervals"])
+            elif ms_creds:
+                m_res = ms.check_ms_availability(ms_creds, utc_start, utc_end, tz_name=tz_name)
+                all_busy.extend(m_res["busy_intervals"])
+    except (cal.CalendarAuthError, ms.MicrosoftAuthError, zoom.ZoomAuthError) as auth_exc:
+        return {
+            "status": "AUTH_REVOKED",
+            "message": (
+                f"{_platform_label(platform)} authorization for {owner.get_full_name() or owner.username} "
+                f"has expired or been revoked ({auth_exc}). Please ask the executive to reconnect their calendar/meeting account."
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+    except (cal.CalendarAPIError, ms.MicrosoftAPIError, zoom.ZoomAPIError, Exception) as api_exc:
+        logger.warning("Availability check provider failure for owner %s (%s): %s", owner.pk, platform, api_exc)
+        return {
+            "status": "PROVIDER_ERROR",
+            "message": (
+                f"I'm temporarily unable to verify calendar availability on {_platform_label(platform)} right now. "
+                "Could you please try again in a moment, or reply with another preferred time?"
+            ),
+            "alternatives": [],
+            "busy_intervals": [],
+        }
+
+    conflicts = [b for b in all_busy if cal.intervals_overlap(utc_start, utc_end, b[0], b[1])]
+    if conflicts:
+        alternatives = _suggest_alternative_slots(
+            busy_intervals=all_busy,
+            requested_local_dt=local_start_dt,
+            duration_minutes=duration_minutes,
+            tz_name=tz_name,
+            count=4,
+        )
+        return {
+            "status": "UNAVAILABLE",
+            "message": "Requested time overlaps with an existing calendar commitment.",
+            "alternatives": alternatives,
+            "busy_intervals": all_busy,
+        }
+
+    return {
+        "status": "AVAILABLE",
+        "message": "",
+        "alternatives": [],
+        "busy_intervals": all_busy,
+    }
+
+
+def _get_or_create_meeting_request(
+    *,
+    owner,
+    session,
+    conversation,
+    incoming,
+    state_data: dict,
+) -> Optional[WhatsAppMeetingRequest]:
+    if not owner:
+        return None
+    req_id = state_data.get("meeting_request_id")
+    req = None
+    if req_id:
+        req = WhatsAppMeetingRequest.objects.filter(pk=req_id, conversation=conversation, user=owner).first()
+    if req is None:
+        idemp_key = f"wamr:{conversation.id.hex[:20]}:{incoming.id.hex[:20]}"
+        req, _ = WhatsAppMeetingRequest.objects.get_or_create(
+            idempotency_key=idemp_key,
+            defaults={
+                "user": owner,
+                "session": session,
+                "conversation": conversation,
+                "source_message": incoming,
+                "state": WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
+                "expires_at": dj_timezone.now() + timedelta(days=2),
+            },
+        )
+        state_data["meeting_request_id"] = str(req.id)
+    return req
+
+
+def _sync_meeting_request_fields(
+    req: Optional[WhatsAppMeetingRequest],
+    state_data: dict,
+    *,
+    req_state: str,
+    calendar_provider: str = "",
+    failure_reason: str = "",
+):
+    if not req:
+        return
+    d_val = None
+    t_val = None
+    start_utc = None
+    end_utc = None
+    dur = int(state_data.get("duration_minutes") or getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
+    tz_name = state_data.get("timezone") or "UTC"
+    if state_data.get("date"):
+        try:
+            d_val = date.fromisoformat(state_data["date"])
+        except ValueError:
+            d_val = None
+    if state_data.get("time"):
+        try:
+            parts = [int(p) for p in state_data["time"].split(":")]
+            t_val = time(parts[0], parts[1])
+        except Exception:
+            t_val = None
+    if d_val and t_val:
+        try:
+            tz_obj = ZoneInfo(tz_name)
+        except Exception:
+            tz_obj = ZoneInfo("UTC")
+        local_dt = datetime.combine(d_val, t_val, tzinfo=tz_obj)
+        start_utc = local_dt.astimezone(ZoneInfo("UTC"))
+        end_utc = start_utc + timedelta(minutes=dur)
+
+    req.requested_date = d_val
+    req.requested_time = t_val
+    req.duration_minutes = dur
+    req.timezone = tz_name
+    req.purpose = (state_data.get("topic") or "")[:255]
+    req.platform = state_data.get("platform") or ""
+    if calendar_provider:
+        req.calendar_provider = calendar_provider
+    req.attendee_email = (state_data.get("email") or "")[:254]
+    req.selected_slot_start = start_utc
+    req.selected_slot_end = end_utc
+    req.suggested_slots = state_data.get("suggested_slots") or []
+    req.state = req_state
+    if failure_reason:
+        req.failure_reason = failure_reason[:1000]
+    req.save()
 
 
 def _book_confirmed_meeting(
@@ -439,16 +905,27 @@ def _book_confirmed_meeting(
     state_data: dict,
     sender_name: str,
     sender_phone: str,
-) -> Tuple[Optional[Meeting], Optional[str]]:
+    meeting_request: Optional[WhatsAppMeetingRequest] = None,
+) -> Tuple[Optional[Meeting], Optional[str], Optional[Dict[str, Any]]]:
     """
-    Create the meeting link via the selected platform (Zoom or Google Meet),
-    sync to calendar, and persist the CRM Meeting associated with sender & company.
-    Returns (Meeting, error_reply_message_if_failed).
+    Revalidate availability under a concurrency lock, create the meeting strictly using
+    `session.owner`'s credentials (Google Meet, MS Teams, or Zoom), verify the returned link,
+    and persist the CRM Meeting + WhatsAppMeetingRequest idempotently.
+    Returns (Meeting, error_reply_message_if_failed, conflict_payload_if_slot_taken).
     """
+    owner = _resolve_session_owner(session)
+    if not owner:
+        return (
+            None,
+            "This WhatsApp account does not have an active authenticated owner configured to schedule meetings.",
+            None,
+        )
+
     date_str = state_data.get("date")
     time_str = state_data.get("time")
     tz_name = state_data.get("timezone") or "UTC"
     platform = state_data.get("platform") or "GOOGLE_MEET"
+    duration = int(state_data.get("duration_minutes") or getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
     sender_email = (state_data.get("email") or "").strip()
     topic = (state_data.get("topic") or "").strip()
     mentioned_company = (state_data.get("company_name") or "").strip()
@@ -458,16 +935,19 @@ def _book_confirmed_meeting(
         sender_phone=sender_phone,
         email=sender_email,
         sender_name=sender_name,
+        owner=owner,
     )
     if prospect is None and mentioned_company:
-        prospect = Prospect.objects.filter(company_name__iexact=mentioned_company).first()
+        prospect = Prospect.objects.filter(
+            company_name__iexact=mentioned_company,
+            created_by=owner.username,
+        ).first()
 
     if not sender_email and contact and contact.official_email:
         sender_email = contact.official_email.strip()
     elif not sender_email and prospect and prospect.official_email_address:
         sender_email = prospect.official_email_address.strip()
 
-    owner = resolve_pre_user(prospect=prospect, whatsapp_session=session)
     company_display = prospect.company_name if prospect else (mentioned_company or sender_name or sender_phone or "WhatsApp Contact")
 
     try:
@@ -481,11 +961,96 @@ def _book_confirmed_meeting(
     t_val = time(t_parts[0], t_parts[1])
     local_dt = datetime.combine(d_val, t_val, tzinfo=tz)
     utc_dt = local_dt.astimezone(ZoneInfo("UTC"))
+    utc_end = utc_dt + timedelta(minutes=duration)
 
-    client_request_id = f"wa_{conversation.id.hex[:20]}_{uuid.uuid4().hex[:12]}"
+    with transaction.atomic():
+        if meeting_request:
+            meeting_request = WhatsAppMeetingRequest.objects.select_for_update().get(pk=meeting_request.pk)
+            if (
+                meeting_request.state == WhatsAppMeetingRequest.State.SCHEDULED
+                and meeting_request.meeting_id
+                and _is_valid_meeting_link(meeting_request.meeting_link)
+            ):
+                return meeting_request.meeting, None, None
+
+        overlapping_lock = WhatsAppMeetingRequest.objects.select_for_update().filter(
+            user=owner,
+            state__in=[
+                WhatsAppMeetingRequest.State.REVALIDATING_SLOT,
+                WhatsAppMeetingRequest.State.CREATING_MEETING,
+                WhatsAppMeetingRequest.State.SCHEDULED,
+            ],
+            selected_slot_start__lt=utc_end,
+            selected_slot_end__gt=utc_dt,
+        )
+        if meeting_request:
+            overlapping_lock = overlapping_lock.exclude(pk=meeting_request.pk)
+        if overlapping_lock.exists():
+            avail = _evaluate_owner_slot_availability(
+                owner,
+                platform=platform,
+                local_start_dt=local_dt,
+                duration_minutes=duration,
+                tz_name=tz_name,
+                exclude_request_id=meeting_request.pk if meeting_request else None,
+            )
+            return None, None, avail
+
+        if meeting_request:
+            meeting_request.state = WhatsAppMeetingRequest.State.REVALIDATING_SLOT
+            meeting_request.selected_slot_start = utc_dt
+            meeting_request.selected_slot_end = utc_end
+            meeting_request.save(update_fields=["state", "selected_slot_start", "selected_slot_end", "updated_at"])
+
+    avail = _evaluate_owner_slot_availability(
+        owner,
+        platform=platform,
+        local_start_dt=local_dt,
+        duration_minutes=duration,
+        tz_name=tz_name,
+        exclude_request_id=meeting_request.pk if meeting_request else None,
+    )
+    if avail["status"] in ("MISSING_CREDENTIALS", "AUTH_REVOKED"):
+        if meeting_request:
+            _sync_meeting_request_fields(
+                meeting_request,
+                state_data,
+                req_state=WhatsAppMeetingRequest.State.REQUIRES_RECONNECTION,
+                failure_reason=avail["message"],
+            )
+        return None, avail["message"], None
+    if avail["status"] in ("UNAVAILABLE", "PAST_SLOT"):
+        return None, avail["message"], avail
+    if avail["status"] == "PROVIDER_ERROR":
+        if meeting_request:
+            _sync_meeting_request_fields(
+                meeting_request,
+                state_data,
+                req_state=WhatsAppMeetingRequest.State.FAILED,
+                failure_reason=avail["message"],
+            )
+        return None, avail["message"], None
+
+    if meeting_request:
+        meeting_request.state = WhatsAppMeetingRequest.State.CREATING_MEETING
+        meeting_request.save(update_fields=["state", "updated_at"])
+
+    req_hex = meeting_request.id.hex[:16] if meeting_request else conversation.id.hex[:16]
+    client_request_id = f"wa_{conversation.id.hex[:16]}_{req_hex}"
+
+    existing_meeting = Meeting.objects.filter(client_request_id=client_request_id).first()
+    if existing_meeting and _is_valid_meeting_link(existing_meeting.meeting_link):
+        if meeting_request:
+            meeting_request.meeting = existing_meeting
+            meeting_request.meeting_link = existing_meeting.meeting_link
+            meeting_request.state = WhatsAppMeetingRequest.State.SCHEDULED
+            meeting_request.save(update_fields=["meeting", "meeting_link", "state", "updated_at"])
+        return existing_meeting, None, None
+
     summary = f"Meeting with {company_display}" + (f" ({sender_name})" if sender_name and sender_name != company_display else "")
     agenda_lines = [
         topic or "Scheduled via WhatsApp AI Assistant",
+        f"Duration: {duration} minutes",
         f"Sender: {sender_name or 'WhatsApp Contact'} ({sender_phone or 'N/A'})",
     ]
     if sender_email:
@@ -495,13 +1060,18 @@ def _book_confirmed_meeting(
     description = "\n".join(agenda_lines)
     attendees = [sender_email] if sender_email else []
 
+    owner_creds = _resolve_owner_platforms(owner)
+    g_creds = owner_creds["google"]
+    ms_creds = owner_creds["microsoft"]
+    z_creds = owner_creds["zoom"]
+
     if platform == "ZOOM":
-        z_creds, z_owner = _pick_zoom_creds(owner)
         if not z_creds:
             return (
                 None,
-                "Zoom is not currently connected on our server, so I couldn't generate a Zoom link right now. "
-                "Would you like me to schedule this meeting using *Google Meet* instead?",
+                f"{owner.get_full_name() or owner.username}'s Zoom account is not connected. "
+                f"Please pick another option: {_available_platform_choices_text(owner)}.",
+                None,
             )
         try:
             z_res = zoom.create_zoom_meeting(
@@ -510,28 +1080,47 @@ def _book_confirmed_meeting(
                 description=description,
                 start_dt=utc_dt,
                 tz_name=tz_name,
-                duration_minutes=30,
+                duration_minutes=duration,
             )
         except Exception as exc:
             logger.exception("WhatsApp Zoom meeting creation failed: %s", exc)
+            if meeting_request:
+                _sync_meeting_request_fields(
+                    meeting_request,
+                    state_data,
+                    req_state=WhatsAppMeetingRequest.State.FAILED,
+                    failure_reason=str(exc),
+                )
             return (
                 None,
-                f"I ran into an issue generating the Zoom link ({exc}). "
-                "Would you like me to try *Google Meet* instead?",
+                f"I ran into an issue generating the Zoom link ({exc}). Would you like to try another platform ({_available_platform_choices_text(owner)})?",
+                None,
             )
+
+        join_url = (z_res.get("join_url") or "").strip()
+        if not _is_valid_meeting_link(join_url):
+            if z_res.get("meeting_id"):
+                zoom.delete_zoom_meeting(z_creds, str(z_res["meeting_id"]))
+            if meeting_request:
+                _sync_meeting_request_fields(
+                    meeting_request,
+                    state_data,
+                    req_state=WhatsAppMeetingRequest.State.FAILED,
+                    failure_reason="Zoom returned an empty or invalid join URL.",
+                )
+            return None, "Zoom did not return a valid meeting link. Please try again shortly.", None
 
         cal_event_id = ""
         cal_type = ""
-        g_creds, g_owner = _pick_google_calendar_creds(owner)
         if g_creds:
             try:
-                cal_event_id = cal.deterministic_event_id(g_owner.id if g_owner else 0, client_request_id)
-                end_local = local_dt + timedelta(minutes=30)
+                cal_event_id = cal.deterministic_event_id(owner.id, client_request_id)
+                end_local = local_dt + timedelta(minutes=duration)
                 cal_body = {
                     "id": cal_event_id,
                     "summary": f"{summary} (Zoom)",
-                    "description": f"{description}\n\nZoom Link: {z_res.get('join_url') or ''}",
-                    "location": z_res.get("join_url") or "",
+                    "description": f"{description}\n\nZoom Link: {join_url}",
+                    "location": join_url,
                     "start": {"dateTime": local_dt.isoformat(), "timeZone": tz_name},
                     "end": {"dateTime": end_local.isoformat(), "timeZone": tz_name},
                 }
@@ -548,6 +1137,23 @@ def _book_confirmed_meeting(
             except Exception as exc:
                 logger.warning("Failed syncing WhatsApp Zoom meeting to Google Calendar: %s", exc)
                 cal_event_id = ""
+        elif ms_creds:
+            try:
+                cal_event_id = ms.create_outlook_event_for_zoom(
+                    ms_creds,
+                    summary=summary,
+                    description=description,
+                    start_dt=utc_dt,
+                    tz_name=tz_name,
+                    attendees=attendees,
+                    zoom_join_url=join_url,
+                    duration_minutes=duration,
+                ) or ""
+                if cal_event_id:
+                    cal_type = "OUTLOOK_CALENDAR"
+            except Exception as exc:
+                logger.warning("Failed syncing WhatsApp Zoom meeting to Outlook Calendar: %s", exc)
+                cal_event_id = ""
 
         meeting = Meeting.objects.create(
             prospect=prospect,
@@ -556,28 +1162,109 @@ def _book_confirmed_meeting(
             meeting_date=local_dt.date(),
             meeting_time=local_dt.time(),
             timezone=tz_name,
-            meeting_link=z_res.get("join_url") or "",
+            meeting_link=join_url,
             agenda=description,
             meeting_provider="ZOOM",
             provider_meeting_id=str(z_res.get("meeting_id") or ""),
-            google_event_id=cal_event_id,
+            google_event_id=cal_event_id if cal_type == "GOOGLE_CALENDAR" else "",
             calendar_event_id=cal_event_id or str(z_res.get("meeting_id") or ""),
             calendar_type=cal_type,
-            google_calendar_owner=g_owner if cal_event_id else None,
+            google_calendar_owner=owner if cal_type == "GOOGLE_CALENDAR" else None,
             created_by=owner,
             status="SCHEDULED",
             conference_status="READY",
             client_request_id=client_request_id,
         )
-        return meeting, None
+        if meeting_request:
+            meeting_request.meeting = meeting
+            meeting_request.meeting_link = join_url
+            meeting_request.external_event_id = cal_event_id or str(z_res.get("meeting_id") or "")
+            meeting_request.calendar_provider = cal_type or "ZOOM"
+            meeting_request.state = WhatsAppMeetingRequest.State.SCHEDULED
+            meeting_request.failure_reason = ""
+            meeting_request.save()
+        return meeting, None, None
 
-    # Default / GOOGLE_MEET
-    g_creds, g_owner = _pick_google_calendar_creds(owner)
+    if platform == "MS_TEAMS":
+        if not ms_creds:
+            return (
+                None,
+                f"{owner.get_full_name() or owner.username}'s Microsoft Outlook / Teams account is not connected.",
+                None,
+            )
+        try:
+            m_res = ms.create_teams_meeting_and_event(
+                ms_creds,
+                summary=summary,
+                description=description,
+                start_dt=utc_dt,
+                tz_name=tz_name,
+                attendees=attendees,
+                duration_minutes=duration,
+            )
+        except Exception as exc:
+            logger.exception("WhatsApp MS Teams meeting creation failed: %s", exc)
+            if meeting_request:
+                _sync_meeting_request_fields(
+                    meeting_request,
+                    state_data,
+                    req_state=WhatsAppMeetingRequest.State.FAILED,
+                    failure_reason=str(exc),
+                )
+            return (
+                None,
+                f"I ran into an issue generating the Microsoft Teams link ({exc}). Would you like to try another platform ({_available_platform_choices_text(owner)})?",
+                None,
+            )
+
+        join_url = (m_res.get("join_url") or "").strip()
+        if not _is_valid_meeting_link(join_url):
+            if m_res.get("event_id"):
+                ms.delete_outlook_event(ms_creds, m_res["event_id"])
+            if meeting_request:
+                _sync_meeting_request_fields(
+                    meeting_request,
+                    state_data,
+                    req_state=WhatsAppMeetingRequest.State.FAILED,
+                    failure_reason="Microsoft Teams did not return a valid join URL.",
+                )
+            return None, "Microsoft Teams did not return a valid meeting link. Please try again.", None
+
+        meeting = Meeting.objects.create(
+            prospect=prospect,
+            prospect_contact=contact,
+            scheduled_datetime=utc_dt,
+            meeting_date=local_dt.date(),
+            meeting_time=local_dt.time(),
+            timezone=tz_name,
+            meeting_link=join_url,
+            agenda=description,
+            meeting_provider="MS_TEAMS",
+            provider_meeting_id=str(m_res.get("meeting_id") or ""),
+            calendar_event_id=m_res.get("event_id") or "",
+            calendar_type="OUTLOOK_CALENDAR",
+            created_by=owner,
+            status="SCHEDULED",
+            conference_status="READY",
+            client_request_id=client_request_id,
+        )
+        if meeting_request:
+            meeting_request.meeting = meeting
+            meeting_request.meeting_link = join_url
+            meeting_request.external_event_id = m_res.get("event_id") or ""
+            meeting_request.calendar_provider = "OUTLOOK_CALENDAR"
+            meeting_request.state = WhatsAppMeetingRequest.State.SCHEDULED
+            meeting_request.failure_reason = ""
+            meeting_request.save()
+        return meeting, None, None
+
+    # Default / GOOGLE_MEET (strictly using session.owner's Google Calendar credentials)
     if not g_creds:
         return (
             None,
-            "Google Calendar is not currently connected on our server, so I couldn't generate a Google Meet link right now. "
-            "Please contact our executive team directly for assistance.",
+            f"{owner.get_full_name() or owner.username}'s Google Calendar is not connected, "
+            "so I couldn't generate a Google Meet link right now. Please contact our executive team directly for assistance.",
+            None,
         )
 
     try:
@@ -589,15 +1276,35 @@ def _book_confirmed_meeting(
             tz_name=tz_name,
             attendees=attendees,
             client_request_id=client_request_id,
-            duration_minutes=30,
+            duration_minutes=duration,
         )
     except Exception as exc:
         logger.exception("WhatsApp Google Meet creation failed: %s", exc)
+        if meeting_request:
+            _sync_meeting_request_fields(
+                meeting_request,
+                state_data,
+                req_state=WhatsAppMeetingRequest.State.FAILED,
+                failure_reason=str(exc),
+            )
         return (
             None,
-            f"I ran into an issue generating the Google Meet link ({exc}). "
-            "Would you like me to try again or switch to *Zoom*?",
+            f"I ran into an issue generating the Google Meet link ({exc}). Would you like me to try again or switch to another platform ({_available_platform_choices_text(owner)})?",
+            None,
         )
+
+    meet_url = (g_res.get("meet_url") or "").strip()
+    if not _is_valid_meeting_link(meet_url):
+        if g_res.get("event_id"):
+            cal.delete_event(g_creds, g_res["event_id"])
+        if meeting_request:
+            _sync_meeting_request_fields(
+                meeting_request,
+                state_data,
+                req_state=WhatsAppMeetingRequest.State.FAILED,
+                failure_reason="Google Calendar did not return a valid Google Meet link.",
+            )
+        return None, "Google Calendar did not return a valid Google Meet link yet. Please try again in a moment.", None
 
     meeting = Meeting.objects.create(
         prospect=prospect,
@@ -606,49 +1313,152 @@ def _book_confirmed_meeting(
         meeting_date=local_dt.date(),
         meeting_time=local_dt.time(),
         timezone=tz_name,
-        meeting_link=g_res.get("meet_url") or "",
+        meeting_link=meet_url,
         agenda=description,
         meeting_provider="GOOGLE_MEET",
         google_event_id=g_res.get("event_id") or "",
         calendar_event_id=g_res.get("event_id") or "",
         calendar_type="GOOGLE_CALENDAR",
-        google_calendar_owner=g_owner,
+        google_calendar_owner=owner,
         created_by=owner,
         status="SCHEDULED" if g_res.get("status") == "READY" else "PENDING",
         conference_status=g_res.get("status") or "READY",
         client_request_id=client_request_id,
     )
-    return meeting, None
+    if meeting_request:
+        meeting_request.meeting = meeting
+        meeting_request.meeting_link = meet_url
+        meeting_request.external_event_id = g_res.get("event_id") or ""
+        meeting_request.calendar_provider = "GOOGLE_CALENDAR"
+        meeting_request.state = WhatsAppMeetingRequest.State.SCHEDULED
+        meeting_request.failure_reason = ""
+        meeting_request.save()
+    return meeting, None, None
 
 
-def _next_scheduling_prompt(state_data: dict, *, company_hint: str = "", email_hint: str = "") -> str:
+def _format_alternatives_reply(
+    *,
+    requested_date: str,
+    requested_time: str,
+    tz_name: str,
+    duration_minutes: int,
+    alternatives: List[Dict[str, Any]],
+) -> str:
+    if not alternatives:
+        return (
+            f"The requested slot (*{requested_date} at {requested_time} {tz_name}*, {duration_minutes} mins) "
+            "is unavailable due to an existing calendar conflict, and no open slots were found in the next few days. "
+            "Could you please suggest another date or time?"
+        )
+    lines = [
+        f"That time slot (*{requested_date} at {requested_time} {tz_name}*, {duration_minutes} mins) is currently unavailable on the calendar.",
+        "Here are the next available time slots:",
+        "",
+    ]
+    for alt in alternatives:
+        lines.append(f"{alt['index']}. {alt['label']}")
+    lines.append("")
+    lines.append("Please reply with an option number (e.g., *1* or *2*) or suggest another preferred date/time.")
+    return "\n".join(lines)
+
+
+def _next_scheduling_prompt(
+    state_data: dict,
+    *,
+    owner=None,
+    meeting_request: Optional[WhatsAppMeetingRequest] = None,
+    company_hint: str = "",
+    email_hint: str = "",
+) -> Tuple[str, str]:
+    """
+    Determine the next question, run availability checks when slot & platform are ready,
+    or present the final confirmation summary.
+    Returns (reply_text, req_state).
+    """
     d_str = state_data.get("date")
     t_str = state_data.get("time")
     tz_str = state_data.get("timezone")
     plat = state_data.get("platform")
+    dur = int(state_data.get("duration_minutes") or getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
 
     if not d_str or not t_str:
         if d_str and not t_str:
             return (
-                f"Got your preferred date ({d_str}). What *time* (and *time zone*, e.g. IST, EST, UTC, Asia/Kolkata) works best for you?"
+                f"Got your preferred date ({d_str}). What *time* (and *time zone*, e.g. IST, EST, UTC, Asia/Kolkata) works best for you?",
+                WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
             )
         if t_str and not d_str:
             return (
-                f"Got your preferred time ({t_str}). Which *date* (and *time zone*, e.g. IST, EST, UTC, Asia/Kolkata) would you like?"
+                f"Got your preferred time ({t_str}). Which *date* (and *time zone*, e.g. IST, EST, UTC, Asia/Kolkata) would you like?",
+                WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
             )
         return (
             "I would be happy to schedule a meeting for you! "
             "Could you please share your preferred *date* and *time* "
-            "(for example, tomorrow at 3:00 PM or 2026-11-25 at 10:30 AM)?"
+            "(for example, tomorrow at 3:00 PM or 2026-11-25 at 10:30 AM)?",
+            WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
         )
 
     if not tz_str:
         return (
             f"Thanks! I have *{d_str} at {t_str}*. "
-            "Which *time zone* are you in (e.g., IST / Asia/Kolkata, EST / America/New_York, UTC, GMT+4)?"
+            "Which *time zone* are you in (e.g., IST / Asia/Kolkata, EST / America/New_York, UTC, GMT+4)?",
+            WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
         )
 
     effective_email = state_data.get("email") or email_hint
+
+    # If user already gave date, time, timezone, AND platform, verify slot availability
+    # BEFORE asking optional agenda/email details so we never ask details for a busy/unconnected slot.
+    if plat:
+        try:
+            tz = ZoneInfo(tz_str)
+        except Exception:
+            tz_str = "UTC"
+            tz = ZoneInfo("UTC")
+        d_val = date.fromisoformat(d_str)
+        t_parts = [int(p) for p in t_str.split(":")]
+        local_dt = datetime.combine(d_val, time(t_parts[0], t_parts[1]), tzinfo=tz)
+
+        avail = _evaluate_owner_slot_availability(
+            owner,
+            platform=plat,
+            local_start_dt=local_dt,
+            duration_minutes=dur,
+            tz_name=tz_str,
+            exclude_request_id=meeting_request.pk if meeting_request else None,
+        )
+
+        if avail["status"] in ("MISSING_CREDENTIALS", "AUTH_REVOKED"):
+            state_data["platform"] = None
+            state_data["awaiting_confirmation"] = False
+            return avail["message"], WhatsAppMeetingRequest.State.REQUIRES_RECONNECTION
+
+        if avail["status"] == "PAST_SLOT":
+            state_data["date"] = None
+            state_data["time"] = None
+            state_data["awaiting_confirmation"] = False
+            return avail["message"], WhatsAppMeetingRequest.State.COLLECTING_DETAILS
+
+        if avail["status"] == "PROVIDER_ERROR":
+            state_data["awaiting_confirmation"] = False
+            return avail["message"], WhatsAppMeetingRequest.State.FAILED
+
+        if avail["status"] == "UNAVAILABLE":
+            state_data["awaiting_confirmation"] = False
+            state_data["awaiting_alternative_selection"] = True
+            state_data["suggested_slots"] = avail["alternatives"]
+            return (
+                _format_alternatives_reply(
+                    requested_date=d_str,
+                    requested_time=t_str,
+                    tz_name=tz_str,
+                    duration_minutes=dur,
+                    alternatives=avail["alternatives"],
+                ),
+                WhatsAppMeetingRequest.State.AWAITING_ALTERNATIVE_SELECTION,
+            )
+
     if not state_data.get("details_collected") and (not state_data.get("topic") or not effective_email):
         state_data["awaiting_details"] = True
         missing_parts = []
@@ -661,20 +1471,28 @@ def _next_scheduling_prompt(state_data: dict, *, company_hint: str = "", email_h
         joined = " and ".join(missing_parts) if len(missing_parts) <= 2 else ", ".join(missing_parts[:-1]) + ", and " + missing_parts[-1]
         return (
             f"Noted: *{d_str} at {t_str} ({tz_str})*. "
-            f"Could you also share {joined}? (You can reply _skip_ if you prefer.)"
+            f"Could you also share {joined}? (You can reply _skip_ if you prefer.)",
+            WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
         )
 
     if not plat:
-        return "Which meeting platform do you prefer — *Zoom* or *Google Meet*?"
+        choices_text = _available_platform_choices_text(owner)
+        return (
+            f"Which meeting platform do you prefer — {choices_text}?",
+            WhatsAppMeetingRequest.State.COLLECTING_DETAILS,
+        )
 
-    # Ready for confirmation!
+    # Slot is AVAILABLE and details are collected! Ready for final confirmation.
+    state_data["awaiting_alternative_selection"] = False
+    state_data["suggested_slots"] = []
     state_data["awaiting_confirmation"] = True
-    platform_label = "Zoom" if plat == "ZOOM" else "Google Meet"
+    end_local = local_dt + timedelta(minutes=dur)
+    platform_label = _platform_label(plat)
     topic_label = state_data.get("topic") or "Business Discussion"
     lines = [
-        "Please confirm your meeting details:",
+        "Please confirm your meeting details (this slot is available):",
         f"- Date: {d_str}",
-        f"- Time: {t_str} ({tz_str})",
+        f"- Time: {t_str} - {end_local.strftime('%H:%M')} ({tz_str}, {dur} mins)",
         f"- Platform: {platform_label}",
         f"- Topic: {topic_label}",
     ]
@@ -682,7 +1500,7 @@ def _next_scheduling_prompt(state_data: dict, *, company_hint: str = "", email_h
         lines.append(f"- Email: {effective_email}")
     lines.append("")
     lines.append("Reply *Yes* or *Confirm* to schedule the meeting and generate your meeting link.")
-    return "\n".join(lines)
+    return "\n".join(lines), WhatsAppMeetingRequest.State.AWAITING_CONFIRMATION
 
 
 def handle_pre_rag_assistant_workflow(
@@ -709,11 +1527,13 @@ def handle_pre_rag_assistant_workflow(
     if state and state.mode == WhatsAppAssistantState.Mode.ESCALATION_CONFIRMATION:
         if is_affirmative_reply(text):
             extracted_email = _extract_email_deterministic(text) or ""
+            owner = _resolve_session_owner(session)
             prospect, contact = _resolve_conv_crm(
                 conversation,
                 sender_phone=sender_phone,
                 email=extracted_email,
                 sender_name=sender_name,
+                owner=owner,
             )
             orig_msg_id = (state.state_data or {}).get("incoming_message_id") or str(incoming.id)
             source_key = f"wa_escalation:{conversation.id}:{orig_msg_id}"
@@ -764,6 +1584,19 @@ def handle_pre_rag_assistant_workflow(
     # 2. Meeting scheduling workflow (active OR new scheduling intent)
     in_meeting_flow = bool(state and state.mode == WhatsAppAssistantState.Mode.MEETING_SCHEDULING)
     if in_meeting_flow or is_meeting_scheduling_intent(text):
+        owner = _resolve_session_owner(session)
+        if not owner:
+            if state:
+                state.reset()
+            return AssistantWorkflowOutcome(
+                handled=True,
+                reply_text=(
+                    "I cannot schedule a meeting automatically because this WhatsApp account does not have "
+                    "an active authenticated owner configured. Please contact our team directly."
+                ),
+                model_used="assistant:meeting_no_owner",
+            )
+
         if state is None:
             state = WhatsAppAssistantState.objects.create(
                 conversation=conversation,
@@ -776,7 +1609,21 @@ def handle_pre_rag_assistant_workflow(
             state.pending_query = ""
             state.state_data = {}
 
+        sdata = dict(state.state_data or {})
+        meeting_req = _get_or_create_meeting_request(
+            owner=owner,
+            session=session,
+            conversation=conversation,
+            incoming=incoming,
+            state_data=sdata,
+        )
+
         if in_meeting_flow and is_negative_or_cancel_reply(text):
+            _sync_meeting_request_fields(
+                meeting_req,
+                sdata,
+                req_state=WhatsAppMeetingRequest.State.CANCELLED,
+            )
             state.reset()
             return AssistantWorkflowOutcome(
                 handled=True,
@@ -784,12 +1631,12 @@ def handle_pre_rag_assistant_workflow(
                 model_used="assistant:meeting_cancelled",
             )
 
-        sdata = dict(state.state_data or {})
         prospect, contact = _resolve_conv_crm(
             conversation,
             sender_phone=sender_phone,
             email=sdata.get("email"),
             sender_name=sender_name,
+            owner=owner,
         )
         known_email = (
             sdata.get("email")
@@ -798,7 +1645,70 @@ def handle_pre_rag_assistant_workflow(
         )
         known_company = prospect.company_name if prospect else ""
 
-        # If awaiting confirmation & sender confirms -> generate link and save Meeting!
+        # If awaiting alternative selection from earlier conflict
+        if sdata.get("awaiting_alternative_selection"):
+            alts = list(sdata.get("suggested_slots") or [])
+            chosen_idx = _parse_alternative_choice_index(text, len(alts))
+            if chosen_idx is not None:
+                chosen = alts[chosen_idx - 1]
+                sdata["date"] = chosen["date"]
+                sdata["time"] = chosen["time"]
+                sdata["timezone"] = chosen.get("timezone") or sdata.get("timezone")
+                sdata["awaiting_alternative_selection"] = False
+                sdata["suggested_slots"] = []
+                reply, req_state = _next_scheduling_prompt(
+                    sdata,
+                    owner=owner,
+                    meeting_request=meeting_req,
+                    company_hint=known_company,
+                    email_hint=known_email,
+                )
+                _sync_meeting_request_fields(meeting_req, sdata, req_state=req_state)
+                state.mode = WhatsAppAssistantState.Mode.MEETING_SCHEDULING
+                state.state_data = sdata
+                state.last_incoming_message_id = str(incoming.id)
+                state.save(update_fields=["mode", "state_data", "last_incoming_message_id", "updated_at"])
+                return AssistantWorkflowOutcome(
+                    handled=True,
+                    reply_text=reply,
+                    model_used="assistant:meeting_alternative_selected",
+                    meeting_request_id=str(meeting_req.id) if meeting_req else None,
+                )
+
+            # Check if user suggested a fresh date/time directly
+            prev_date, prev_time = sdata.get("date"), sdata.get("time")
+            updated_try = _extract_meeting_slots(text, sdata, model_name=model_name)
+            if updated_try.get("date") != prev_date or updated_try.get("time") != prev_time:
+                sdata = updated_try
+                sdata["awaiting_alternative_selection"] = False
+                sdata["suggested_slots"] = []
+                reply, req_state = _next_scheduling_prompt(
+                    sdata,
+                    owner=owner,
+                    meeting_request=meeting_req,
+                    company_hint=known_company,
+                    email_hint=known_email,
+                )
+                _sync_meeting_request_fields(meeting_req, sdata, req_state=req_state)
+                state.mode = WhatsAppAssistantState.Mode.MEETING_SCHEDULING
+                state.state_data = sdata
+                state.last_incoming_message_id = str(incoming.id)
+                state.save(update_fields=["mode", "state_data", "last_incoming_message_id", "updated_at"])
+                return AssistantWorkflowOutcome(
+                    handled=True,
+                    reply_text=reply,
+                    model_used="assistant:meeting_scheduler",
+                    meeting_request_id=str(meeting_req.id) if meeting_req else None,
+                )
+
+            return AssistantWorkflowOutcome(
+                handled=True,
+                reply_text="Please reply with one of the numbered time slots above (e.g., *1* or *2*), or share another preferred date and time.",
+                model_used="assistant:meeting_alternative_prompt",
+                meeting_request_id=str(meeting_req.id) if meeting_req else None,
+            )
+
+        # If awaiting confirmation & sender confirms -> revalidate availability, book & verify link!
         if (
             sdata.get("awaiting_confirmation")
             and sdata.get("date")
@@ -807,15 +1717,50 @@ def handle_pre_rag_assistant_workflow(
             and sdata.get("platform")
             and is_affirmative_reply(text)
         ):
-            meeting, err_msg = _book_confirmed_meeting(
+            meeting, err_msg, conflict_payload = _book_confirmed_meeting(
                 session=session,
                 conversation=conversation,
                 state_data=sdata,
                 sender_name=sender_name,
                 sender_phone=sender_phone,
+                meeting_request=meeting_req,
             )
+            if conflict_payload is not None:
+                dur = int(sdata.get("duration_minutes") or getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
+                if conflict_payload.get("status") == "PAST_SLOT":
+                    sdata["date"] = None
+                    sdata["time"] = None
+                    sdata["awaiting_confirmation"] = False
+                    _sync_meeting_request_fields(meeting_req, sdata, req_state=WhatsAppMeetingRequest.State.COLLECTING_DETAILS)
+                    reply = conflict_payload["message"]
+                else:
+                    alts = conflict_payload.get("alternatives") or []
+                    sdata["awaiting_confirmation"] = False
+                    sdata["awaiting_alternative_selection"] = True
+                    sdata["suggested_slots"] = alts
+                    _sync_meeting_request_fields(
+                        meeting_req,
+                        sdata,
+                        req_state=WhatsAppMeetingRequest.State.AWAITING_ALTERNATIVE_SELECTION,
+                    )
+                    reply = _format_alternatives_reply(
+                        requested_date=sdata["date"],
+                        requested_time=sdata["time"],
+                        tz_name=sdata["timezone"],
+                        duration_minutes=dur,
+                        alternatives=alts,
+                    )
+                state.state_data = sdata
+                state.last_incoming_message_id = str(incoming.id)
+                state.save(update_fields=["mode", "state_data", "last_incoming_message_id", "updated_at"])
+                return AssistantWorkflowOutcome(
+                    handled=True,
+                    reply_text=reply,
+                    model_used="assistant:meeting_slot_revalidation_conflict",
+                    meeting_request_id=str(meeting_req.id) if meeting_req else None,
+                )
+
             if err_msg:
-                # Allow switching platform if one provider isn't connected
                 sdata["platform"] = None
                 sdata["awaiting_confirmation"] = False
                 state.state_data = sdata
@@ -825,19 +1770,29 @@ def handle_pre_rag_assistant_workflow(
                     handled=True,
                     reply_text=err_msg,
                     model_used="assistant:meeting_provider_retry",
+                    meeting_request_id=str(meeting_req.id) if meeting_req else None,
                 )
 
-            platform_label = "Zoom" if meeting.meeting_provider == "ZOOM" else "Google Meet"
+            dur = int(sdata.get("duration_minutes") or getattr(settings, "MEETING_DEFAULT_DURATION_MINUTES", 30) or 30)
+            platform_label = _platform_label(meeting.meeting_provider)
             company_label = meeting.prospect.company_name if meeting.prospect else (sdata.get("company_name") or sender_name or "Your Team")
+            topic_label = sdata.get("topic") or "Business Discussion"
             local_date_str = meeting.meeting_date.isoformat() if meeting.meeting_date else sdata.get("date")
             local_time_str = meeting.meeting_time.strftime("%H:%M") if meeting.meeting_time else sdata.get("time")
+            try:
+                tz_obj = ZoneInfo(meeting.timezone or sdata.get("timezone") or "UTC")
+                end_str = (meeting.scheduled_datetime.astimezone(tz_obj) + timedelta(minutes=dur)).strftime("%H:%M")
+            except Exception:
+                end_str = ""
+            time_window = f"{local_time_str} - {end_str}" if end_str else local_time_str
             reply = (
                 f"Your {platform_label} meeting is confirmed and added to the calendar!\n\n"
                 f"- Company / Contact: {company_label}\n"
+                f"- Purpose: {topic_label}\n"
                 f"- Date: {local_date_str}\n"
-                f"- Time: {local_time_str} ({meeting.timezone})\n"
+                f"- Time: {time_window} ({meeting.timezone}, {dur} mins)\n"
                 f"- Platform: {platform_label}\n"
-                f"- Meeting Link: {meeting.meeting_link or 'Link generated in calendar'}\n\n"
+                f"- Meeting Link: {meeting.meeting_link}\n\n"
                 "We look forward to speaking with you!"
             )
             state.reset()
@@ -845,11 +1800,19 @@ def handle_pre_rag_assistant_workflow(
                 handled=True,
                 reply_text=reply,
                 model_used=f"assistant:meeting_booked:{meeting.meeting_provider.lower()}",
+                meeting_request_id=str(meeting_req.id) if meeting_req else None,
             )
 
         # Extract any new slots from message and advance the conversation
         sdata = _extract_meeting_slots(text, sdata, model_name=model_name)
-        reply = _next_scheduling_prompt(sdata, company_hint=known_company, email_hint=known_email)
+        reply, req_state = _next_scheduling_prompt(
+            sdata,
+            owner=owner,
+            meeting_request=meeting_req,
+            company_hint=known_company,
+            email_hint=known_email,
+        )
+        _sync_meeting_request_fields(meeting_req, sdata, req_state=req_state)
         state.mode = WhatsAppAssistantState.Mode.MEETING_SCHEDULING
         state.state_data = sdata
         state.last_incoming_message_id = str(incoming.id)
@@ -858,6 +1821,7 @@ def handle_pre_rag_assistant_workflow(
             handled=True,
             reply_text=reply,
             model_used="assistant:meeting_scheduler",
+            meeting_request_id=str(meeting_req.id) if meeting_req else None,
         )
 
     return AssistantWorkflowOutcome(handled=False)

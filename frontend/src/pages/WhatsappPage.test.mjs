@@ -168,3 +168,13 @@ test('WhatsappPage.jsx contact display-name priority prioritizes sender pushName
     '191126329925674@lid'
   );
 });
+
+test('WhatsappPage.jsx implements persistent per-account AI Auto-Reply ON/OFF toggle wired to backend API', () => {
+  assert.match(source, /const \[aiEnabled,\s*setAiEnabled\]\s*=\s*useState\(false\)/);
+  assert.match(source, /\/whatsapp\/ai-config\//);
+  assert.match(source, /api\.patch\(endpoint,\s*\{\s*enabled:\s*nextValue\s*\}\)/);
+  assert.match(source, /if\s*\(updatingAiConfig\s*\|\|\s*loadingAiConfig\)\s*return/);
+  assert.match(source, /role="switch"/);
+  assert.match(source, /aria-checked=\{aiEnabled\}/);
+  assert.match(source, /data-testid="whatsapp-ai-toggle-bar"/);
+});

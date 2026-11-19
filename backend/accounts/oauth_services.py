@@ -234,16 +234,42 @@ class GmailOAuthService:
         return url, signed_state
 
     @classmethod
-    def verify_state(cls, received_state, expected_user_id):
+    def verify_state(cls, received_state, expected_user_id, consume=True):
+        """Verify Gmail OAuth state signature, user binding, freshness, and single-use nonce."""
+        from django.core.cache import cache
+
         if not received_state:
             return False
         signer = TimestampSigner(salt='gmail-oauth-state')
         try:
             unsigned = signer.unsign(received_state, max_age=cls.STATE_MAX_AGE)
-            user_part = unsigned.split(':', 1)[0]
-            return str(user_part) == str(expected_user_id)
+            user_part, _, nonce = unsigned.partition(':')
+            if str(user_part) != str(expected_user_id) or not nonce:
+                return False
+            if consume and not cache.add(f"gmail-oauth-used:{nonce}", 1, cls.STATE_MAX_AGE):
+                return False
+            return True
         except (BadSignature, SignatureExpired):
             return False
+
+    @classmethod
+    def verify_and_consume_state_user_id(cls, received_state):
+        """Verify and consume a Gmail OAuth state token without session cookie, returning user_id or None."""
+        from django.core.cache import cache
+
+        if not received_state:
+            return None
+        signer = TimestampSigner(salt='gmail-oauth-state')
+        try:
+            unsigned = signer.unsign(received_state, max_age=cls.STATE_MAX_AGE)
+            user_part, _, nonce = unsigned.partition(':')
+            if not user_part or not nonce:
+                return None
+            if not cache.add(f"gmail-oauth-used:{nonce}", 1, cls.STATE_MAX_AGE):
+                return None
+            return int(user_part)
+        except (BadSignature, SignatureExpired, ValueError):
+            return None
 
     @classmethod
     def exchange_code_for_tokens(cls, code):

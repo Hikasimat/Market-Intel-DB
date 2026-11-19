@@ -65,12 +65,16 @@ class WhatsAppConfigurationSerializer(serializers.ModelSerializer):
 
 
 class WhatsAppSessionSerializer(serializers.ModelSerializer):
+    ai_enabled = serializers.SerializerMethodField()
+
     class Meta:
         model = WhatsAppSession
         fields = [
+            "id",
             "session_name",
             "status",
             "phone_number",
+            "ai_enabled",
             "last_health_check_at",
             "last_health_status",
             "send_count",
@@ -90,6 +94,10 @@ class WhatsAppSessionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def get_ai_enabled(self, obj):
+        from whatsapp_ai.gemini_service import is_session_ai_enabled
+        return is_session_ai_enabled(obj)
+
 
 class WhatsAppSessionListSerializer(serializers.ModelSerializer):
     """
@@ -98,6 +106,7 @@ class WhatsAppSessionListSerializer(serializers.ModelSerializer):
     Owner details are read-only and non-sensitive.
     """
     owner_username = serializers.SerializerMethodField()
+    ai_enabled = serializers.SerializerMethodField()
 
     class Meta:
         model = WhatsAppSession
@@ -107,6 +116,7 @@ class WhatsAppSessionListSerializer(serializers.ModelSerializer):
             "status",
             "phone_number",
             "is_active",
+            "ai_enabled",
             "last_used_at",
             "last_synced_at",
             "stopped_at",
@@ -120,6 +130,10 @@ class WhatsAppSessionListSerializer(serializers.ModelSerializer):
         if obj.owner:
             return obj.owner.username
         return None
+
+    def get_ai_enabled(self, obj):
+        from whatsapp_ai.gemini_service import is_session_ai_enabled
+        return is_session_ai_enabled(obj)
 
 
 class WhatsAppConversationSerializer(serializers.ModelSerializer):

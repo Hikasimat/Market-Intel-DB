@@ -609,6 +609,25 @@ class WhatsAppQRView(APIView):
                         "qrBase64": qr_base64,
                         "value": cached_qr.get("value") or cached_qr.get("qr"),
                     })
+                is_conn_refused = (
+                    getattr(e, "status_code", None) is None
+                    or "unreachable" in err_str
+                    or "refused" in err_str
+                    or "10061" in err_str
+                    or "timed out" in err_str
+                )
+                if is_conn_refused:
+                    return Response({
+                        "status": "WAHA_UNREACHABLE",
+                        "connected": False,
+                        "service_unreachable": True,
+                        "session_name": session_name,
+                        "phone_number": session_obj.phone_number,
+                        "error": (
+                            "WhatsApp service (WAHA) is not running or unreachable on port 3000. "
+                            "Please start the WAHA container/service and click Retry."
+                        ),
+                    })
                 return Response({
                     "status": "STARTING",
                     "connected": False,
@@ -1522,21 +1541,51 @@ class WhatsAppClearOptOutView(APIView):
     permission_classes = [IsAuthenticated, CanSendWhatsApp]
 
     def post(self, request):
+        from prospects.models import Prospect
+        from prospects.views import apply_lq_distribution_filter
+
         phone = (request.data.get("phone") or request.data.get("chat_id") or "").strip()
         digits = re.sub(r"\D+", "", phone)
-        if len(digits) >= 8:
-            suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
-            deactivated = WhatsAppOptOut.objects.filter(
-                Q(phone_digits__endswith=suffix) | Q(phone_digits=digits),
-                is_active=True,
-            ).update(
-                is_active=False,
-                reversed_by=request.user,
-                reversed_at=timezone.now(),
-                reversal_reason="Manual agent unblock",
+        if len(digits) < 8:
+            return Response({"detail": "Invalid phone number."}, status=status.HTTP_400_BAD_REQUEST)
+
+        suffix = digits[-10:] if len(digits) >= 10 else digits[-8:]
+        user_role = getattr(getattr(request.user, "profile", None), "role", None)
+        is_privileged = bool(request.user.is_superuser or user_role in ("MANAGER", "ADMIN"))
+        if not is_privileged:
+            has_owned_conv = WhatsAppConversation.objects.filter(
+                session__owner=request.user,
+                is_deleted=False,
+            ).filter(Q(phone_number__endswith=suffix) | Q(chat_id__startswith=digits)).exists()
+            accessible_prospects = apply_lq_distribution_filter(Prospect.objects.all(), request.user)
+            has_crm = ProspectContact.objects.filter(prospect__in=accessible_prospects).filter(
+                Q(phone_number__endswith=suffix) | Q(phone_digits__endswith=suffix)
+            ).exists()
+            if not has_owned_conv and not has_crm:
+                return Response(
+                    {"detail": "You are not authorized to clear opt-out for this phone number."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        deactivated = WhatsAppOptOut.objects.filter(
+            Q(phone_digits__endswith=suffix) | Q(phone_digits=digits),
+            is_active=True,
+        ).update(
+            is_active=False,
+            reversed_by=request.user,
+            reversed_at=timezone.now(),
+            reversal_reason="Manual agent unblock",
+        )
+        try:
+            _write_audit_log(
+                action=WhatsAppAuditLog.Action.OPT_OUT_REVERSED,
+                performed_by=request.user,
+                success=True,
+                result_detail=f"Cleared {deactivated} opt-out record(s) for suffix {suffix}",
             )
-            return Response({"detail": f"Opt-out cleared for {phone}.", "count": deactivated})
-        return Response({"detail": "Invalid phone number."}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            pass
+        return Response({"detail": f"Opt-out cleared for {phone}.", "count": deactivated})
 
 
 class WhatsAppMarkReadView(APIView):
@@ -1756,6 +1805,10 @@ class WhatsAppMediaProxyView(APIView):
         try:
             msg = WhatsAppMessage.objects.select_related("conversation__session").get(pk=message_id)
         except WhatsAppMessage.DoesNotExist:
+            return Response({"detail": "Media not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
+
+        sess = msg.conversation.session if msg.conversation else None
+        if not request.user.is_superuser and (not sess or sess.owner_id != request.user.id):
             return Response({"detail": "Media not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
 
         if not msg.media_url and not msg.media_file:
@@ -2490,8 +2543,11 @@ class WhatsAppCRMContactsView(APIView):
     permission_classes = [IsAuthenticated, CanViewWhatsApp]
 
     def get(self, request):
+        from prospects.views import apply_lq_distribution_filter
+
         search = request.query_params.get("search", "").strip()
         qs = ProspectContact.objects.select_related("prospect").all()
+        qs = apply_lq_distribution_filter(qs, request.user, "prospect_id__")
 
         if search:
             qs = qs.filter(
@@ -2537,8 +2593,14 @@ class WhatsAppConversationLinkCRMView(APIView):
         contact_id = request.data.get("prospect_contact_id")
 
         if contact_id:
+            from prospects.views import apply_lq_distribution_filter
+
             try:
-                contact = ProspectContact.objects.select_related("prospect").get(id=contact_id)
+                contact = apply_lq_distribution_filter(
+                    ProspectContact.objects.select_related("prospect"),
+                    request.user,
+                    "prospect_id__",
+                ).get(id=contact_id)
             except ProspectContact.DoesNotExist:
                 return Response({"detail": "CRM contact not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -3606,4 +3668,141 @@ class WhatsAppCallRecordingDeleteView(APIView):
 
         rec.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WhatsAppAIAutoReplyConfigView(APIView):
+    """
+    Read or toggle the per-session AI Auto-Reply ON/OFF setting.
+    GET   /api/whatsapp/ai-config/                  (active own session)
+    GET   /api/whatsapp/ai-config/<session_id>/     (specific own session)
+    PATCH /api/whatsapp/ai-config/                  (active own session)
+    PATCH /api/whatsapp/ai-config/<session_id>/     (specific own session)
+
+    Strictly enforces session ownership: a user can only inspect or modify
+    settings for WhatsApp sessions they own (or superuser).
+    Newly connected sessions default to enabled=False (OFF).
+    """
+
+    permission_classes = [IsAuthenticated, CanViewWhatsApp]
+
+    def _resolve_session(self, request, session_id=None):
+        sid = session_id or request.query_params.get("session_id") or (
+            request.data.get("session_id") if isinstance(request.data, dict) else None
+        )
+        qs = WhatsAppSession.objects.select_related("owner").filter(is_active=True).exclude(
+            session_name__startswith="hist_"
+        )
+        if not request.user.is_superuser:
+            qs = qs.filter(owner=request.user)
+        if sid is not None and str(sid).strip() != "":
+            sid_str = str(sid).strip()
+            if sid_str.isdigit():
+                return qs.filter(pk=int(sid_str)).first(), True
+            return qs.filter(session_name=sid_str).first(), True
+        return _get_user_session(request.user, create=True), False
+
+    @staticmethod
+    def _serialize_cfg(session, cfg):
+        return {
+            "session_id": session.pk,
+            "session_name": session.session_name,
+            "phone_number": session.phone_number or "",
+            "status": session.status,
+            "owner_username": session.owner.username if session.owner else "",
+            "enabled": bool(cfg.enabled) if cfg is not None else False,
+            "ai_enabled": bool(cfg.enabled) if cfg is not None else False,
+            "reply_to_groups": bool(cfg.reply_to_groups) if cfg is not None else False,
+            "updated_at": cfg.updated_at.isoformat() if cfg is not None and cfg.updated_at else None,
+        }
+
+    def get(self, request, session_id=None):
+        from whatsapp_ai.models import WhatsAppAIAutoReplyConfig
+
+        session, explicit = self._resolve_session(request, session_id=session_id)
+        if session is None:
+            return Response(
+                {"detail": "WhatsApp session not found or unauthorized."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not request.user.is_superuser and session.owner_id != request.user.id:
+            return Response(
+                {"detail": "Not authorized for this WhatsApp session."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        cfg = WhatsAppAIAutoReplyConfig.objects.filter(session=session).first()
+        return Response(self._serialize_cfg(session, cfg), status=status.HTTP_200_OK)
+
+    def patch(self, request, session_id=None):
+        from django.db import transaction
+        from whatsapp_ai.gemini_service import _get_or_create_ai_config
+
+        session, explicit = self._resolve_session(request, session_id=session_id)
+        if session is None:
+            return Response(
+                {"detail": "WhatsApp session not found or unauthorized."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not request.user.is_superuser and session.owner_id != request.user.id:
+            return Response(
+                {"detail": "Not authorized to modify AI settings for this WhatsApp session."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        raw_data = request.data if isinstance(request.data, dict) else {}
+        if "enabled" in raw_data:
+            raw_enabled = raw_data.get("enabled")
+        elif "ai_enabled" in raw_data:
+            raw_enabled = raw_data.get("ai_enabled")
+        else:
+            raw_enabled = None
+
+        if raw_enabled is not None and not isinstance(raw_enabled, bool):
+            return Response(
+                {"detail": "'enabled' must be a JSON boolean (true or false)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw_groups = raw_data.get("reply_to_groups") if "reply_to_groups" in raw_data else None
+        if raw_groups is not None and not isinstance(raw_groups, bool):
+            return Response(
+                {"detail": "'reply_to_groups' must be a JSON boolean."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if raw_enabled is None and raw_groups is None:
+            return Response(
+                {"detail": "Provide 'enabled' (or 'ai_enabled') boolean to update."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            cfg = _get_or_create_ai_config(session)
+            changed_fields = []
+            if raw_enabled is not None and cfg.enabled != raw_enabled:
+                cfg.enabled = raw_enabled
+                changed_fields.append("enabled")
+            if raw_groups is not None and cfg.reply_to_groups != raw_groups:
+                cfg.reply_to_groups = raw_groups
+                changed_fields.append("reply_to_groups")
+            if changed_fields:
+                changed_fields.append("updated_at")
+                cfg.save(update_fields=changed_fields)
+
+        try:
+            _write_audit_log(
+                action=WhatsAppAuditLog.Action.CONFIG_CHANGED,
+                performed_by=request.user,
+                session_name=session.session_name,
+                success=True,
+                result_code="AI_AUTO_REPLY_TOGGLED",
+                result_detail=f"AI auto-reply set to {'ON' if cfg.enabled else 'OFF'} for session {session.session_name}",
+            )
+        except Exception:
+            pass
+
+        return Response(self._serialize_cfg(session, cfg), status=status.HTTP_200_OK)
+
+    def post(self, request, session_id=None):
+        return self.patch(request, session_id=session_id)
+
 

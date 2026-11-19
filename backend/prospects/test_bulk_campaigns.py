@@ -800,6 +800,3 @@ class BulkEmailCampaignTests(TestCase):
         self.assertEqual(latest['section_number'], 1)
         self.assertIn(first_rec.prospect.company_name, latest['subject'])
         self.assertIn(first_rec.prospect.company_name, latest['body'])
-
-
-

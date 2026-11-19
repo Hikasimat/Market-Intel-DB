@@ -401,15 +401,11 @@ class GmailOAuthCallbackView(APIView):
 
         user = request.user if (request.user and request.user.is_authenticated) else None
         if not user:
-            # Decode user from signed state
-            from django.core.signing import TimestampSigner
-            signer = TimestampSigner(salt='gmail_oauth')
-            try:
-                state_data_raw = signer.unsign(state, max_age=GmailOAuthService.STATE_MAX_AGE)
-                state_data = json.loads(state_data_raw)
-                uid = state_data.get('user_id')
-                user = User.objects.get(id=uid)
-            except Exception:
+            uid = GmailOAuthService.verify_and_consume_state_user_id(state)
+            if not uid:
+                return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote('Invalid or expired Gmail state.')}")
+            user = User.objects.filter(id=uid, is_active=True).first()
+            if not user:
                 return redirect(f"{settings.FRONTEND_URL}/inbox?gmail_error={urllib.parse.quote('Invalid or expired Gmail state.')}")
         else:
             if not GmailOAuthService.verify_state(state, user.id):

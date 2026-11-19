@@ -167,8 +167,30 @@ class GoogleCalendarOAuthService:
         has_cal_permission = any('calendar' in s for s in scope_words)
         if not has_cal_permission and scope:
             raise ValueError("Google Calendar permission was not granted. Please allow calendar access.")
+        # Resolve the actual authenticated Google account email rather than assuming user.email
+        google_email = ''
+        id_token_jwt = tokens.get('id_token')
+        if id_token_jwt:
+            try:
+                from .oauth_services import GoogleOAuthService
+                claims = GoogleOAuthService.verify_id_token(id_token_jwt)
+                google_email = (claims.get('email') or '').strip()
+            except Exception:
+                pass
+        if not google_email:
+            try:
+                req = urllib.request.Request(
+                    'https://www.googleapis.com/oauth2/v3/userinfo',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    info = json.loads(resp.read().decode('utf-8'))
+                    google_email = (info.get('email') or '').strip()
+            except Exception:
+                pass
+
         creds, _ = GoogleCalendarCredentials.objects.get_or_create(user=user)
-        creds.email = user.email or ''
+        creds.email = google_email or user.email or ''
         creds.access_token_encrypted = encryption.encrypt_password(access_token)
         if tokens.get('refresh_token'):
             creds.refresh_token_encrypted = encryption.encrypt_password(tokens['refresh_token'])
@@ -490,6 +512,86 @@ def list_events(creds, time_min=None, time_max=None, max_results=250):
             'attendees': attendees,
             'location': item.get('location') or '',
             'status': item.get('status', 'confirmed'),
+            'transparency': item.get('transparency', 'opaque'),
         })
     return events
+
+
+def parse_event_interval(start_val, end_val, default_tz: str = 'UTC'):
+    """Parse an event start/end (ISO datetime or YYYY-MM-DD all-day date) into UTC datetimes."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt, date as _date, time as _time, timezone as _tz
+
+    if not start_val or not end_val:
+        return None, None
+    s_str = str(start_val).strip()
+    e_str = str(end_val).strip()
+    try:
+        tz_obj = ZoneInfo(default_tz or 'UTC')
+    except Exception:
+        tz_obj = _tz.utc
+
+    try:
+        if 'T' not in s_str:
+            sd = _date.fromisoformat(s_str[:10])
+            ed = _date.fromisoformat(e_str[:10])
+            ev_start = _dt.combine(sd, _time(0, 0), tzinfo=tz_obj).astimezone(_tz.utc)
+            ev_end = _dt.combine(ed, _time(0, 0), tzinfo=tz_obj).astimezone(_tz.utc)
+            return ev_start, ev_end
+        ev_start = _dt.fromisoformat(s_str.replace('Z', '+00:00'))
+        ev_end = _dt.fromisoformat(e_str.replace('Z', '+00:00'))
+        if ev_start.tzinfo is None:
+            ev_start = ev_start.replace(tzinfo=tz_obj)
+        if ev_end.tzinfo is None:
+            ev_end = ev_end.replace(tzinfo=tz_obj)
+        return ev_start.astimezone(_tz.utc), ev_end.astimezone(_tz.utc)
+    except Exception:
+        return None, None
+
+
+def intervals_overlap(start_a, end_a, start_b, end_b) -> bool:
+    """Return True iff two half-open intervals [start_a, end_a) and [start_b, end_b) overlap."""
+    return start_a < end_b and start_b < end_a
+
+
+def collect_busy_intervals_from_events(events, default_tz: str = 'UTC'):
+    """Convert normalized event dicts into sorted (utc_start, utc_end, summary) tuples."""
+    busy = []
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get('status') == 'cancelled' or ev.get('transparency') == 'transparent' or ev.get('show_as') == 'free':
+            continue
+        ev_start, ev_end = parse_event_interval(
+            ev.get('start'),
+            ev.get('end'),
+            default_tz=ev.get('start_timezone') or default_tz,
+        )
+        if ev_start and ev_end and ev_end > ev_start:
+            busy.append((ev_start, ev_end, ev.get('summary') or 'Calendar Event'))
+    return busy
+
+
+def check_availability(creds, start_dt, end_dt, *, tz_name: str = 'UTC'):
+    """
+    Check Google Calendar primary calendar availability for [start_dt, end_dt).
+    Returns dict: {"available": bool, "conflicts": list[(start, end, summary)], "busy_intervals": list}.
+    Raises CalendarAuthError / CalendarAPIError if Google Calendar rejects the request.
+    """
+    from datetime import timezone as _tz
+
+    req_start = start_dt.astimezone(_tz.utc)
+    req_end = end_dt.astimezone(_tz.utc)
+    # Query wider window around the requested day so adjacent/all-day events are captured
+    win_min = req_start - timedelta(hours=14)
+    win_max = req_end + timedelta(hours=14)
+    events = list_events(creds, time_min=win_min, time_max=win_max, max_results=250)
+    busy = collect_busy_intervals_from_events(events, default_tz=tz_name)
+    conflicts = [b for b in busy if intervals_overlap(req_start, req_end, b[0], b[1])]
+    return {
+        'available': len(conflicts) == 0,
+        'conflicts': conflicts,
+        'busy_intervals': busy,
+    }
+
 

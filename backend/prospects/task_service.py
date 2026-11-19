@@ -98,16 +98,23 @@ def resolve_pre_user(
 ):
     """
     Identify the related PRE User for a Prospect / OutreachEmail / EmailThread / WhatsAppSession.
+    When `whatsapp_session` is supplied, its owner is always authoritative so one user's
+    WhatsApp session never resolves to another user's credentials or inbox.
     Priority order:
-      1. prospect.created_by if that user exists and has role PRE (or is the prospect owner)
-      2. outreach_email.sent_by user if active
-      3. email_thread.pre_user if set (preferring role == PRE)
-      4. prospect.lead_qualification.assigned_lq if role == PRE
-      5. whatsapp_session.user if set
-      6. whatsapp_session assigned_profiles with role == PRE
-      7. fallback_user
-      8. Any active User with UserProfile.role == 'PRE'
+      1. whatsapp_session.owner (strictly authoritative when session is given)
+      2. prospect.created_by if that user exists and has role PRE (or is the prospect owner)
+      3. outreach_email.sent_by / created_by user if active
+      4. email_thread.owner if set
+      5. prospect.lead_qualification.assigned_lq if active
+      6. fallback_user
     """
+    # 0. Authoritative WhatsApp session owner first (never substitute another user)
+    if whatsapp_session is not None:
+        session_user = getattr(whatsapp_session, "owner", None) or getattr(whatsapp_session, "user", None)
+        if session_user and session_user.is_active:
+            return session_user
+        return fallback_user if (fallback_user and getattr(fallback_user, "is_active", False)) else None
+
     # 1. Prospect creator (primary PRE owner in this CRM)
     if prospect and (prospect.created_by or "").strip():
         creator = (

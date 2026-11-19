@@ -323,3 +323,47 @@ def delete_zoom_meeting(creds, meeting_id):
     except Exception as e:
         logger.warning("Could not delete Zoom meeting %s: %s", meeting_id, e)
 
+
+def list_zoom_meetings(creds, page_size=100):
+    """Fetch upcoming scheduled Zoom meetings for the authenticated user."""
+    data = zoom_api_request(creds, 'GET', '/users/me/meetings', params={'type': 'scheduled', 'page_size': page_size})
+    meetings = []
+    for item in (data.get('meetings', []) if isinstance(data, dict) else []):
+        start_time = item.get('start_time')
+        duration = int(item.get('duration') or 30)
+        if not start_time:
+            continue
+        try:
+            from datetime import datetime as _dt
+            ev_start = _dt.fromisoformat(str(start_time).replace('Z', '+00:00'))
+            if ev_start.tzinfo is None:
+                ev_start = ev_start.replace(tzinfo=dt_timezone.utc)
+            ev_end = ev_start + timedelta(minutes=duration)
+            meetings.append({
+                'id': str(item.get('id') or ''),
+                'summary': item.get('topic') or 'Zoom Meeting',
+                'start': ev_start.astimezone(dt_timezone.utc).isoformat(),
+                'end': ev_end.astimezone(dt_timezone.utc).isoformat(),
+                'start_timezone': 'UTC',
+            })
+        except Exception:
+            continue
+    return meetings
+
+
+def check_zoom_availability(creds, start_dt, end_dt):
+    """Check Zoom scheduled meetings for overlap with [start_dt, end_dt)."""
+    from .calendar_services import collect_busy_intervals_from_events, intervals_overlap
+
+    req_start = start_dt.astimezone(dt_timezone.utc)
+    req_end = end_dt.astimezone(dt_timezone.utc)
+    events = list_zoom_meetings(creds)
+    busy = collect_busy_intervals_from_events(events, default_tz='UTC')
+    conflicts = [b for b in busy if intervals_overlap(req_start, req_end, b[0], b[1])]
+    return {
+        'available': len(conflicts) == 0,
+        'conflicts': conflicts,
+        'busy_intervals': busy,
+    }
+
+

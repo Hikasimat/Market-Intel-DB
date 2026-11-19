@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import WhatsAppAIAutoReplyConfig, WhatsAppAIReplyLog
+from .models import WhatsAppAIAutoReplyConfig, WhatsAppAIReplyLog, WhatsAppMeetingRequest
 
 
 @admin.register(WhatsAppAIAutoReplyConfig)
@@ -15,3 +15,10 @@ class WhatsAppAIReplyLogAdmin(admin.ModelAdmin):
     list_filter = ("status", "model_used")
     search_fields = ("sender_identifier", "reply_text", "session__session_name")
     readonly_fields = ("incoming_message", "reply_message", "created_at", "updated_at")
+
+
+@admin.register(WhatsAppMeetingRequest)
+class WhatsAppMeetingRequestAdmin(admin.ModelAdmin):
+    list_display = ("user", "session", "state", "platform", "requested_date", "requested_time", "duration_minutes", "updated_at")
+    list_filter = ("state", "platform", "calendar_provider")
+    search_fields = ("purpose", "attendee_email", "meeting_link", "idempotency_key")

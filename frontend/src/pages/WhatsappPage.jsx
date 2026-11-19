@@ -54,6 +54,7 @@ import {
   Reply,
   Share2,
   BookOpen,
+  Bot,
 } from 'lucide-react';
 import api from '../services/api';
 import { useCall } from '../context/CallContext';
@@ -532,6 +533,11 @@ export default function WhatsappPage() {
   const [showRecordingsModal, setShowRecordingsModal] = useState(false);
   // AI Knowledge Base (RAG) Modal state
   const [showKnowledgeBaseModal, setShowKnowledgeBaseModal] = useState(false);
+  // Per-session AI Auto-Reply ON/OFF state (always synced with backend DB)
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [loadingAiConfig, setLoadingAiConfig] = useState(false);
+  const [updatingAiConfig, setUpdatingAiConfig] = useState(false);
+  const aiConfigReqGenRef = useRef(0);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search || '');
@@ -640,8 +646,86 @@ export default function WhatsappPage() {
     }
   }, [waCacheKey]);
 
+  const fetchAiConfig = useCallback(async (sessionOverride = null) => {
+    const targetSession = sessionOverride || selectedSession;
+    const reqGen = ++aiConfigReqGenRef.current;
+    setLoadingAiConfig(true);
+    try {
+      const sid = targetSession?.id || targetSession?.session_name;
+      const endpoint = sid
+        ? `/whatsapp/ai-config/${encodeURIComponent(sid)}/`
+        : '/whatsapp/ai-config/';
+      const res = await api.get(endpoint);
+      if (aiConfigReqGenRef.current !== reqGen) return;
+      const backendEnabled = Boolean(res.data?.enabled);
+      setAiEnabled(backendEnabled);
+    } catch (err) {
+      if (aiConfigReqGenRef.current !== reqGen) return;
+      if (err.response?.status === 404) {
+        setAiEnabled(false);
+      }
+      console.warn('Failed to fetch AI auto-reply config:', err);
+    } finally {
+      if (aiConfigReqGenRef.current === reqGen) {
+        setLoadingAiConfig(false);
+      }
+    }
+  }, [selectedSession?.id, selectedSession?.session_name]);
+
+  const handleToggleAiAutoReply = useCallback(async () => {
+    if (updatingAiConfig || loadingAiConfig) return;
+    const nextValue = !aiEnabled;
+    const sid = selectedSession?.id || selectedSession?.session_name;
+    setUpdatingAiConfig(true);
+    try {
+      const endpoint = sid
+        ? `/whatsapp/ai-config/${encodeURIComponent(sid)}/`
+        : '/whatsapp/ai-config/';
+      const res = await api.patch(endpoint, { enabled: nextValue });
+      const persistedEnabled = Boolean(res.data?.enabled);
+      setAiEnabled(persistedEnabled);
+      setSelectedSession(prev => {
+        if (prev) return { ...prev, ai_enabled: persistedEnabled };
+        if (res.data?.session_id) {
+          return {
+            id: res.data.session_id,
+            session_name: res.data.session_name,
+            phone_number: res.data.phone_number || '',
+            status: res.data.status || 'DISCONNECTED',
+            ai_enabled: persistedEnabled,
+          };
+        }
+        return prev;
+      });
+      setSessions(prev => prev.map(s => (
+        (sid && (s.id === selectedSession?.id || s.session_name === selectedSession?.session_name))
+          ? { ...s, ai_enabled: persistedEnabled }
+          : s
+      )));
+      showToast(
+        persistedEnabled
+          ? 'AI Automatic Responses enabled for this WhatsApp account'
+          : 'AI Automatic Responses disabled for this WhatsApp account',
+        'success'
+      );
+    } catch (err) {
+      console.error('Failed to update AI auto-reply config:', err);
+      showToast(
+        err.response?.data?.detail || 'Failed to update AI Automatic Response setting.',
+        'error'
+      );
+      await fetchAiConfig(selectedSession);
+    } finally {
+      setUpdatingAiConfig(false);
+    }
+  }, [aiEnabled, updatingAiConfig, loadingAiConfig, selectedSession, fetchAiConfig]);
+
   // Reset local session view cleanly if the logged-in Market Intel user changes
   useEffect(() => {
+    aiConfigReqGenRef.current += 1;
+    setAiEnabled(false);
+    setLoadingAiConfig(false);
+    setUpdatingAiConfig(false);
     setSelectedSession(null);
     setSessionStatus(null);
     setQrCodeData(null);
@@ -651,6 +735,15 @@ export default function WhatsappPage() {
     setConnectionError(null);
     fetchSessions();
   }, [user?.id, fetchSessions]);
+
+  // Keep AI auto-reply toggle synchronized whenever selected session changes or user loads page
+  useEffect(() => {
+    if (!user?.id) return;
+    if (selectedSession && typeof selectedSession.ai_enabled === 'boolean') {
+      setAiEnabled(selectedSession.ai_enabled);
+    }
+    fetchAiConfig(selectedSession);
+  }, [user?.id, selectedSession?.id, selectedSession?.session_name, fetchAiConfig]);
 
   // Fetch live QR or Connection state for current user's session
   const isFetchingQRRef = useRef(false);
@@ -681,7 +774,13 @@ export default function WhatsappPage() {
       const res = await api.get(url);
       const data = res.data;
       setSessionStatus(data);
-      setConnectionError(null);
+      if (data.service_unreachable || data.status === 'WAHA_UNREACHABLE') {
+        setConnectionError(
+          data.error || 'WhatsApp service (WAHA) is not running or unreachable on port 3000. Please start WAHA and retry.'
+        );
+      } else {
+        setConnectionError(null);
+      }
 
       if (data.status === 'WORKING' || data.connected) {
         setQrCodeData(null);
@@ -1809,8 +1908,8 @@ export default function WhatsappPage() {
         style={{ minHeight: 'calc(100vh / 0.9)' }}
       >
         {/* Top Emerald Header Banner */}
-        <div className="bg-[#00a884] h-56 w-full px-8 py-6 text-white flex items-center justify-between shadow-sm">
-          <div className="flex items-center justify-between gap-3 max-w-5xl mx-auto w-full">
+        <div className="bg-[#00a884] h-56 w-full px-8 pt-6 text-white flex items-start justify-between shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 max-w-5xl mx-auto w-full">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-white/20 backdrop-blur rounded-full flex items-center justify-center">
                 <Phone className="w-6 h-6 text-white" />
@@ -1820,15 +1919,38 @@ export default function WhatsappPage() {
                 <p className="text-xs text-emerald-100">Market Intelligence CRM Live Communication</p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowKnowledgeBaseModal(true)}
-              className="px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-semibold flex items-center gap-2 border border-white/25 transition cursor-pointer"
-              title="Manage WhatsApp AI Knowledge Base (Strict RAG)"
-            >
-              <BookOpen className="w-4 h-4" />
-              <span>AI Knowledge Base</span>
-            </button>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={aiEnabled}
+                aria-label="Toggle AI Automatic Responses"
+                disabled={updatingAiConfig || loadingAiConfig}
+                onClick={handleToggleAiAutoReply}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                  aiEnabled
+                    ? 'bg-white text-emerald-700 border-white shadow-sm'
+                    : 'bg-white/15 hover:bg-white/25 text-white border-white/25'
+                }`}
+                title={aiEnabled ? 'AI Automatic Responses are ON' : 'AI Automatic Responses are OFF'}
+              >
+                {updatingAiConfig || loadingAiConfig ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Bot className="w-4 h-4" />
+                )}
+                <span>AI Auto-Reply: {aiEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowKnowledgeBaseModal(true)}
+                className="px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-semibold flex items-center gap-2 border border-white/25 transition cursor-pointer"
+                title="Manage WhatsApp AI Knowledge Base (Strict RAG)"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>AI Knowledge Base</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1963,6 +2085,20 @@ export default function WhatsappPage() {
                       </div>
                     )}
                   </div>
+                ) : connectionError ? (
+                  <div className="w-64 h-64 flex flex-col items-center justify-center gap-3 text-center p-4">
+                    <AlertCircle className="w-9 h-9 text-amber-500" />
+                    <span className="text-sm font-semibold text-slate-800">WhatsApp Service Offline</span>
+                    <span className="text-xs text-slate-500 leading-relaxed">
+                      Start the local WAHA gateway on port 3000, then click Retry.
+                    </span>
+                    <button
+                      onClick={() => fetchQR(true)}
+                      className="mt-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loadingQR ? 'animate-spin' : ''}`} /> Retry Connection
+                    </button>
+                  </div>
                 ) : (
                   <div className="w-64 h-64 flex flex-col items-center justify-center gap-3 text-center p-4">
                     <RefreshCw className="w-8 h-8 text-emerald-600 animate-spin" />
@@ -1970,7 +2106,7 @@ export default function WhatsappPage() {
                     <span className="text-xs text-slate-500">Generating live QR code</span>
                     <button
                       onClick={() => fetchQR(true)}
-                      className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition"
+                      className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition cursor-pointer"
                     >
                       <RefreshCw className="w-3.5 h-3.5" /> Refresh
                     </button>
@@ -1993,7 +2129,10 @@ export default function WhatsappPage() {
 
         <WhatsAppKnowledgeBaseModal
           isOpen={showKnowledgeBaseModal}
-          onClose={() => setShowKnowledgeBaseModal(false)}
+          onClose={() => {
+            setShowKnowledgeBaseModal(false);
+            fetchAiConfig(selectedSession);
+          }}
           selectedSession={selectedSession}
           user={user}
           onShowToast={showToast}
@@ -2150,6 +2289,70 @@ export default function WhatsappPage() {
               )}
             </div>
           </div>
+        </div>
+
+        {/* Per-Account AI Automatic Response ON/OFF Control Bar */}
+        <div
+          className={`px-4 py-2.5 border-b border-[#e9edef] flex items-center justify-between gap-3 transition-colors ${
+            aiEnabled ? 'bg-emerald-50/70' : 'bg-[#f8f9fa]'
+          }`}
+          data-testid="whatsapp-ai-toggle-bar"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                aiEnabled ? 'bg-[#00a884] text-white' : 'bg-slate-200 text-slate-600'
+              }`}
+            >
+              {updatingAiConfig || loadingAiConfig ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Bot className="w-3.5 h-3.5" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-semibold text-slate-800 truncate">
+                  AI Auto-Reply
+                </span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide uppercase ${
+                    aiEnabled
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                      : 'bg-slate-200 text-slate-600 border border-slate-300'
+                  }`}
+                >
+                  {loadingAiConfig ? '...' : (aiEnabled ? 'ON' : 'OFF')}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 truncate">
+                {aiEnabled
+                  ? 'Automatic replies & booking enabled for this account'
+                  : 'Automatic replies paused (manual chat active)'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={aiEnabled}
+            aria-label="Toggle AI Automatic Responses"
+            disabled={updatingAiConfig || loadingAiConfig || !selectedSession}
+            onClick={handleToggleAiAutoReply}
+            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-[#00a884] focus:ring-offset-1 ${
+              updatingAiConfig || loadingAiConfig || !selectedSession
+                ? 'opacity-60 cursor-not-allowed'
+                : 'cursor-pointer'
+            } ${aiEnabled ? 'bg-[#00a884]' : 'bg-slate-300'}`}
+            title={aiEnabled ? 'Turn OFF AI automatic replies' : 'Turn ON AI automatic replies'}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                aiEnabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
         </div>
 
         {/* Search & Filter Bar */}
@@ -4424,7 +4627,12 @@ export default function WhatsappPage() {
       {/* AI Knowledge Base (Strict RAG) Modal */}
       <WhatsAppKnowledgeBaseModal
         isOpen={showKnowledgeBaseModal}
-        onClose={() => setShowKnowledgeBaseModal(false)}
+        onClose={() => {
+          setShowKnowledgeBaseModal(false);
+          if (selectedSession) {
+            fetchAiConfig(selectedSession);
+          }
+        }}
         selectedSession={selectedSession}
         user={user}
         onShowToast={showToast}
