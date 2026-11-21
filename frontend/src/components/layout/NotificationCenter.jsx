@@ -19,10 +19,8 @@ import { formatTimeForUser, formatDateTimeForUser } from '../../utils/timezone';
 const REMINDER_INTERVAL_MS = 30_000;
 /** New-mail polling interval: 60 seconds */
 const NEW_MAIL_INTERVAL_MS = 60_000;
-/** WhatsApp message polling interval: 10 seconds */
-const WHATSAPP_POLL_INTERVAL_MS = 10_000;
-/** WhatsApp call polling interval: 2.5 seconds */
-const WHATSAPP_CALL_POLL_INTERVAL_MS = 2_500;
+/** WhatsApp message polling interval: 15 seconds */
+const WHATSAPP_POLL_INTERVAL_MS = 15_000;
 /** Primary folder to poll for new mail */
 const POLL_FOLDER = 'INBOX';
 
@@ -31,6 +29,7 @@ export default function NotificationCenter() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useSelector((state) => state.auth);
+  const reduxIncomingCall = useSelector((state) => state.whatsapp?.incomingCall);
 
   // ─── Reminder state (unchanged) ─────────────────────────────────────────
   const [reminders, setReminders] = useState([]);
@@ -47,6 +46,9 @@ export default function NotificationCenter() {
   const [incomingCall, setIncomingCallState] = useState(null);
   const notifiedWhatsappRef = useRef(new Map());
   const isFirstWhatsappPollRef = useRef(true);
+  const remindersInFlightRef = useRef(false);
+  const whatsappInFlightRef = useRef(false);
+  const mailInFlightRef = useRef(false);
 
   // Ref to avoid stale-closure issues in intervals
   const userRef = useRef(user);
@@ -63,10 +65,13 @@ export default function NotificationCenter() {
 
   const fetchReminders = async () => {
     if (!userRef.current) return;
+    if (remindersInFlightRef.current) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    remindersInFlightRef.current = true;
     try {
       const [cbRes, mRes] = await Promise.all([
-        api.get('/reminders/pending/'),
-        api.get('/meetings/pending/')
+        api.get('/reminders/pending/', { skipRetry: true }),
+        api.get('/meetings/pending/', { skipRetry: true })
       ]);
       const cbData = cbRes.data;
       const mData = mRes.data;
@@ -75,7 +80,7 @@ export default function NotificationCenter() {
       checkNotifications(cbData, mData);
       
       if (userRef.current?.role === 'MANAGER') {
-        const auditRes = await api.get('/audit-reverifications/');
+        const auditRes = await api.get('/audit-reverifications/', { skipRetry: true });
         const audits = auditRes.data;
         audits.forEach(audit => {
           if (audit.status === 'CORRECTED' && !audit.manager_notified) {
@@ -85,6 +90,8 @@ export default function NotificationCenter() {
       }
     } catch (err) {
       // Non-fatal; retain existing reminder state
+    } finally {
+      remindersInFlightRef.current = false;
     }
   };
 
@@ -166,6 +173,9 @@ export default function NotificationCenter() {
   const checkNewMail = useCallback(async () => {
     const currentUser = userRef.current;
     if (!currentUser?.id) return;
+    if (mailInFlightRef.current) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    mailInFlightRef.current = true;
 
     // Skip if user has no mail account configured
     // The backend will return an error if no account exists; we handle that silently.
@@ -179,7 +189,8 @@ export default function NotificationCenter() {
       const highestUid = state?.highestUid || 0;
 
       const res = await api.get(
-        `/auth/mail-account/check-new-mail/?folder=${encodeURIComponent(POLL_FOLDER)}&uidvalidity=${uidvalidity}&highest_uid=${highestUid}`
+        `/auth/mail-account/check-new-mail/?folder=${encodeURIComponent(POLL_FOLDER)}&uidvalidity=${uidvalidity}&highest_uid=${highestUid}`,
+        { skipRetry: true }
       );
       const data = res.data;
 
@@ -249,6 +260,8 @@ export default function NotificationCenter() {
         // No mail account configured; skip silently
         return;
       }
+    } finally {
+      mailInFlightRef.current = false;
     }
   }, [dispatch]);
 
@@ -332,39 +345,18 @@ export default function NotificationCenter() {
     }
   }, []);
 
-  const checkWhatsAppCalling = useCallback(async () => {
-    const currentUser = userRef.current;
-    if (!currentUser?.id) return;
-
-    try {
-      const res = await api.get('/whatsapp/calls/status/');
-      const paired = Boolean(res.data?.calling?.paired || res.data?.paired || res.data?.connected);
-      dispatch(setIsCallingPaired(paired));
-
-      const incoming = res.data?.incoming_call;
-      if (incoming && incoming.call_id) {
-        const cleanId = String(incoming.call_id).replace(/^call_/, '').trim();
-        if (!cleanId || incoming.status !== 'ringing' || isCallHandled(cleanId)) {
-          setIncomingCallState(null);
-          dispatch(setIncomingCall(null));
-        } else {
-          const callObj = { ...incoming, call_id: cleanId };
-          setIncomingCallState(callObj);
-          dispatch(setIncomingCall(callObj));
-        }
-      } else {
-        setIncomingCallState(null);
-        dispatch(setIncomingCall(null));
-      }
-    } catch (_) {}
-  }, [dispatch, isCallHandled]);
-
   useEffect(() => {
-    if (!user) return;
-    checkWhatsAppCalling();
-    const interval = setInterval(checkWhatsAppCalling, WHATSAPP_CALL_POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [user, checkWhatsAppCalling]);
+    if (reduxIncomingCall && reduxIncomingCall.call_id) {
+      const cleanId = String(reduxIncomingCall.call_id).replace(/^call_/, '').trim();
+      if (!cleanId || reduxIncomingCall.status !== 'ringing' || isCallHandled(cleanId)) {
+        setIncomingCallState(null);
+      } else {
+        setIncomingCallState({ ...reduxIncomingCall, call_id: cleanId });
+      }
+    } else {
+      setIncomingCallState(null);
+    }
+  }, [reduxIncomingCall, isCallHandled]);
 
   // Audible ring tone for incoming calls when user is NOT on /whatsapp
   useEffect(() => {
@@ -530,9 +522,12 @@ export default function NotificationCenter() {
   const checkNewWhatsApp = useCallback(async () => {
     const currentUser = userRef.current;
     if (!currentUser?.id) return;
+    if (whatsappInFlightRef.current) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    whatsappInFlightRef.current = true;
 
     try {
-      const res = await api.get('/whatsapp/conversations/');
+      const res = await api.get('/whatsapp/conversations/', { skipRetry: true });
       const convList = Array.isArray(res.data) ? res.data : [];
 
       // Calculate total unread count across all conversations
@@ -575,6 +570,8 @@ export default function NotificationCenter() {
       }
     } catch (err) {
       // Non-critical; ignore network issues silently
+    } finally {
+      whatsappInFlightRef.current = false;
     }
   }, [dispatch]);
 

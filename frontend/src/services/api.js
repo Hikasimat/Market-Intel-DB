@@ -129,6 +129,25 @@ api.interceptors.response.use(
         window.location.href = '/login';
       }
     }
+    const method = (originalRequest?.method || 'get').toLowerCase();
+    const isTransient =
+      !error.response ||
+      error.code === 'ECONNABORTED' ||
+      [502, 503, 504].includes(error.response.status);
+    if (
+      originalRequest &&
+      method === 'get' &&
+      !originalRequest.skipRetry &&
+      !isAuthEndpoint &&
+      !originalRequest.url?.includes('/auth/logout/') &&
+      isTransient &&
+      (originalRequest._transientRetryCount || 0) < 2
+    ) {
+      originalRequest._transientRetryCount = (originalRequest._transientRetryCount || 0) + 1;
+      const delayMs = originalRequest._transientRetryCount === 1 ? 500 : 1200;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return api(originalRequest);
+    }
     return Promise.reject(error);
   }
 );

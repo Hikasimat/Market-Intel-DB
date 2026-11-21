@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../services/api';
+import { extractErrorMessage } from '../../utils/errorUtils';
 import {
   getCachedData,
   getCachedRecord,
@@ -198,7 +199,7 @@ const marketEventSlice = createSlice({
       })
       .addCase(fetchMarketEvents.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.payload;
+        state.error = extractErrorMessage(action, 'Failed to load market events. Please try again.');
       })
       // Fetch one
       .addCase(fetchMarketEvent.pending, (state) => {
@@ -211,7 +212,7 @@ const marketEventSlice = createSlice({
       })
       .addCase(fetchMarketEvent.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.payload;
+        state.error = extractErrorMessage(action, 'Failed to load market event details. Please try again.');
       })
       // Create
       .addCase(createMarketEvent.fulfilled, (state, action) => {

@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../services/api';
+import { extractErrorMessage } from '../../utils/errorUtils';
 import {
   getCachedData,
   getCachedRecord,
@@ -196,7 +197,7 @@ const prospectSlice = createSlice({
       })
       .addCase(fetchProspects.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message;
+        state.error = extractErrorMessage(action, 'Failed to load prospects. Please try again.');
       })
       .addCase(fetchProspectById.pending, (state) => {
         state.loading = true;
@@ -208,7 +209,7 @@ const prospectSlice = createSlice({
       })
       .addCase(fetchProspectById.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Failed to fetch prospect details';
+        state.error = extractErrorMessage(action, 'Failed to fetch prospect details. Please try again.');
       })
       .addCase(createProspect.fulfilled, (state, action) => {
         state.items.unshift(action.payload);

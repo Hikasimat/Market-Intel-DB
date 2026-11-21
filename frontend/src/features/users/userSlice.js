@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../services/api';
+import { extractErrorMessage } from '../../utils/errorUtils';
 
 export const fetchUsers = createAsyncThunk('users/fetchAll', async () => {
   const response = await api.get('/auth/users/');
@@ -51,7 +52,7 @@ const userSlice = createSlice({
       })
       .addCase(fetchUsers.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message;
+        state.error = extractErrorMessage(action, 'Failed to load users. Please try again.');
       })
       .addCase(createUser.fulfilled, (state, action) => {
         state.items.unshift(action.payload);

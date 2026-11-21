@@ -44,6 +44,7 @@ Endpoints:
 import logging
 import os
 import re
+import threading
 import urllib.parse
 import uuid
 
@@ -2974,6 +2975,8 @@ class WhatsAppGroupInviteLinkView(APIView):
 # ---------------------------------------------------------------------------
 
 _LAST_WEBHOOK_AND_MSG_SYNC_TS: float = 0.0
+_WAHA_SYNC_BG_LOCK = threading.Lock()
+_CALLING_STATUS_BG_LOCK = threading.Lock()
 
 
 def _resolve_target_webhook_url(request) -> str:
@@ -3076,34 +3079,88 @@ class WhatsAppCallStatusView(APIView):
         now = time.time()
         if now - _LAST_WEBHOOK_AND_MSG_SYNC_TS >= 20.0:
             _LAST_WEBHOOK_AND_MSG_SYNC_TS = now
-            try:
-                client = get_waha_client()
-                client.ensure_webhook_configured(_resolve_target_webhook_url(request))
-                recent_msgs = client.get_recent_messages_from_stats()
-                if recent_msgs:
-                    sync_recent_waha_messages(recent_msgs, session_name)
-            except Exception as sync_err:
-                logger.debug("Periodic webhook/message sync skipped: %s", sync_err)
+            target_webhook_url = _resolve_target_webhook_url(request)
+            if _WAHA_SYNC_BG_LOCK.acquire(blocking=False):
+                def _bg_sync_waha():
+                    from django.db import close_old_connections
+                    try:
+                        client = get_waha_client()
+                        client.ensure_webhook_configured(target_webhook_url)
+                        recent_msgs = client.get_recent_messages_from_stats()
+                        if recent_msgs:
+                            sync_recent_waha_messages(recent_msgs, session_name)
+                    except Exception as sync_err:
+                        logger.debug("Periodic webhook/message sync skipped: %s", sync_err)
+                    finally:
+                        try:
+                            close_old_connections()
+                        except Exception:
+                            pass
+                        _WAHA_SYNC_BG_LOCK.release()
+
+                try:
+                    threading.Thread(
+                        target=_bg_sync_waha,
+                        name="waha-periodic-sync",
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    _WAHA_SYNC_BG_LOCK.release()
 
         incoming_call = get_active_incoming_call(session_name)
 
         session_ready = session_obj.status == WhatsAppSession.Status.READY
         force_refresh = request.query_params.get("refresh") == "true"
 
+        def _spawn_calling_status_refresh(sess_name: str):
+            if _CALLING_STATUS_BG_LOCK.acquire(blocking=False):
+                def _bg_refresh_calling_status():
+                    from django.db import close_old_connections
+                    try:
+                        client = get_waha_client()
+                        client.get_calling_status(sess_name, use_cache=False)
+                    except Exception as refresh_err:
+                        logger.debug("Background calling status refresh failed for '%s': %s", sess_name, refresh_err)
+                    finally:
+                        try:
+                            close_old_connections()
+                        except Exception:
+                            pass
+                        _CALLING_STATUS_BG_LOCK.release()
+
+                try:
+                    threading.Thread(
+                        target=_bg_refresh_calling_status,
+                        name="waha-calling-status-refresh",
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    _CALLING_STATUS_BG_LOCK.release()
+
         cached_status = _CALLING_STATUS_CACHE.get(session_name)
-        if not force_refresh and session_ready and not cached_status:
+        if not force_refresh and cached_status and (now - cached_status.get("_cached_at", 0) <= 30.0):
+            call_status = cached_status
+        elif not force_refresh and session_ready:
             call_status = {
                 "enabled": True,
                 "paired": True,
                 "state": "open",
                 "resolved_session": session_name,
             }
-        elif not force_refresh and cached_status and (now - cached_status.get("_cached_at", 0) <= 30.0):
-            call_status = cached_status
+            if not cached_status or (now - cached_status.get("_cached_at", 0) > 30.0):
+                _spawn_calling_status_refresh(session_name)
+        elif not force_refresh:
+            call_status = cached_status or {
+                "enabled": True,
+                "paired": False,
+                "state": "not_connected",
+                "resolved_session": session_name,
+            }
+            _spawn_calling_status_refresh(session_name)
         else:
             try:
                 client = get_waha_client()
-                call_status = client.get_calling_status(session_name, use_cache=not force_refresh)
+                call_status = client.get_calling_status(session_name, use_cache=False)
             except Exception:
                 call_status = {
                     "enabled": True,

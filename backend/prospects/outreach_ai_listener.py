@@ -127,7 +127,7 @@ def run_live_sent_mail_and_draft_cycle(auto_draft_for_users: bool = True) -> dic
             users = list(User.objects.filter(id__in=creator_ids, is_active=True))
             for u in users:
                 try:
-                    res = sync_live_unsent_outreach_ai_drafts(user=u, auto_draft=True)
+                    res = sync_live_unsent_outreach_ai_drafts(user=u, auto_draft=True, max_drafts=5)
                     drafted_total += int(res.get("newly_drafted_count") or 0)
                     pruned += int(res.get("pruned_sent_drafts") or 0)
                 except Exception as u_exc:
@@ -146,7 +146,7 @@ def run_live_sent_mail_and_draft_cycle(auto_draft_for_users: bool = True) -> dic
 
 
 def _listener_loop() -> None:
-    poll_seconds = 15.0
+    poll_seconds = 60.0
     logger.info("OutreachAISentMailListener started (interval=%ss).", poll_seconds)
     while not _STOP_EVENT.is_set():
         _WAKE_EVENT.wait(timeout=poll_seconds)

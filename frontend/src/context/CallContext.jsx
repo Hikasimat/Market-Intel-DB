@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import api from '../services/api';
+import {
+  setIncomingCall as setReduxIncomingCall,
+  setIsCallingPaired as setReduxIsCallingPaired,
+} from '../features/whatsapp/whatsappSlice';
 import {
   Phone,
   PhoneCall,
@@ -118,6 +122,7 @@ registerProcessor("playback-processor", PlaybackProcessor);
 
 export const CallProvider = ({ children }) => {
   const authUser = useSelector((state) => state.auth?.user);
+  const dispatch = useDispatch();
   const [callState, setCallState] = useState({
     active: false,
     status: 'idle', // 'calling' | 'connected' | 'ended'
@@ -256,15 +261,18 @@ export const CallProvider = ({ children }) => {
   }, []);
 
   const endedPollCountRef = useRef(0);
+  const statusPollInFlightRef = useRef(false);
 
   const checkCallingStatus = useCallback(async () => {
+    if (statusPollInFlightRef.current) return;
+    if (typeof document !== 'undefined' && document.hidden && !callState.active) return;
+
+    statusPollInFlightRef.current = true;
     try {
-      const res = await api.get('/whatsapp/calls/status/');
-      if (res.data?.calling?.paired || res.data?.paired || res.data?.connected) {
-        setIsCallingPaired(true);
-      } else {
-        setIsCallingPaired(false);
-      }
+      const res = await api.get('/whatsapp/calls/status/', { skipRetry: true });
+      const paired = Boolean(res.data?.calling?.paired || res.data?.paired || res.data?.connected);
+      setIsCallingPaired(paired);
+      dispatch(setReduxIsCallingPaired(paired));
 
       const activeCallData = res.data?.active_call;
       if (activeCallData && callState.active) {
@@ -308,27 +316,48 @@ export const CallProvider = ({ children }) => {
           isHandledAlready
         ) {
           setIncomingCall(null);
+          dispatch(setReduxIncomingCall(null));
         } else {
+          const callObj = { ...incoming, call_id: cleanIncId };
           setIncomingCall((prev) => {
             if (prev && String(prev.call_id).replace(/^call_/, '').trim() === cleanIncId) return prev;
-            return { ...incoming, call_id: cleanIncId };
+            return callObj;
           });
+          dispatch(setReduxIncomingCall(callObj));
         }
       } else {
         setIncomingCall(null);
+        dispatch(setReduxIncomingCall(null));
       }
     } catch (_) {
       setIsCallingPaired(false);
+      dispatch(setReduxIsCallingPaired(false));
+    } finally {
+      statusPollInFlightRef.current = false;
     }
-  }, [callState.active, callState.callId, callState.status, cleanupCallSession]);
+  }, [callState.active, callState.callId, callState.status, cleanupCallSession, dispatch]);
 
   useEffect(() => {
     // Only poll when logged in; polling while logged out causes 401/refresh/429 loops.
     if (!authUser) return undefined;
     checkCallingStatus();
-    const interval = setInterval(checkCallingStatus, 1200);
-    return () => clearInterval(interval);
-  }, [checkCallingStatus, authUser]);
+    const pollMs = (callState.active || Boolean(incomingCall)) ? 2000 : 5000;
+    const interval = setInterval(checkCallingStatus, pollMs);
+    const onVisibility = () => {
+      if (!document.hidden) {
+        checkCallingStatus();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility);
+    }
+    return () => {
+      clearInterval(interval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility);
+      }
+    };
+  }, [checkCallingStatus, authUser, callState.active, incomingCall]);
 
   // Audible Ringing Chime for Incoming WhatsApp Calls
   useEffect(() => {

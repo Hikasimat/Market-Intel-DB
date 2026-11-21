@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../services/api';
+import { extractErrorMessage } from '../../utils/errorUtils';
 import {
   getCachedData,
   getCachedRecord,
@@ -199,11 +200,11 @@ const lqPipelineSlice = createSlice({
         state.items = action.payload.results || action.payload;
         state.count = action.payload.count || action.payload.length;
       })
-      .addCase(fetchLqPipeline.rejected, (state, action) => { state.loading = false; state.error = action.payload; })
+      .addCase(fetchLqPipeline.rejected, (state, action) => { state.loading = false; state.error = extractErrorMessage(action, 'Failed to load outreach pipeline. Please try again.'); })
       // fetch one
       .addCase(fetchLqPipelineItem.pending, (state) => { state.loading = true; state.error = null; })
       .addCase(fetchLqPipelineItem.fulfilled, (state, action) => { state.loading = false; state.selectedItem = action.payload; })
-      .addCase(fetchLqPipelineItem.rejected, (state, action) => { state.loading = false; state.error = action.payload; })
+      .addCase(fetchLqPipelineItem.rejected, (state, action) => { state.loading = false; state.error = extractErrorMessage(action, 'Failed to load outreach details. Please try again.'); })
       // actions that update a single item in the list/selectedItem
       .addMatcher(
         (action) => [
