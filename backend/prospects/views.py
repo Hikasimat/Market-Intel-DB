@@ -2,6 +2,7 @@ import logging
 import os
 import mimetypes
 import uuid
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.decorators import action, api_view
 from accounts.permissions import IsPRE, IsLQ, IsPREOrLQ, IsManagerOrSuperuser, IsLQOrManager
@@ -104,10 +105,10 @@ class ProspectViewSet(viewsets.ModelViewSet):
             getattr(user.profile, 'role', None) == 'MANAGER'
         )
         if is_manager:
-            if self.action in ['list', 'retrieve', 'audit_reverify']:
+            if self.action in ['list', 'retrieve', 'navigation', 'countries', 'audit_reverify']:
                 return [IsManagerOrSuperuser()]
             raise PermissionDenied('Managers cannot modify prospect data.')
-        if self.action in ['list', 'retrieve', 'add_contact']:
+        if self.action in ['list', 'retrieve', 'navigation', 'countries', 'add_contact']:
             permission_classes = [IsPREOrLQ]
         else:
             permission_classes = [IsPRE]
@@ -121,8 +122,17 @@ class ProspectViewSet(viewsets.ModelViewSet):
             getattr(user.profile, 'role', None) == 'MANAGER'
         )
 
+    def _get_rbac_queryset(self):
+        queryset = Prospect.objects.all()
+        user = self.request.user
+        if not user.is_superuser and hasattr(user, 'profile'):
+            role = user.profile.role
+            if role in ('PRE', 'LQ'):
+                queryset = queryset.filter(created_by=user.username)
+        return queryset.order_by('-updated_at', '-id')
+
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['company_structure', 'operational_status', 'country_head_office', 'primary_offering_type']
+    filterset_fields = ['company_structure', 'operational_status', 'primary_offering_type']
     search_fields = ['company_name', 'country_head_office', 'primary_industries']
     ordering_fields = ['company_name', 'created_at', 'updated_at']
 
@@ -136,7 +146,7 @@ class ProspectViewSet(viewsets.ModelViewSet):
             'child_companies',
             'reverification_requests',
             'lead_qualification'
-        ).order_by('-updated_at')
+        ).order_by('-updated_at', '-id')
 
         # Role-based filtering
         user = self.request.user
@@ -149,12 +159,18 @@ class ProspectViewSet(viewsets.ModelViewSet):
         market_event = self.request.query_params.get('market_event')
         if market_event:
             queryset = queryset.filter(market_event_participations__market_event=market_event).distinct()
+
+        country = self.request.query_params.get('country_head_office')
+        if country:
+            queryset = queryset.filter(country_head_office__iexact=country.strip())
         return queryset
 
     def create(self, request, *args, **kwargs):
-        # Duplicate validation by exact company name (case-insensitive)
+        # Duplicate validation by exact company name (case-insensitive), except Branches
         company_name = request.data.get('company_name')
-        if company_name and Prospect.objects.filter(company_name__iexact=company_name.strip()).exists():
+        company_structure = (request.data.get('company_structure') or '').strip()
+        is_branch = company_structure.casefold() == Prospect.Structure.BRANCH.casefold()
+        if company_name and not is_branch and Prospect.objects.filter(company_name__iexact=company_name.strip()).exists():
             return Response(
                 {'error': 'A prospect with this company name has already been entered.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -181,6 +197,43 @@ class ProspectViewSet(viewsets.ModelViewSet):
                     status=AuditReverificationRequest.Status.CORRECTED,
                     resolved_at=timezone.now()
                 )
+
+    @action(detail=False, methods=['get'], url_path='countries')
+    def countries(self, request):
+        raw_countries = (
+            self._get_rbac_queryset()
+            .order_by()
+            .exclude(country_head_office__isnull=True)
+            .exclude(country_head_office__exact='')
+            .values_list('country_head_office', flat=True)
+            .distinct()
+        )
+        seen = {}
+        for c in raw_countries:
+            cleaned = c.strip()
+            if cleaned and cleaned.casefold() not in seen:
+                seen[cleaned.casefold()] = cleaned
+        country_list = sorted(seen.values(), key=lambda x: x.casefold())
+        return Response({'countries': country_list})
+
+    @action(detail=True, methods=['get'], url_path='navigation')
+    def navigation(self, request, pk=None):
+        prospect = get_object_or_404(self._get_rbac_queryset(), pk=pk)
+
+        filtered_qs = self.filter_queryset(self.get_queryset())
+        # Include 'updated_at' in values_list so PostgreSQL SELECT DISTINCT + ORDER BY updated_at, id never fails
+        ids = [row[0] for row in filtered_qs.values_list('id', 'updated_at')]
+
+        if prospect.id not in ids:
+            ids = [row[0] for row in self._get_rbac_queryset().values_list('id', 'updated_at')]
+
+        idx = ids.index(prospect.id)
+        return Response({
+            'previous_id': str(ids[idx - 1]) if idx > 0 else None,
+            'next_id': str(ids[idx + 1]) if idx < len(ids) - 1 else None,
+            'current_index': idx + 1,
+            'total_count': len(ids),
+        })
 
     @action(detail=True, methods=['post'], url_path='audit-reverify')
     def audit_reverify(self, request, pk=None):

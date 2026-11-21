@@ -6,7 +6,7 @@ import { fetchProspectById, clearSelectedProspect } from '../features/prospects/
 import CorporateStructureTree from '../components/prospects/CorporateStructureTree';
 import ShareholderStructureTree from '../components/prospects/ShareholderStructureTree';
 import api from '../services/api';
-import { ArrowLeft, Building2, Globe, Mail, Phone, MapPin, Network, Package, Users, Calendar, Link as LinkIcon, X } from 'lucide-react';
+import { ArrowLeft, Building2, ChevronLeft, ChevronRight, Globe, Mail, Phone, MapPin, Network, Package, Users, Calendar, Link as LinkIcon, X } from 'lucide-react';
 
 const ProspectDetailPage = () => {
   const { id } = useParams();
@@ -16,6 +16,13 @@ const ProspectDetailPage = () => {
   const { user } = useSelector((state) => state.auth);
   const [verifyingEmail, setVerifyingEmail] = useState(null);
   const [showContactsModal, setShowContactsModal] = useState(false);
+  const [navInfo, setNavInfo] = useState({
+    previous_id: null,
+    next_id: null,
+    current_index: null,
+    total_count: 0,
+  });
+  const [navLoading, setNavLoading] = useState(false);
 
   const handleVerifyEmail = async (email, contactId = null) => {
     try {
@@ -36,11 +43,48 @@ const ProspectDetailPage = () => {
   };
 
   useEffect(() => {
+    setShowContactsModal(false);
     dispatch(fetchProspectById(id));
     return () => {
       dispatch(clearSelectedProspect());
     };
   }, [dispatch, id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchNavigation = async () => {
+      try {
+        setNavLoading(true);
+        const userId = user?.id || 'default';
+        const params = {};
+        const savedSearch = sessionStorage.getItem(`prospectsSearch_${userId}`);
+        const savedMarketEvent = sessionStorage.getItem(`prospectsMarketEvent_${userId}`);
+        const savedStructure = sessionStorage.getItem(`prospectsStructure_${userId}`);
+        const savedCountry = sessionStorage.getItem(`prospectsCountry_${userId}`);
+        if (savedSearch) params.search = savedSearch;
+        if (savedMarketEvent) params.market_event = savedMarketEvent;
+        if (savedStructure) params.company_structure = savedStructure;
+        if (savedCountry) params.country_head_office = savedCountry;
+
+        const res = await api.get(`/prospects/${id}/navigation/`, { params });
+        if (!cancelled) {
+          setNavInfo(res.data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setNavInfo({ previous_id: null, next_id: null, current_index: null, total_count: 0 });
+        }
+      } finally {
+        if (!cancelled) {
+          setNavLoading(false);
+        }
+      }
+    };
+    fetchNavigation();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, user?.id]);
 
   const formatDate = (dateString) => {
     if (!dateString) return '';
@@ -86,7 +130,7 @@ const ProspectDetailPage = () => {
           <ArrowLeft size={16} className="mr-1" /> Back to Prospects
         </button>
         
-        <div className="flex items-start justify-between">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-slate-900 flex items-center gap-3">
               <Building2 className="h-8 w-8 text-indigo-600" />
@@ -105,6 +149,29 @@ const ProspectDetailPage = () => {
                 {p.operational_status}
               </span>
             </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => navInfo.previous_id && navigate(`/prospects/${navInfo.previous_id}`, { replace: true })}
+              disabled={navLoading || !navInfo.previous_id}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-xs hover:bg-slate-50 hover:border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              title="Previous record"
+            >
+              <ChevronLeft size={16} />
+              <span>Previous</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => navInfo.next_id && navigate(`/prospects/${navInfo.next_id}`, { replace: true })}
+              disabled={navLoading || !navInfo.next_id}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-xs hover:bg-slate-50 hover:border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              title="Next record"
+            >
+              <span>Next</span>
+              <ChevronRight size={16} />
+            </button>
           </div>
         </div>
       </div>

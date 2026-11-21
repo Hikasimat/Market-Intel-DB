@@ -9,6 +9,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import Pagination from '../components/layout/Pagination';
 import SearchableSelect from '../components/common/SearchableSelect';
 import LqPipelinePage from './LqPipelinePage';
+import api from '../services/api';
 
 const ProspectsPage = () => {
   const dispatch = useDispatch();
@@ -31,6 +32,15 @@ const ProspectsPage = () => {
     const userId = user?.id || 'default';
     return sessionStorage.getItem(`prospectsMarketEvent_${userId}`) || '';
   });
+  const [structureFilter, setStructureFilter] = useState(() => {
+    const userId = user?.id || 'default';
+    return sessionStorage.getItem(`prospectsStructure_${userId}`) || '';
+  });
+  const [countryFilter, setCountryFilter] = useState(() => {
+    const userId = user?.id || 'default';
+    return sessionStorage.getItem(`prospectsCountry_${userId}`) || '';
+  });
+  const [countryOptions, setCountryOptions] = useState([]);
   const [isFormOpen, setIsFormOpen] = useState(() => {
     const userId = user?.id || 'default';
     return sessionStorage.getItem(`prospectsFormOpen_${userId}`) === 'true';
@@ -54,6 +64,8 @@ const ProspectsPage = () => {
     const userId = user?.id || 'default';
     sessionStorage.setItem(`prospectsSearch_${userId}`, searchTerm);
     sessionStorage.setItem(`prospectsMarketEvent_${userId}`, marketEventFilter);
+    sessionStorage.setItem(`prospectsStructure_${userId}`, structureFilter);
+    sessionStorage.setItem(`prospectsCountry_${userId}`, countryFilter);
     sessionStorage.setItem(`prospectsPage_${userId}`, page);
     sessionStorage.setItem(`prospectsFormOpen_${userId}`, isFormOpen);
     if (editingProspect) {
@@ -61,11 +73,29 @@ const ProspectsPage = () => {
     } else {
       sessionStorage.removeItem(`prospectsEditing_${userId}`);
     }
-  }, [searchTerm, marketEventFilter, page, user, isFormOpen, editingProspect]);
+  }, [searchTerm, marketEventFilter, structureFilter, countryFilter, page, user, isFormOpen, editingProspect]);
 
   useEffect(() => {
     dispatch(fetchMarketEvents({}));
   }, [dispatch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/prospects/countries/')
+      .then((res) => {
+        if (!cancelled) {
+          setCountryOptions(res.data?.countries || []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCountryOptions([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, isFormOpen]);
 
   useEffect(() => {
     const params = {
@@ -75,8 +105,14 @@ const ProspectsPage = () => {
     if (marketEventFilter) {
       params.market_event = marketEventFilter;
     }
+    if (structureFilter) {
+      params.company_structure = structureFilter;
+    }
+    if (countryFilter) {
+      params.country_head_office = countryFilter;
+    }
     dispatch(fetchProspects(params));
-  }, [dispatch, page, searchTerm, marketEventFilter]);
+  }, [dispatch, page, searchTerm, marketEventFilter, structureFilter, countryFilter]);
 
   const handleTabSwitch = (newTab) => {
     const nextParams = new URLSearchParams(searchParams);
@@ -190,8 +226,8 @@ const ProspectsPage = () => {
         /* Filter / Search Card & Directory Table */
         <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 overflow-hidden flex-1 flex flex-col min-h-0">
           <div className="p-3 border-b border-slate-200/80 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-            <div className="flex flex-1 max-w-2xl gap-3">
-              <form onSubmit={handleSearch} className="flex-1 relative">
+            <div className="flex flex-1 flex-wrap lg:flex-nowrap max-w-4xl gap-3">
+              <form onSubmit={handleSearch} className="flex-1 min-w-[180px] relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                   <Search className="h-3.5 w-3.5 text-slate-400" />
                 </div>
@@ -225,6 +261,41 @@ const ProspectsPage = () => {
                   options={[
                     {value: '', label: 'All Market Events'},
                     ...((marketEventsList || []).map(event => ({value: event.id, label: event.event_title})))
+                  ]}
+                />
+              </div>
+
+              <div className="w-44">
+                <SearchableSelect
+                  value={structureFilter}
+                  onChange={(val) => {
+                    setStructureFilter(val);
+                    setPage(1);
+                  }}
+                  placeholder="All Structures"
+                  options={[
+                    { value: '', label: 'All Structures' },
+                    { value: 'Parent', label: 'Parent' },
+                    { value: 'Branch', label: 'Branch' },
+                    { value: 'Subsidiary', label: 'Subsidiary' },
+                  ]}
+                />
+              </div>
+
+              <div className="w-44">
+                <SearchableSelect
+                  value={countryFilter}
+                  onChange={(val) => {
+                    setCountryFilter(val);
+                    setPage(1);
+                  }}
+                  placeholder="All Countries"
+                  options={[
+                    { value: '', label: 'All Countries' },
+                    ...((countryFilter && !countryOptions.includes(countryFilter)
+                      ? [countryFilter, ...countryOptions]
+                      : countryOptions
+                    ).map(country => ({ value: country, label: country }))),
                   ]}
                 />
               </div>
@@ -264,18 +335,20 @@ const ProspectsPage = () => {
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-slate-50/80">
                 <tr className="border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
-                  <th scope="col" className="px-3.5 py-2 w-[26%]">Prospect Name</th>
-                  <th scope="col" className="px-3.5 py-2 w-[16%]">Country</th>
-                  <th scope="col" className="px-3.5 py-2 w-[12%]">Structure</th>
-                  <th scope="col" className="px-3.5 py-2 w-[12%]">Status</th>
-                  <th scope="col" className="px-3.5 py-2 w-[24%]">Primary Industry</th>
-                  <th scope="col" className="px-3.5 py-2 w-[10%] text-right">Actions</th>
+                  <th scope="col" className="px-3.5 py-2 w-[18%]">Prospect Name</th>
+                  <th scope="col" className="px-3.5 py-2 w-[13%]">Company Number</th>
+                  <th scope="col" className="px-3.5 py-2 w-[17%]">Company Email</th>
+                  <th scope="col" className="px-3.5 py-2 w-[10%]">Country</th>
+                  <th scope="col" className="px-3.5 py-2 w-[8%]">Structure</th>
+                  <th scope="col" className="px-3.5 py-2 w-[8%]">Status</th>
+                  <th scope="col" className="px-3.5 py-2 w-[18%]">Primary Industry</th>
+                  <th scope="col" className="px-3.5 py-2 w-[8%] text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-100">
                 {loading ? (
                   <tr>
-                    <td colSpan="6" className="px-4 py-10 text-center text-slate-500 text-xs">
+                    <td colSpan="8" className="px-4 py-10 text-center text-slate-500 text-xs">
                       <div className="flex justify-center items-center gap-2">
                         <div className="w-3.5 h-3.5 rounded-full bg-indigo-600 animate-ping"></div>
                         Loading prospects...
@@ -284,7 +357,7 @@ const ProspectsPage = () => {
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan="6" className="px-4 py-10 text-center text-slate-500 text-xs">
+                    <td colSpan="8" className="px-4 py-10 text-center text-slate-500 text-xs">
                       No prospects found.
                     </td>
                   </tr>
@@ -303,6 +376,12 @@ const ProspectsPage = () => {
                             <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" title="Lead Freeze" />
                           )}
                         </div>
+                      </td>
+                      <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600 truncate max-w-[160px]" title={prospect.official_phone_number || '—'}>
+                        {prospect.official_phone_number || '—'}
+                      </td>
+                      <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600 truncate max-w-[200px]" title={prospect.official_email_address || '—'}>
+                        {prospect.official_email_address || '—'}
                       </td>
                       <td className="px-3.5 py-2 whitespace-nowrap text-xs text-slate-600 truncate max-w-[140px]" title={prospect.country_head_office}>
                         {prospect.country_head_office}
@@ -323,7 +402,7 @@ const ProspectsPage = () => {
                       </td>
                       <td className="px-3.5 py-2 text-xs text-slate-600">
                         <div 
-                          className="truncate font-medium text-slate-700 bg-slate-50 border border-slate-200/80 px-2.5 py-1 rounded-lg inline-block max-w-[220px] md:max-w-[260px] xl:max-w-[340px]"
+                          className="truncate font-medium text-slate-700 bg-slate-50 border border-slate-200/80 px-2.5 py-1 rounded-lg inline-block max-w-[180px] md:max-w-[220px] xl:max-w-[260px]"
                           title={prospect.primary_industries || '—'}
                         >
                           {prospect.primary_industries || '—'}

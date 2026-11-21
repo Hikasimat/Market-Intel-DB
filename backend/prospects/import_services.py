@@ -210,8 +210,24 @@ def group_rows(source_rows, mapping):
         parent_names = parse_parent_company_names(new_row.get('parent_company_names'))
 
         comp_name = clean_value(new_row.get('company_name')).lower()
-        if comp_name and comp_name in grouped:
-            entry = grouped[comp_name]
+        structure = clean_value(new_row.get('company_structure')).casefold()
+        if comp_name:
+            if structure == 'branch':
+                group_key = (
+                    'branch',
+                    comp_name,
+                    clean_value(new_row.get('country_head_office')).lower(),
+                    clean_value(new_row.get('complete_address')).lower(),
+                    clean_value(new_row.get('official_email_address')).lower(),
+                    clean_value(new_row.get('official_phone_number')).lower(),
+                )
+            else:
+                group_key = ('company', comp_name)
+        else:
+            group_key = None
+
+        if group_key and group_key in grouped:
+            entry = grouped[group_key]
             
             # Deduplicate contacts
             for kc in key_contacts:
@@ -229,7 +245,7 @@ def group_rows(source_rows, mapping):
         else:
             new_row['key_contacts'] = key_contacts
             new_row['offerings_data'] = offerings
-            grouped[comp_name or str(uuid.uuid4())] = {
+            grouped[group_key or str(uuid.uuid4())] = {
                 'data': new_row,
                 'source_row_numbers': [source_row],
                 'parent_names': parent_names,
@@ -288,15 +304,18 @@ def make_item(index, data, source_row_numbers):
 
 
 def _name_lookup(queryset, names):
-    """Minimal query: normalized company name -> prospect id, only for the given names."""
+    """Minimal query: normalized company name -> prospect id, preferring Parent > Subsidiary > Branch."""
     names = {collapse_whitespace(n) for n in names if clean_value(n)}
     if not names:
         return {}
     query = Q()
     for name in names:
         query |= Q(company_name__iexact=name)
+    rows = list(queryset.filter(query).order_by('created_at').values_list('id', 'company_name', 'company_structure'))
+    priority = {'parent': 0, 'subsidiary': 1, 'branch': 2}
+    rows.sort(key=lambda r: priority.get((r[2] or '').casefold(), 1))
     lookup = {}
-    for pid, cname in queryset.filter(query).order_by('created_at').values_list('id', 'company_name'):
+    for pid, cname, _ in rows:
         lookup.setdefault(normalize_company_name(cname), pid)
     return lookup
 
@@ -334,38 +353,53 @@ def analyze_items(items, user):
     parent_lookup = _name_lookup(visible_prospects(user), all_parent_names)
 
     file_index = {}
+    branch_file_index = {}
     for it in items:
         if not it.company_name:
             it.errors.append('Company Name is required.')
             continue
-        if it.key in global_lookup:
-            it.errors.append('Duplicate company name already in DB.')
-        elif it.key in file_index:
-            it.errors.append('Duplicate company name within file.')
+        is_branch = clean_value(it.data.get('company_structure')).casefold() == 'branch'
+        if is_branch:
+            branch_file_index.setdefault(it.key, it.index)
         else:
-            file_index[it.key] = it.index
+            if it.key in global_lookup:
+                it.errors.append('Duplicate company name already in DB.')
+            elif it.key in file_index:
+                it.errors.append('Duplicate company name within file.')
+            else:
+                file_index[it.key] = it.index
 
     for it in items:
         structure = clean_value(it.data.get('company_structure')).casefold()
+        is_branch = structure == 'branch'
         if structure in CHILD_STRUCTURES and not it.parent_names:
             it.errors.append('At least one parent company is required for Branch/Subsidiary.')
 
         missing, resolved, inaccessible = [], [], set()
         for name in it.parent_names:
             key = normalize_company_name(name)
-            if it.key and key == it.key:
+            if it.key and key == it.key and not is_branch:
                 it.parent_refs.append((name, key, STATUS_CIRCULAR, None))
                 it.parent_resolution.append({'name': name, 'status': STATUS_CIRCULAR})
             elif key in parent_lookup:
                 resolved.append(name)
                 it.parent_refs.append((name, key, STATUS_EXISTS_IN_DB, None))
                 it.parent_resolution.append({'name': name, 'status': STATUS_EXISTS_IN_DB})
-            elif key in file_index:
+            elif key in file_index and file_index[key] != it.index:
                 parent_item = items[file_index[key]]
                 resolved.append(name)
                 it.parent_refs.append((name, key, STATUS_FOUND_IN_FILE, parent_item.index))
                 it.parent_resolution.append({'name': name, 'status': STATUS_FOUND_IN_FILE,
                                              'source_row': parent_item.first_row})
+            elif key in branch_file_index and branch_file_index[key] != it.index:
+                parent_item = items[branch_file_index[key]]
+                resolved.append(name)
+                it.parent_refs.append((name, key, STATUS_FOUND_IN_FILE, parent_item.index))
+                it.parent_resolution.append({'name': name, 'status': STATUS_FOUND_IN_FILE,
+                                             'source_row': parent_item.first_row})
+            elif it.key and key == it.key:
+                it.parent_refs.append((name, key, STATUS_CIRCULAR, None))
+                it.parent_resolution.append({'name': name, 'status': STATUS_CIRCULAR})
             else:
                 missing.append(name)
                 if key in global_lookup:
@@ -495,7 +529,8 @@ def import_single_row(item, parent_ids, emails, serializer_class, request):
     inside its own transaction; any failure rolls back only this company."""
     user = request.user
     with transaction.atomic():
-        if Prospect.objects.filter(company_name__iexact=item.company_name).exists():
+        is_branch = clean_value(item.data.get('company_structure')).casefold() == 'branch'
+        if not is_branch and Prospect.objects.filter(company_name__iexact=item.company_name).exists():
             raise RowImportError('Duplicate company name already in DB.')
 
         data = dict(item.data)
@@ -748,7 +783,8 @@ def run_import(rows, request, serializer_class, file_name='', client_limit_reach
                 it = items[i]
                 if success:
                     created[i] = pid
-                    parent_cache[it.key] = pid
+                    if clean_value(it.data.get('company_structure')).casefold() != 'branch' or it.key not in parent_cache:
+                        parent_cache[it.key] = pid
                     imported_rows.append({'source_row_numbers': it.source_row_numbers,
                                           'company_name': it.company_name, 'prospect_id': str(pid)})
                 else:
