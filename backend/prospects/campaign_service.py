@@ -3,6 +3,7 @@ from email.utils import make_msgid, formatdate
 import html
 import logging
 import mimetypes
+import re
 import threading
 import time
 import uuid
@@ -10,7 +11,9 @@ from datetime import timedelta
 from typing import List, Dict, Any, Optional
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Case, When, IntegerField
 from django.utils import timezone
 
 from accounts.oauth_services import GmailOAuthService, get_mail_credentials
@@ -798,6 +801,71 @@ def trigger_background_worker():
 SECTION_SIZE = 10
 MAX_SECTIONS_PER_CAMPAIGN = 5
 MAX_RECIPIENTS_PER_CAMPAIGN = SECTION_SIZE * MAX_SECTIONS_PER_CAMPAIGN  # 50 drafts per campaign (5 sections × 10)
+
+_LIVE_SYNC_LOCK = threading.Lock()
+_LIVE_SYNC_CACHE_KEY = "prospects:campaign_live_sync_lock"
+_LIVE_SYNC_CACHE_TTL_SECONDS = 180
+
+
+def _acquire_live_sync_lock() -> Optional[str]:
+    if not _LIVE_SYNC_LOCK.acquire(blocking=False):
+        return None
+    token = uuid.uuid4().hex
+    try:
+        acquired = cache.add(_LIVE_SYNC_CACHE_KEY, token, timeout=_LIVE_SYNC_CACHE_TTL_SECONDS)
+    except Exception:
+        return token
+    if not acquired:
+        try:
+            _LIVE_SYNC_LOCK.release()
+        except RuntimeError:
+            pass
+        return None
+    return token
+
+
+def _release_live_sync_lock(token: Optional[str]) -> None:
+    try:
+        if token:
+            try:
+                if cache.get(_LIVE_SYNC_CACHE_KEY) == token:
+                    cache.delete(_LIVE_SYNC_CACHE_KEY)
+            except Exception:
+                pass
+    finally:
+        try:
+            if _LIVE_SYNC_LOCK.locked():
+                _LIVE_SYNC_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+def _get_next_ai_outreach_campaign_number(base_name: str = "AI Outreach Campaign") -> int:
+    open_statuses = {
+        EmailCampaign.Status.DRAFT,
+        EmailCampaign.Status.QUEUED,
+        EmailCampaign.Status.RUNNING,
+        EmailCampaign.Status.PAUSED,
+    }
+    pattern = re.compile(
+        rf"^{re.escape(base_name)}\s*(?:—|-)\s*Campaign\s+(\d+)$",
+        re.IGNORECASE,
+    )
+    used_numbers = set()
+    has_open_legacy = False
+    for cname, cstatus in EmailCampaign.objects.values_list("name", "status"):
+        name_str = (cname or "").strip()
+        match = pattern.match(name_str)
+        if match:
+            try:
+                used_numbers.add(int(match.group(1)))
+            except (TypeError, ValueError):
+                pass
+        elif name_str == f"{base_name} (Unsent Mail Auto-Draft)" and cstatus in open_statuses:
+            has_open_legacy = True
+    if has_open_legacy:
+        used_numbers.add(1)
+    return max(used_numbers, default=0) + 1
 
 
 def _get_vector_db_portfolio_summary(user) -> Dict[str, Any]:
@@ -1667,6 +1735,109 @@ def prune_sent_recipients_from_draft_campaigns(user=None) -> int:
     return deleted_count
 
 
+def deduplicate_draft_campaign_recipients(user=None) -> int:
+    """
+    Scans open campaigns (DRAFT, QUEUED, RUNNING, PAUSED) and removes duplicate
+    unapproved DRAFT recipients referencing the same prospect or email address,
+    deleting any DRAFT campaigns that become empty and repairing exact duplicate
+    auto-draft campaign names.
+    """
+    open_statuses = [
+        EmailCampaign.Status.DRAFT,
+        EmailCampaign.Status.QUEUED,
+        EmailCampaign.Status.RUNNING,
+        EmailCampaign.Status.PAUSED,
+    ]
+    is_manager_or_super = True
+    if user and getattr(user, "is_authenticated", False) and not user.is_superuser:
+        role = getattr(getattr(user, "profile", None), "role", None)
+        if role != "MANAGER":
+            is_manager_or_super = False
+
+    rec_qs = (
+        EmailCampaignRecipient.objects.select_related("campaign")
+        .filter(campaign__status__in=open_statuses)
+        .annotate(
+            is_draft_rank=Case(
+                When(status=EmailCampaignRecipient.Status.DRAFT, then=1),
+                default=0,
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("is_draft_rank", "campaign__created_at", "queue_order", "created_at")
+    )
+    if not is_manager_or_super:
+        rec_qs = rec_qs.filter(campaign__created_by=user)
+
+    seen_prospect_ids = set()
+    seen_emails_no_prospect = set()
+    delete_ids = []
+    affected_campaign_ids = set()
+
+    for rec in rec_qs:
+        email_low = (rec.email_address or "").strip().lower()
+        if rec.prospect_id:
+            if rec.prospect_id in seen_prospect_ids and rec.status == EmailCampaignRecipient.Status.DRAFT:
+                delete_ids.append(rec.id)
+                affected_campaign_ids.add(rec.campaign_id)
+            else:
+                seen_prospect_ids.add(rec.prospect_id)
+        elif email_low:
+            if email_low in seen_emails_no_prospect and rec.status == EmailCampaignRecipient.Status.DRAFT:
+                delete_ids.append(rec.id)
+                affected_campaign_ids.add(rec.campaign_id)
+            else:
+                seen_emails_no_prospect.add(email_low)
+
+    deleted_count = 0
+    if delete_ids:
+        with transaction.atomic():
+            deleted_count, _ = EmailCampaignRecipient.objects.filter(
+                id__in=delete_ids,
+                status=EmailCampaignRecipient.Status.DRAFT,
+            ).delete()
+            for cid in affected_campaign_ids:
+                camp = EmailCampaign.objects.filter(id=cid).first()
+                if not camp:
+                    continue
+                if camp.recipients.count() == 0:
+                    if camp.status == EmailCampaign.Status.DRAFT:
+                        camp.delete()
+                else:
+                    _rebalance_campaign_sections(camp)
+                    _check_and_update_campaign_completion(camp)
+
+    # Resolve any surviving exact duplicate names among open DRAFT auto-draft campaigns
+    auto_camps = list(
+        EmailCampaign.objects.filter(name__startswith="AI Outreach Campaign").order_by("created_at")
+    )
+    seen_names = set()
+    for camp in auto_camps:
+        cname = (camp.name or "").strip()
+        if cname in seen_names:
+            can_rename = (
+                camp.status == EmailCampaign.Status.DRAFT
+                and (
+                    user is None
+                    or is_manager_or_super
+                    or camp.created_by_id == getattr(user, "id", None)
+                )
+            )
+            if can_rename:
+                next_num = _get_next_ai_outreach_campaign_number("AI Outreach Campaign")
+                new_name = f"AI Outreach Campaign — Campaign {next_num}"
+                while new_name in seen_names:
+                    next_num += 1
+                    new_name = f"AI Outreach Campaign — Campaign {next_num}"
+                camp.name = new_name
+                camp.save(update_fields=["name"])
+                seen_names.add(new_name)
+                continue
+        seen_names.add(cname)
+
+    return deleted_count
+
+
 def sync_live_unsent_outreach_ai_drafts(
     user,
     *,
@@ -1674,24 +1845,22 @@ def sync_live_unsent_outreach_ai_drafts(
     campaign_id: Optional[str] = None,
     user_prompt: str = "",
     tone: str = "professional",
+    max_drafts: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Live Sent-Mail Check & Automatic AI Drafting for Unsent Outreach Records:
     1. Checks all sent-mail channels (`OutreachEmail`, `EmailThreadMessage`, `CommunicationActivity`,
        `EmailCampaignRecipient(status='SENT')`, `LeadQualification.email_status`) and prunes any
        `DRAFT` campaign recipients that have already been sent an email.
-    2. Identifies all accessible outreach records where an email has NOT yet been sent.
-    3. When `auto_draft=True`, automatically generates customized Google Gemini + Vector DB portfolio
+    2. Deduplicates any duplicate unapproved `DRAFT` recipients across open campaigns.
+    3. Identifies all accessible outreach records where an email has NOT yet been sent.
+    4. When `auto_draft=True`, automatically generates customized Google Gemini + Vector DB portfolio
        email drafts for any unsent outreach records not yet drafted across any active/draft campaign,
        organizing them into sections of 10 drafts per section and capping each campaign at 50 drafts
        (5 sections × 10 drafts). Once a campaign has 50 drafts, a second campaign (Campaign 2, 3, ...)
-       is automatically created with its own sections.
+       is automatically created with sequential unique numbering.
     """
     from email_ai.services import generate_personalized_email
-
-    pruned_count = prune_sent_recipients_from_draft_campaigns(user=user)
-    unsent_analysis = get_unsent_outreach_records(user=user)
-    unsent_records = unsent_analysis["records"]
 
     open_statuses = [
         EmailCampaign.Status.DRAFT,
@@ -1699,27 +1868,55 @@ def sync_live_unsent_outreach_ai_drafts(
         EmailCampaign.Status.RUNNING,
         EmailCampaign.Status.PAUSED,
     ]
-    open_qs = EmailCampaign.objects.filter(status__in=open_statuses).order_by("created_at")
-    if not user.is_superuser and getattr(getattr(user, "profile", None), "role", None) != "MANAGER":
-        open_qs = open_qs.filter(created_by=user)
-    else:
-        user_open_qs = open_qs.filter(created_by=user)
-        if user_open_qs.exists():
-            open_qs = user_open_qs
+    is_manager_or_super = bool(
+        getattr(user, "is_superuser", False)
+        or getattr(getattr(user, "profile", None), "role", None) == "MANAGER"
+    )
 
-    open_campaigns = list(open_qs)
+    def _get_open_campaigns() -> List[EmailCampaign]:
+        qs = EmailCampaign.objects.filter(status__in=open_statuses).order_by("created_at")
+        if not is_manager_or_super:
+            qs = qs.filter(created_by=user)
+        return list(qs)
 
-    # Requested campaign takes display priority if valid and open, else most recent open campaign
-    campaign = None
-    if campaign_id:
-        campaign = next((c for c in open_campaigns if str(c.id) == str(campaign_id)), None)
-    if not campaign and open_campaigns:
-        campaign = open_campaigns[-1]
+    lock_token = None
+    if auto_draft:
+        lock_token = _acquire_live_sync_lock()
+        if lock_token is None:
+            open_campaigns = _get_open_campaigns()
+            unsent_analysis = get_unsent_outreach_records(user=user)
+            campaign = None
+            if campaign_id:
+                campaign = next((c for c in open_campaigns if str(c.id) == str(campaign_id)), None)
+            if not campaign and open_campaigns:
+                campaign = open_campaigns[-1]
+            return {
+                "unsent_analysis": unsent_analysis,
+                "active_campaign": campaign,
+                "active_campaigns": open_campaigns,
+                "pruned_sent_drafts": 0,
+                "deduplicated_drafts": 0,
+                "newly_drafted_count": 0,
+                "remaining_undrafted_count": 0,
+                "sync_in_progress": True,
+                "checked_at": timezone.now().isoformat(),
+            }
 
-    newly_drafted_count = 0
+    try:
+        pruned_count = prune_sent_recipients_from_draft_campaigns(user=user)
+        deduplicated_count = deduplicate_draft_campaign_recipients(user=user)
+        unsent_analysis = get_unsent_outreach_records(user=user)
+        unsent_records = unsent_analysis["records"]
+        open_campaigns = _get_open_campaigns()
 
-    if auto_draft and unsent_records:
-        # Collect already-drafted prospect IDs across ALL open/draft campaigns so we never double-draft
+        # Requested campaign takes display priority if valid and open, else most recent open campaign
+        campaign = None
+        if campaign_id:
+            campaign = next((c for c in open_campaigns if str(c.id) == str(campaign_id)), None)
+        if not campaign and open_campaigns:
+            campaign = open_campaigns[-1]
+
+        # Collect already-drafted prospect IDs across ALL visible open/draft campaigns so we never double-draft
         existing_prospect_ids = {
             str(pid)
             for pid in EmailCampaignRecipient.objects.filter(
@@ -1743,41 +1940,91 @@ def sync_live_unsent_outreach_ai_drafts(
                 else r["email"].lower() not in existing_emails_without_prospect
             )
         ]
+        total_missing = len(missing_records)
+        newly_drafted_count = 0
 
-        if not open_campaigns and missing_records:
-            created = create_ai_drafted_campaigns(
-                user=user,
-                name="AI Outreach Campaign (Unsent Mail Auto-Draft)",
-                user_prompt=user_prompt,
-                tone=tone,
-                prospect_ids=[r["prospect_id"] for r in missing_records if r.get("prospect_id")] or None,
-                recipients_data=missing_records,
+        if auto_draft and missing_records:
+            batch_to_draft = (
+                missing_records[:max_drafts]
+                if max_drafts is not None and max_drafts > 0
+                else list(missing_records)
             )
-            open_campaigns.extend(created)
-            campaign = campaign or created[0]
-            newly_drafted_count = sum(c.recipients.count() for c in created)
-        elif missing_records:
-            # First find any open campaign with remaining capacity (< 50 recipients)
-            capacity_campaign = None
-            for oc in reversed(open_campaigns):
-                if oc.recipients.count() < MAX_RECIPIENTS_PER_CAMPAIGN:
-                    capacity_campaign = oc
-                    break
-
             effective_prompt = (user_prompt or "").strip() or (
                 "Write a highly customized B2B outreach email introducing our company portfolio and solutions, "
                 "tailored specifically to this company's primary industries, product/service offerings, and business profile."
             )
 
+            # Find any open campaign owned by this user with remaining capacity (< 50 recipients)
+            capacity_campaign = None
+            for oc in reversed(open_campaigns):
+                if oc.created_by_id == user.id and oc.recipients.count() < MAX_RECIPIENTS_PER_CAMPAIGN:
+                    capacity_campaign = oc
+                    break
+
             records_for_existing = []
-            overflow_records = list(missing_records)
+            overflow_records = list(batch_to_draft)
             if capacity_campaign:
+                existing_cap_emails = {
+                    (e or "").strip().lower()
+                    for e in capacity_campaign.recipients.values_list("email_address", flat=True)
+                    if e
+                }
                 remaining_slots = MAX_RECIPIENTS_PER_CAMPAIGN - capacity_campaign.recipients.count()
                 if remaining_slots > 0:
-                    records_for_existing = missing_records[:remaining_slots]
-                    overflow_records = missing_records[remaining_slots:]
+                    eligible_for_cap = [
+                        r for r in batch_to_draft
+                        if (r.get("email") or "").strip().lower() not in existing_cap_emails
+                    ]
+                    chosen_cap = eligible_for_cap[:remaining_slots]
+                    chosen_keys = {
+                        str(r["prospect_id"]) if r.get("prospect_id") else r["email"].lower()
+                        for r in chosen_cap
+                    }
+                    records_for_existing = chosen_cap
+                    overflow_records = [
+                        r for r in batch_to_draft
+                        if (str(r["prospect_id"]) if r.get("prospect_id") else r["email"].lower()) not in chosen_keys
+                    ]
 
             if records_for_existing and capacity_campaign:
+                from concurrent.futures import ThreadPoolExecutor
+                from django.db import close_old_connections, connection
+
+                def _draft_existing_one(rec: Dict[str, Any]) -> Dict[str, Any]:
+                    close_old_connections()
+                    try:
+                        gen = generate_personalized_email(
+                            user=user,
+                            user_prompt=effective_prompt,
+                            source_context="CAMPAIGN",
+                            tone=tone or "professional",
+                            prospect_id=rec.get("prospect_id"),
+                            recipient_emails=[rec["email"]],
+                            company_name=rec.get("company_name") or "",
+                            recipient_name=rec.get("recipient_name") or "",
+                            industry=rec.get("primary_industries") or "",
+                            country=rec.get("country") or "",
+                            phone_number=rec.get("phone_number") or "",
+                            campaign_name=capacity_campaign.name,
+                        )
+                        return {
+                            "record": rec,
+                            "subject": (gen.get("subject") or "").strip() or f"Strategic Alignment — {rec.get('company_name') or capacity_campaign.name}",
+                            "body": (gen.get("body") or "").strip(),
+                            "provider": gen.get("provider") or "gemini",
+                            "model": gen.get("model") or "",
+                            "portfolio_sources": (gen.get("context_used") or {}).get("portfolio_sources") or [],
+                        }
+                    finally:
+                        close_old_connections()
+
+                if connection.in_atomic_block or len(records_for_existing) <= 2:
+                    drafted_existing = [_draft_existing_one(r) for r in records_for_existing]
+                else:
+                    max_workers = min(4, len(records_for_existing))
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        drafted_existing = list(executor.map(_draft_existing_one, records_for_existing))
+
                 prospect_map = {
                     str(p.id): p
                     for p in Prospect.objects.filter(
@@ -1791,79 +2038,103 @@ def sync_live_unsent_outreach_ai_drafts(
                     )
                 }
 
-                start_order = capacity_campaign.recipients.count()
-                new_recipient_objs = []
-                for offset, rec in enumerate(records_for_existing):
-                    q_order = start_order + offset
-                    sec_num = (q_order // SECTION_SIZE) + 1
-                    gen = generate_personalized_email(
-                        user=user,
-                        user_prompt=effective_prompt,
-                        source_context="CAMPAIGN",
-                        tone=tone or "professional",
-                        prospect_id=rec.get("prospect_id"),
-                        recipient_emails=[rec["email"]],
-                        company_name=rec.get("company_name") or "",
-                        recipient_name=rec.get("recipient_name") or "",
-                        industry=rec.get("primary_industries") or "",
-                        country=rec.get("country") or "",
-                        phone_number=rec.get("phone_number") or "",
-                        campaign_name=capacity_campaign.name,
-                    )
-                    subj = (gen.get("subject") or "").strip() or f"Strategic Alignment — {rec.get('company_name') or capacity_campaign.name}"
-                    body = (gen.get("body") or "").strip()
-                    snapshot = {
-                        "company_name": rec.get("company_name") or "",
-                        "phone_number": rec.get("phone_number") or "",
-                        "email": rec.get("email") or "",
-                        "recipient_name": rec.get("recipient_name") or "",
-                        "designation": rec.get("designation") or "",
-                        "primary_industries": rec.get("primary_industries") or "",
-                        "offering_type": rec.get("offering_type") or "",
-                        "products": rec.get("products") or [],
-                        "services": rec.get("services") or [],
-                        "solutions": rec.get("solutions") or [],
-                        "offerings": rec.get("offerings") or [],
-                        "country": rec.get("country") or "",
-                        "address": rec.get("address") or "",
-                        "website": rec.get("website") or "",
-                        "ai_provider": gen.get("provider") or "gemini",
-                        "ai_model": gen.get("model") or "",
-                        "portfolio_sources": (gen.get("context_used") or {}).get("portfolio_sources") or [],
-                        "user_prompt": effective_prompt,
-                        "tone": tone or "professional",
+                with transaction.atomic():
+                    latest_open = _get_open_campaigns()
+                    cur_prospect_ids = {
+                        str(pid)
+                        for pid in EmailCampaignRecipient.objects.filter(
+                            campaign__in=latest_open,
+                            prospect__isnull=False,
+                        ).values_list("prospect_id", flat=True)
                     }
-                    new_recipient_objs.append(
-                        EmailCampaignRecipient(
-                            campaign=capacity_campaign,
-                            email_address=rec["email"],
-                            recipient_name=rec.get("recipient_name") or rec.get("company_name") or None,
-                            prospect=prospect_map.get(str(rec.get("prospect_id"))),
-                            prospect_contact=contact_map.get(str(rec.get("prospect_contact_id"))),
-                            section_number=sec_num,
-                            custom_subject=subj[:512],
-                            custom_body=body,
-                            outreach_snapshot=snapshot,
-                            queue_order=q_order,
-                            status=EmailCampaignRecipient.Status.DRAFT,
-                            scheduled_for=None,
-                        )
-                    )
+                    cur_no_prospect_emails = {
+                        (e or "").strip().lower()
+                        for e in EmailCampaignRecipient.objects.filter(
+                            campaign__in=latest_open,
+                            prospect__isnull=True,
+                        ).values_list("email_address", flat=True)
+                        if e
+                    }
+                    cur_cap_emails = {
+                        (e or "").strip().lower()
+                        for e in capacity_campaign.recipients.values_list("email_address", flat=True)
+                        if e
+                    }
 
-                if new_recipient_objs:
-                    with transaction.atomic():
+                    start_order = capacity_campaign.recipients.count()
+                    new_recipient_objs = []
+                    offset = 0
+                    for item in drafted_existing:
+                        rec = item["record"]
+                        pid = str(rec["prospect_id"]) if rec.get("prospect_id") else None
+                        email_low = (rec["email"] or "").strip().lower()
+                        if pid and pid in cur_prospect_ids:
+                            continue
+                        if not pid and email_low in cur_no_prospect_emails:
+                            continue
+                        if email_low in cur_cap_emails:
+                            continue
+
+                        q_order = start_order + offset
+                        sec_num = (q_order // SECTION_SIZE) + 1
+                        offset += 1
+                        if pid:
+                            cur_prospect_ids.add(pid)
+                        else:
+                            cur_no_prospect_emails.add(email_low)
+                        cur_cap_emails.add(email_low)
+
+                        snapshot = {
+                            "company_name": rec.get("company_name") or "",
+                            "phone_number": rec.get("phone_number") or "",
+                            "email": rec.get("email") or "",
+                            "recipient_name": rec.get("recipient_name") or "",
+                            "designation": rec.get("designation") or "",
+                            "primary_industries": rec.get("primary_industries") or "",
+                            "offering_type": rec.get("offering_type") or "",
+                            "products": rec.get("products") or [],
+                            "services": rec.get("services") or [],
+                            "solutions": rec.get("solutions") or [],
+                            "offerings": rec.get("offerings") or [],
+                            "country": rec.get("country") or "",
+                            "address": rec.get("address") or "",
+                            "website": rec.get("website") or "",
+                            "ai_provider": item.get("provider") or "gemini",
+                            "ai_model": item.get("model") or "",
+                            "portfolio_sources": item.get("portfolio_sources") or [],
+                            "user_prompt": effective_prompt,
+                            "tone": tone or "professional",
+                        }
+                        new_recipient_objs.append(
+                            EmailCampaignRecipient(
+                                campaign=capacity_campaign,
+                                email_address=rec["email"],
+                                recipient_name=rec.get("recipient_name") or rec.get("company_name") or None,
+                                prospect=prospect_map.get(str(rec.get("prospect_id"))),
+                                prospect_contact=contact_map.get(str(rec.get("prospect_contact_id"))),
+                                section_number=sec_num,
+                                custom_subject=item["subject"][:512],
+                                custom_body=item["body"],
+                                outreach_snapshot=snapshot,
+                                queue_order=q_order,
+                                status=EmailCampaignRecipient.Status.DRAFT,
+                                scheduled_for=None,
+                            )
+                        )
+
+                    if new_recipient_objs:
                         EmailCampaignRecipient.objects.bulk_create(new_recipient_objs)
                         _rebalance_campaign_sections(capacity_campaign)
                         if capacity_campaign.status in (EmailCampaign.Status.COMPLETED, EmailCampaign.Status.COMPLETED_WITH_ERRORS):
                             capacity_campaign.status = EmailCampaign.Status.DRAFT
                             capacity_campaign.completed_at = None
                             capacity_campaign.save(update_fields=["status", "completed_at"])
-                    newly_drafted_count += len(new_recipient_objs)
-                    campaign = campaign or capacity_campaign
+                        newly_drafted_count += len(new_recipient_objs)
+                        campaign = campaign or capacity_campaign
 
-            # If Campaign 1 reached 50 drafts, automatically create Campaign 2 (and Campaign 3...) for overflow records
+            # Create sequential uniquely numbered campaigns of up to 50 drafts for overflow/initial records
             if overflow_records:
-                next_index = len(open_campaigns) + 1
+                next_index = _get_next_ai_outreach_campaign_number("AI Outreach Campaign")
                 overflow_chunks = _chunk_list(overflow_records, MAX_RECIPIENTS_PER_CAMPAIGN)
                 for chunk_offset, chunk in enumerate(overflow_chunks):
                     camp_num = next_index + chunk_offset
@@ -1880,14 +2151,24 @@ def sync_live_unsent_outreach_ai_drafts(
                 if not campaign and open_campaigns:
                     campaign = open_campaigns[-1]
 
-    return {
-        "unsent_analysis": unsent_analysis,
-        "active_campaign": campaign,
-        "active_campaigns": open_campaigns,
-        "pruned_sent_drafts": pruned_count,
-        "newly_drafted_count": newly_drafted_count,
-        "checked_at": timezone.now().isoformat(),
-    }
+        remaining_undrafted_count = max(0, total_missing - newly_drafted_count)
+        if campaign:
+            campaign = EmailCampaign.objects.filter(id=campaign.id).first() or campaign
+
+        return {
+            "unsent_analysis": unsent_analysis,
+            "active_campaign": campaign,
+            "active_campaigns": open_campaigns,
+            "pruned_sent_drafts": pruned_count,
+            "deduplicated_drafts": deduplicated_count,
+            "newly_drafted_count": newly_drafted_count,
+            "remaining_undrafted_count": remaining_undrafted_count,
+            "sync_in_progress": False,
+            "checked_at": timezone.now().isoformat(),
+        }
+    finally:
+        if lock_token is not None:
+            _release_live_sync_lock(lock_token)
 
 
 

@@ -43,13 +43,12 @@ const POLL_INTERVAL_MS = 15000;
 const localToday = () => new Date().toLocaleDateString('en-CA');
 
 const STAGE_META = [
-  { key: 'lead_qualified', label: 'Lead Qualified', bar: 'bg-emerald-500', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-  { key: 'qualified', label: 'Qualified', bar: 'bg-teal-500', badge: 'bg-teal-50 text-teal-700 border-teal-200' },
-  { key: 'hot_lead', label: 'Hot Lead', bar: 'bg-orange-500', badge: 'bg-orange-50 text-orange-700 border-orange-200' },
-  { key: 'nurture', label: 'Nurture', bar: 'bg-sky-500', badge: 'bg-sky-50 text-sky-700 border-sky-200' },
-  { key: 'unqualified', label: 'Unqualified / Pending', bar: 'bg-slate-400', badge: 'bg-slate-100 text-slate-700 border-slate-200' },
-  { key: 'lead_freeze', label: 'Lead Freeze', bar: 'bg-indigo-400', badge: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
-  { key: 'disqualified', label: 'Disqualified', bar: 'bg-rose-500', badge: 'bg-rose-50 text-rose-700 border-rose-200' },
+  { key: 'lead_qualified', label: 'Lead Qualified', bar: 'bg-emerald-500' },
+  { key: 'received_response', label: 'Received Response', bar: 'bg-teal-500' },
+  { key: 'waiting_for_response', label: 'Waiting for Response', bar: 'bg-sky-500' },
+  { key: 'call_follow_up', label: 'Call Follow-Up', bar: 'bg-amber-500' },
+  { key: 'ready_for_outreach', label: 'Ready for Outreach', bar: 'bg-indigo-400' },
+  { key: 'lead_freeze', label: 'Lead Not Qualified', bar: 'bg-rose-500' },
 ];
 
 const WA_STATUS_CLASS = {
@@ -232,7 +231,7 @@ const ManagerDashboardPage = () => {
       title: 'Lead Qualified',
       value: summary.lead_qualified ?? 0,
       badge: `${funnel.conversion_rate ?? 0}% conv`,
-      sub: `${summary.total_lead_qualified ?? 0} total · ${summary.not_lead_qualified ?? 0} non-LQ`,
+      sub: `${summary.total_lead_qualified ?? 0} total · ${summary.not_lead_qualified ?? 0} not qualified`,
       icon: CheckCircle,
       color: 'text-emerald-600',
       bg: 'bg-emerald-50',

@@ -58,6 +58,8 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
   const [sendingSectionNum, setSendingSectionNum] = useState(null);
   const [liveListenerEnabled, setLiveListenerEnabled] = useState(true);
   const [lastLiveCheckAt, setLastLiveCheckAt] = useState(null);
+  const [remainingUndraftedCount, setRemainingUndraftedCount] = useState(0);
+  const [syncInProgress, setSyncInProgress] = useState(false);
   const liveSyncInFlightRef = useRef(false);
 
   // Recipients State
@@ -77,6 +79,11 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
   // Poll timer
   const pollTimerRef = useRef(null);
   const liveListenerTimerRef = useRef(null);
+  const activeCampaignIdRef = useRef(null);
+
+  useEffect(() => {
+    activeCampaignIdRef.current = activeCampaignDetail?.id || null;
+  }, [activeCampaignDetail?.id]);
 
   const applyCampaignDetailWithPreservedEdits = useCallback((data) => {
     if (!data) return;
@@ -129,18 +136,50 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
     }
   }, []);
 
+  // Fetch Campaigns List (loads all paginated pages so full campaign history appears)
+  const fetchCampaigns = useCallback(async () => {
+    setLoadingCampaigns(true);
+    try {
+      const allCampaigns = [];
+      for (let page = 1; page <= 20; page += 1) {
+        const res = await api.get(`/email-campaigns/?page=${page}`);
+        if (Array.isArray(res.data)) {
+          allCampaigns.push(...res.data);
+          break;
+        }
+        const pageItems = res.data?.results || [];
+        allCampaigns.push(...pageItems);
+        if (!res.data?.next || pageItems.length === 0) {
+          break;
+        }
+      }
+      setCampaigns(allCampaigns);
+      return allCampaigns;
+    } catch (err) {
+      console.error('Failed to fetch campaigns', err);
+      return [];
+    } finally {
+      setLoadingCampaigns(false);
+    }
+  }, []);
+
   // Live Sent-Mail Check & Automatic AI Drafting Sync
   const runLiveSentMailSync = useCallback(async ({ autoDraft = true, silent = true, campaignId = null } = {}) => {
     if (liveSyncInFlightRef.current) return;
     liveSyncInFlightRef.current = true;
     if (!silent) setLoadingUnsent(true);
     try {
-      const res = await api.post('/email-campaigns/live-sync/', {
-        auto_draft: autoDraft,
-        campaign_id: campaignId,
-        user_prompt: aiPrompt,
-        tone: aiTone,
-      });
+      const res = await api.post(
+        '/email-campaigns/live-sync/',
+        {
+          auto_draft: autoDraft,
+          campaign_id: campaignId,
+          user_prompt: aiPrompt,
+          tone: aiTone,
+          max_drafts: 10,
+        },
+        { timeout: 120000 }
+      );
       const data = res.data || {};
       const recs = data.records || [];
       setUnsentAnalysis({
@@ -155,18 +194,27 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
         const kept = prev.filter(id => validSet.has(id));
         return kept.length > 0 ? kept : Array.from(validSet);
       });
+      setRemainingUndraftedCount(data.remaining_undrafted_count ?? 0);
+      setSyncInProgress(Boolean(data.sync_in_progress));
       if (data.checked_at) {
         setLastLiveCheckAt(data.checked_at);
       }
-      if (data.active_campaign) {
+      if (
+        data.active_campaign &&
+        (!activeCampaignIdRef.current || String(activeCampaignIdRef.current) === String(data.active_campaign.id))
+      ) {
         applyCampaignDetailWithPreservedEdits(data.active_campaign);
       }
       if (data.pruned_sent_drafts > 0) {
         toast.info(`Live Sent-Mail Check: Removed ${data.pruned_sent_drafts} draft(s) for outreach companies that already received an email.`);
-        fetchCampaigns();
+      }
+      if (data.deduplicated_drafts > 0) {
+        toast.info(`Cleaned up ${data.deduplicated_drafts} duplicate draft(s).`);
       }
       if (data.newly_drafted_count > 0) {
         toast.success(`Live AI Drafter: Automatically drafted ${data.newly_drafted_count} customized email(s) for unsent outreach records!`);
+      }
+      if (data.newly_drafted_count > 0 || data.pruned_sent_drafts > 0 || data.deduplicated_drafts > 0) {
         fetchCampaigns();
       }
     } catch (err) {
@@ -175,7 +223,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
       liveSyncInFlightRef.current = false;
       if (!silent) setLoadingUnsent(false);
     }
-  }, [aiPrompt, aiTone, applyCampaignDetailWithPreservedEdits]);
+  }, [aiPrompt, aiTone, applyCampaignDetailWithPreservedEdits, fetchCampaigns]);
 
   // Fetch Directory
   const fetchDirectory = useCallback(async (searchQuery = '') => {
@@ -187,22 +235,6 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
       console.error('Failed to load recipient directory', err);
     } finally {
       setLoadingDirectory(false);
-    }
-  }, []);
-
-  // Fetch Campaigns List
-  const fetchCampaigns = useCallback(async () => {
-    setLoadingCampaigns(true);
-    try {
-      const res = await api.get('/email-campaigns/');
-      const list = res.data?.results || res.data || [];
-      setCampaigns(list);
-      return list;
-    } catch (err) {
-      console.error('Failed to fetch campaigns', err);
-      return [];
-    } finally {
-      setLoadingCampaigns(false);
     }
   }, []);
 
@@ -566,7 +598,8 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
       });
 
       const res = await api.post('/email-campaigns/generate-ai-drafts/', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 300000,
       });
 
       toast.dismiss(toastId);
@@ -1103,6 +1136,14 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
                         <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
                           {activeCampaignDetail.sent_count} Sent
                         </span>
+                        {(remainingUndraftedCount > 0 || syncInProgress) && (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            {remainingUndraftedCount > 0
+                              ? `Auto-drafting remaining ${remainingUndraftedCount} unsent...`
+                              : 'Syncing drafts...'}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-slate-500 mt-0.5">
                         Review the 10 customized email drafts in each section below. Click a section&apos;s Send button to start sending that section&apos;s 10 emails with a 90-second interval.
@@ -1112,7 +1153,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
                     {/* Campaign Selector if multiple campaigns exist */}
                     {campaigns.length > 1 && (
                       <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-500 font-medium">Campaign:</span>
+                        <span className="text-xs text-slate-500 font-medium">Campaign ({campaigns.length}):</span>
                         <select
                           value={activeCampaignDetail.id}
                           onChange={(e) => {
@@ -1123,7 +1164,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
                         >
                           {campaigns.map(c => (
                             <option key={c.id} value={c.id}>
-                              {c.name} ({c.sent_count}/{c.total_count} sent)
+                              {c.name} ({c.sent_count}/{c.total_count} sent){c.created_by_name ? ` — ${c.created_by_name}` : ''}
                             </option>
                           ))}
                         </select>
@@ -1804,7 +1845,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
               {/* Left Column: Campaigns List */}
               <div className="lg:col-span-4 flex flex-col h-full bg-white rounded-2xl border border-slate-200 p-4 shadow-xs overflow-hidden">
                 <div className="flex items-center justify-between mb-3 shrink-0">
-                  <h3 className="font-bold text-slate-900 text-sm">Campaigns</h3>
+                  <h3 className="font-bold text-slate-900 text-sm">Campaigns ({campaigns.length})</h3>
                   <button
                     type="button"
                     onClick={fetchCampaigns}
@@ -1858,7 +1899,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
                           </div>
                           <p className="text-[11px] text-slate-500 truncate mb-2">{c.subject}</p>
                           <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
-                            <span>{c.sent_count}/{c.total_count} sent</span>
+                            <span>{c.sent_count}/{c.total_count} sent{c.created_by_name ? ` • ${c.created_by_name}` : ''}</span>
                             <span>{new Date(c.created_at).toLocaleDateString()}</span>
                           </div>
                         </div>

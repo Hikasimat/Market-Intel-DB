@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   Mail, RefreshCw, Search, Eye, X, Paperclip, Sparkles,
@@ -32,6 +32,149 @@ const formatTimestamp = (iso) => {
     return iso;
   }
 };
+
+const decodeHtmlEntities = (text) => {
+  if (!text) return '';
+  if (typeof document !== 'undefined') {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = text;
+    return ta.value;
+  }
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+};
+
+const formatReadableEmailText = (raw) => {
+  if (!raw) return '';
+  let text = String(raw);
+  text = text.replace(/<!--[\s\S]*?-->/g, ' ');
+  text = text.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ');
+  text = text.replace(/<br\s*\/?>/gi, '\n');
+  text = text.replace(/<\/(?:p|div|tr|li|h[1-6]|blockquote)>/gi, '\n');
+  text = text.replace(/<[^>]+>/g, ' ');
+  text = decodeHtmlEntities(text);
+  // Strip invisible email preheader spacers (e.g., &#847; / U+034F, zero-width chars) and leftover comment arrows
+  text = text.replace(/[\u034f\u200b-\u200f\u00ad\ufeff\u2060]/g, '');
+  text = text.replace(/\u00a0/g, ' ');
+  text = text.replace(/[\u2028\u2029]/g, '\n');
+  text = text.replace(/(?:^|\s)--!?>\s*/g, ' ');
+  text = text
+    .split('\n')
+    .map((line) => line.replace(/[ \t]{2,}/g, ' ').trim())
+    .join('\n');
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text;
+};
+
+const buildSanitizedEmailHtmlDoc = (rawHtml) => {
+  if (!rawHtml) return '';
+  let clean = String(rawHtml)
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<(iframe|object|embed)\b[\s\S]*?<\/\1>/gi, '')
+    .replace(/<img[^>]*?email-tracking[^>]*?>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|src)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, '$1="#"')
+    .replace(/&#(?:847|x34f|8204|8203|65279);|&(?:zwnj|zwj);/gi, '')
+    .replace(/(?:\s*&nbsp;\s*){4,}/gi, ' ');
+
+  const baseAndStyle =
+    '<base target="_blank" rel="noopener noreferrer" />' +
+    '<style>' +
+    'html, body { margin: 0; padding: 14px; background: #ffffff; color: #1e293b; ' +
+    'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; ' +
+    'font-size: 13.5px; line-height: 1.6; word-break: break-word; overflow-x: auto; } ' +
+    'img { max-width: 100% !important; height: auto !important; } ' +
+    'table { max-width: 100% !important; } ' +
+    'a { color: #0284c7; } ' +
+    'pre { white-space: pre-wrap; }' +
+    '</style>';
+
+  if (/<head[\s>]/i.test(clean)) {
+    return clean.replace(/<head([^>]*)>/i, `<head$1>${baseAndStyle}`);
+  }
+  return `<!DOCTYPE html><html><head><meta charset="utf-8" />${baseAndStyle}</head><body>${clean}</body></html>`;
+};
+
+function ReadableEmailBody({ message }) {
+  const hasHtml = Boolean(message?.body_html && String(message.body_html).trim());
+  const [viewMode, setViewMode] = useState(hasHtml ? 'html' : 'text');
+  const [frameHeight, setFrameHeight] = useState(260);
+  const iframeRef = useRef(null);
+
+  useEffect(() => {
+    setViewMode(hasHtml ? 'html' : 'text');
+    setFrameHeight(260);
+  }, [message?.id, hasHtml]);
+
+  const handleIframeLoad = () => {
+    try {
+      const doc = iframeRef.current?.contentDocument || iframeRef.current?.contentWindow?.document;
+      if (doc?.body) {
+        const measured = Math.max(doc.body.scrollHeight || 0, doc.documentElement?.scrollHeight || 0);
+        if (measured > 0) {
+          setFrameHeight(Math.min(Math.max(measured + 20, 120), 560));
+        }
+      }
+    } catch {
+      // Cross-origin fallback retains default frame height
+    }
+  };
+
+  const cleanedPlainText = formatReadableEmailText(message?.body_text || message?.snippet);
+
+  return (
+    <div className="space-y-2">
+      {hasHtml && (
+        <div className="flex justify-end">
+          <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200 text-[10px] font-bold">
+            <button
+              type="button"
+              onClick={() => setViewMode('html')}
+              className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                viewMode === 'html' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              Formatted View
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('text')}
+              className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                viewMode === 'text' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              Plain Text
+            </button>
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'html' && hasHtml ? (
+        <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+          <iframe
+            ref={iframeRef}
+            onLoad={handleIframeLoad}
+            srcDoc={buildSanitizedEmailHtmlDoc(message.body_html)}
+            sandbox="allow-same-origin allow-popups"
+            style={{ width: '100%', height: `${frameHeight}px`, border: 'none', display: 'block', background: '#ffffff' }}
+            title={`Email Content ${message.id || ''}`}
+          />
+        </div>
+      ) : (
+        <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+          {cleanedPlainText || '(No plain text content)'}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function ManagerEmailActivitySection({ selectedDate }) {
   const dispatch = useDispatch();
@@ -430,7 +573,7 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
                       )}
                       <span className="truncate">{t.subject || '(No Subject)'}</span>
                     </div>
-                    <p className="text-[11px] text-slate-500 line-clamp-2 mt-0.5">{t.last_snippet || '—'}</p>
+                    <p className="text-[11px] text-slate-500 line-clamp-2 mt-0.5">{formatReadableEmailText(t.last_snippet) || '—'}</p>
                   </td>
                   <td className="px-4 py-3 align-top max-w-[300px]">
                     {t.summary_text ? (
@@ -614,10 +757,8 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
                             <Clock className="w-3 h-3" /> {formatTimestamp(m.sent_at || m.created_at)}
                           </span>
                         </div>
-                        <div className="text-xs font-semibold text-slate-700 mb-1">{m.subject}</div>
-                        <div className="text-sm text-slate-700 whitespace-pre-wrap break-words">
-                          {m.body_text || m.snippet || '(No plain text content)'}
-                        </div>
+                        <div className="text-xs font-semibold text-slate-700 mb-2">{m.subject}</div>
+                        <ReadableEmailBody message={m} />
                         {Array.isArray(m.attachments_metadata) && m.attachments_metadata.length > 0 && (
                           <div className="mt-3 pt-2 border-t border-slate-100 flex flex-wrap gap-2">
                             {m.attachments_metadata.map((att, idx) => (

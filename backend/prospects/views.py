@@ -2666,10 +2666,14 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
                 user=request.user,
                 auto_draft=True,
                 campaign_id=campaign_id,
+                max_drafts=10,
             )
             payload = dict(sync_res['unsent_analysis'])
             payload['pruned_sent_drafts'] = sync_res['pruned_sent_drafts']
+            payload['deduplicated_drafts'] = sync_res['deduplicated_drafts']
             payload['newly_drafted_count'] = sync_res['newly_drafted_count']
+            payload['remaining_undrafted_count'] = sync_res['remaining_undrafted_count']
+            payload['sync_in_progress'] = sync_res['sync_in_progress']
             payload['checked_at'] = sync_res['checked_at']
             if sync_res['active_campaign']:
                 payload['active_campaign'] = EmailCampaignDetailSerializer(sync_res['active_campaign']).data
@@ -2701,6 +2705,11 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
         campaign_id = request.data.get('campaign_id') or request.query_params.get('campaign_id') or None
         user_prompt = (request.data.get('user_prompt') or request.query_params.get('user_prompt') or '').strip()
         tone = (request.data.get('tone') or request.query_params.get('tone') or 'professional').strip()
+        max_drafts_raw = request.data.get('max_drafts', request.query_params.get('max_drafts', 10))
+        try:
+            max_drafts = max(1, min(50, int(max_drafts_raw)))
+        except (TypeError, ValueError):
+            max_drafts = 10
 
         sync_res = sync_live_unsent_outreach_ai_drafts(
             user=request.user,
@@ -2708,13 +2717,17 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
             campaign_id=campaign_id,
             user_prompt=user_prompt,
             tone=tone,
+            max_drafts=max_drafts,
         )
         active_camp = sync_res['active_campaign']
         active_camps = sync_res.get('active_campaigns') or ([active_camp] if active_camp else [])
         return Response({
             **sync_res['unsent_analysis'],
             'pruned_sent_drafts': sync_res['pruned_sent_drafts'],
+            'deduplicated_drafts': sync_res['deduplicated_drafts'],
             'newly_drafted_count': sync_res['newly_drafted_count'],
+            'remaining_undrafted_count': sync_res['remaining_undrafted_count'],
+            'sync_in_progress': sync_res['sync_in_progress'],
             'checked_at': sync_res['checked_at'],
             'active_campaign': EmailCampaignDetailSerializer(active_camp).data if active_camp else None,
             'active_campaigns': EmailCampaignDetailSerializer(active_camps, many=True).data,

@@ -9,8 +9,10 @@ from rest_framework.test import APIClient
 
 from accounts.models import GoogleMailCredentials, UserProfile
 from prospects.campaign_service import (
+    _LIVE_SYNC_LOCK,
     create_campaign,
     create_ai_drafted_campaign,
+    deduplicate_draft_campaign_recipients,
     get_unsent_outreach_records,
     sync_live_unsent_outreach_ai_drafts,
     send_campaign_section,
@@ -800,3 +802,325 @@ class BulkEmailCampaignTests(TestCase):
         self.assertEqual(latest['section_number'], 1)
         self.assertIn(first_rec.prospect.company_name, latest['subject'])
         self.assertIn(first_rec.prospect.company_name, latest['body'])
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_live_sync_concurrency_lock_prevents_duplicate_campaigns(self, mock_gen):
+        """Test 20: Active live-sync lock skips concurrent auto-draft mutation safely."""
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+        Prospect.objects.create(
+            company_name='LockGuard Co',
+            country_head_office='UAE',
+            complete_address='Dubai',
+            official_email_address='lock@guard.ae',
+            primary_industries='Tech',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=self.user.username,
+        )
+
+        self.assertTrue(_LIVE_SYNC_LOCK.acquire(blocking=False))
+        try:
+            res = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True)
+            self.assertTrue(res['sync_in_progress'])
+            self.assertEqual(res['newly_drafted_count'], 0)
+            self.assertEqual(EmailCampaign.objects.count(), 0)
+            self.assertEqual(mock_gen.call_count, 0)
+        finally:
+            _LIVE_SYNC_LOCK.release()
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_live_sync_sequential_unique_naming_never_collides_or_skips(self, mock_gen):
+        """Test 21: Sequential Campaign N naming ignores completed count shrink and never skips or collides."""
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+
+        EmailCampaign.objects.create(
+            name='AI Outreach Campaign (Unsent Mail Auto-Draft)',
+            created_by=self.user,
+            sender_email='lq@example.com',
+            subject='Legacy Done',
+            body='Body',
+            status=EmailCampaign.Status.COMPLETED,
+        )
+
+        for idx in range(1, 56):
+            Prospect.objects.create(
+                company_name=f'Seq Co {idx:03d}',
+                country_head_office='UAE',
+                complete_address=f'Addr {idx}',
+                official_email_address=f'seq{idx:03d}@seqco.ae',
+                primary_industries='Energy',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=self.user.username,
+            )
+
+        sync1 = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True)
+        self.assertEqual(sync1['newly_drafted_count'], 55)
+        self.assertEqual(sync1['remaining_undrafted_count'], 0)
+
+        camp1 = EmailCampaign.objects.get(name='AI Outreach Campaign — Campaign 1')
+        camp2 = EmailCampaign.objects.get(name='AI Outreach Campaign — Campaign 2')
+        self.assertEqual(camp1.recipients.count(), 50)
+        self.assertEqual(camp2.recipients.count(), 5)
+
+        # Complete Campaign 1 (with SENT recipients) and add 50 more prospects -> 45 fill Campaign 2, 5 overflow into Campaign 3 (no collision!)
+        camp1.recipients.update(status=EmailCampaignRecipient.Status.SENT)
+        camp1.status = EmailCampaign.Status.COMPLETED
+        camp1.save(update_fields=['status'])
+
+        for idx in range(56, 106):
+            Prospect.objects.create(
+                company_name=f'Seq Co {idx:03d}',
+                country_head_office='UAE',
+                complete_address=f'Addr {idx}',
+                official_email_address=f'seq{idx:03d}@seqco.ae',
+                primary_industries='Energy',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=self.user.username,
+            )
+
+        sync2 = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=True)
+        self.assertEqual(sync2['newly_drafted_count'], 50)
+        camp2.refresh_from_db()
+        camp3 = EmailCampaign.objects.get(name='AI Outreach Campaign — Campaign 3')
+        self.assertEqual(camp2.recipients.count(), 50)
+        self.assertEqual(camp3.recipients.count(), 5)
+
+        all_names = list(EmailCampaign.objects.values_list('name', flat=True))
+        self.assertEqual(len(all_names), len(set(all_names)))
+
+    def test_deduplicate_draft_campaign_recipients_cleans_duplicate_drafts_and_empty_campaigns(self):
+        """Test 22: Duplicate DRAFT recipients across open campaigns are pruned and empty duplicate campaigns removed."""
+        prospects = []
+        for idx in range(1, 4):
+            prospects.append(
+                Prospect.objects.create(
+                    company_name=f'Dedup Co {idx}',
+                    country_head_office='UAE',
+                    complete_address='Dubai',
+                    official_email_address=f'dedup{idx}@example.ae',
+                    primary_industries='Tech',
+                    company_structure='Parent',
+                    operational_status='Active',
+                    primary_offering_type='Products',
+                    created_by=self.user.username,
+                )
+            )
+
+        c_done = EmailCampaign.objects.create(
+            name='Completed Ref Campaign',
+            created_by=self.user,
+            sender_email='lq@example.com',
+            subject='Done',
+            body='Body',
+            status=EmailCampaign.Status.COMPLETED,
+        )
+        c_open_1 = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 2',
+            created_by=self.user,
+            sender_email='lq@example.com',
+            subject='Subj 1',
+            body='Body 1',
+            status=EmailCampaign.Status.DRAFT,
+        )
+        c_open_2 = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 2',
+            created_by=self.user,
+            sender_email='lq@example.com',
+            subject='Subj 2',
+            body='Body 2',
+            status=EmailCampaign.Status.DRAFT,
+        )
+
+        for idx, p in enumerate(prospects):
+            EmailCampaignRecipient.objects.create(
+                campaign=c_open_1,
+                email_address=p.official_email_address,
+                prospect=p,
+                section_number=1,
+                queue_order=idx,
+                status=EmailCampaignRecipient.Status.DRAFT,
+            )
+            EmailCampaignRecipient.objects.create(
+                campaign=c_open_2,
+                email_address=p.official_email_address,
+                prospect=p,
+                section_number=1,
+                queue_order=idx,
+                status=EmailCampaignRecipient.Status.DRAFT,
+            )
+
+        res = sync_live_unsent_outreach_ai_drafts(user=self.user, auto_draft=False)
+        self.assertEqual(res['deduplicated_drafts'], 3)
+        self.assertFalse(EmailCampaign.objects.filter(id=c_open_2.id).exists())
+        self.assertTrue(EmailCampaign.objects.filter(id=c_open_1.id).exists())
+        self.assertTrue(EmailCampaign.objects.filter(id=c_done.id).exists())
+        c_open_1.refresh_from_db()
+        self.assertEqual(c_open_1.recipients.count(), 3)
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_manager_live_sync_does_not_duplicate_pre_user_open_drafts(self, mock_gen):
+        """Test 23: Manager live-sync considers all open campaigns so PRE users' drafts are never double-drafted."""
+        self.prospect.delete()
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+
+        pre_user = User.objects.create_user(username='pre_owner', email='pre@example.com', password='password123')
+        pre_user.profile.role = 'PRE'
+        pre_user.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=pre_user,
+            email='pre@example.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        manager_user = User.objects.create_user(username='mgr_user', email='mgr@example.com', password='password123')
+        manager_user.profile.role = 'MANAGER'
+        manager_user.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=manager_user,
+            email='mgr@example.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        p_pre = Prospect.objects.create(
+            company_name='PRE Owned Co',
+            country_head_office='UAE',
+            complete_address='Dubai',
+            official_email_address='preowned@co.ae',
+            primary_industries='Tech',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=pre_user.username,
+        )
+        p_mgr = Prospect.objects.create(
+            company_name='Manager Owned Co',
+            country_head_office='UAE',
+            complete_address='Dubai',
+            official_email_address='mgrowned@co.ae',
+            primary_industries='Tech',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=manager_user.username,
+        )
+        p_new = Prospect.objects.create(
+            company_name='Brand New Unsent Co',
+            country_head_office='UAE',
+            complete_address='Dubai',
+            official_email_address='brandnew@co.ae',
+            primary_industries='Tech',
+            company_structure='Parent',
+            operational_status='Active',
+            primary_offering_type='Products',
+            created_by=pre_user.username,
+        )
+
+        c_pre = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 1',
+            created_by=pre_user,
+            sender_email='pre@example.com',
+            subject='PRE',
+            body='Body',
+            status=EmailCampaign.Status.DRAFT,
+        )
+        EmailCampaignRecipient.objects.create(
+            campaign=c_pre,
+            email_address=p_pre.official_email_address,
+            prospect=p_pre,
+            section_number=1,
+            queue_order=0,
+            status=EmailCampaignRecipient.Status.DRAFT,
+        )
+
+        c_mgr = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 2',
+            created_by=manager_user,
+            sender_email='mgr@example.com',
+            subject='MGR',
+            body='Body',
+            status=EmailCampaign.Status.DRAFT,
+        )
+        EmailCampaignRecipient.objects.create(
+            campaign=c_mgr,
+            email_address=p_mgr.official_email_address,
+            prospect=p_mgr,
+            section_number=1,
+            queue_order=0,
+            status=EmailCampaignRecipient.Status.DRAFT,
+        )
+
+        res = sync_live_unsent_outreach_ai_drafts(user=manager_user, auto_draft=True)
+        self.assertEqual(res['newly_drafted_count'], 1)
+        self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_pre).count(), 1)
+        self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_mgr).count(), 1)
+        self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_new).count(), 1)
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_live_sync_endpoint_respects_max_drafts_and_returns_remaining(self, mock_gen):
+        """Test 24: live-sync endpoint processes incremental batches (max_drafts) and reports remaining_undrafted_count."""
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+
+        for idx in range(1, 6):
+            Prospect.objects.create(
+                company_name=f'Batch Co {idx}',
+                country_head_office='UAE',
+                complete_address='Dubai',
+                official_email_address=f'batch{idx}@example.ae',
+                primary_industries='Tech',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=self.user.username,
+            )
+
+        r1 = self.client.post('/api/email-campaigns/live-sync/', {'auto_draft': True, 'max_drafts': 2}, format='json')
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(r1.data['newly_drafted_count'], 2)
+        self.assertEqual(r1.data['remaining_undrafted_count'], 3)
+        self.assertFalse(r1.data['sync_in_progress'])
+
+        r2 = self.client.post('/api/email-campaigns/live-sync/', {'auto_draft': True, 'max_drafts': 2}, format='json')
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.data['newly_drafted_count'], 2)
+        self.assertEqual(r2.data['remaining_undrafted_count'], 1)
+        self.assertFalse(r2.data['sync_in_progress'])
+
+        r3 = self.client.post('/api/email-campaigns/live-sync/', {'auto_draft': True, 'max_drafts': 2}, format='json')
+        self.assertEqual(r3.status_code, 200)
+        self.assertEqual(r3.data['newly_drafted_count'], 1)
+        self.assertEqual(r3.data['remaining_undrafted_count'], 0)
+        self.assertFalse(r3.data['sync_in_progress'])
+
+        self.assertEqual(EmailCampaign.objects.count(), 1)
+        self.assertEqual(EmailCampaign.objects.first().recipients.count(), 5)

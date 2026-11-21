@@ -198,6 +198,7 @@ def _build_pre_audit_samples(authorized_users, authorized_usernames, day_start, 
             item_data.update({
                 'verification_status': lq_obj.verification_status if lq_obj else None,
                 'qualification_status': lq_obj.qualification_status if lq_obj else None,
+                'email_status': lq_obj.email_status if lq_obj else 'Not Sent',
                 'attended_meeting': lq_obj.attended_meeting if lq_obj else False,
                 'attended_at': lq_obj.attended_at.isoformat() if lq_obj and lq_obj.attended_at else None,
                 'decision_at': lq_obj.decision_at.isoformat() if lq_obj and lq_obj.decision_at else None,
@@ -306,13 +307,12 @@ def manager_dashboard(request):
 
     funnel_counts = {
         'total': 0,
-        'unqualified': 0,
-        'hot_lead': 0,
-        'qualified': 0,
         'lead_qualified': 0,
-        'nurture': 0,
+        'received_response': 0,
+        'waiting_for_response': 0,
+        'call_follow_up': 0,
+        'ready_for_outreach': 0,
         'lead_freeze': 0,
-        'disqualified': 0,
     }
     total_lq_by_uid = _empty_counter()
 
@@ -350,31 +350,36 @@ def manager_dashboard(request):
             if uid is not None:
                 total_prospects_by_uid[uid] += row['c']
 
-        # 2. Live qualification funnel & per-PRE total lead qualified
-        funnel_key_map = {
-            LeadQualification.QualificationStatus.UNQUALIFIED: 'unqualified',
-            LeadQualification.QualificationStatus.HOT_LEAD: 'hot_lead',
-            LeadQualification.QualificationStatus.QUALIFIED: 'qualified',
-            LeadQualification.QualificationStatus.LEAD_QUALIFIED: 'lead_qualified',
-            LeadQualification.QualificationStatus.NURTURE: 'nurture',
-            LeadQualification.QualificationStatus.LEAD_FREEZE: 'lead_freeze',
-            LeadQualification.QualificationStatus.DISQUALIFIED: 'disqualified',
-        }
+        # 2. Live Outreach & Pipeline Funnel + per-PRE total lead qualified
+        # Matches real Outreach statuses in LqPipelinePage / LqWorkspaceModal
+        prospect_ids_with_calls = set(
+            CallActivity.objects.filter(prospect__created_by__in=authorized_usernames)
+            .values_list('prospect_id', flat=True)
+            .distinct()
+        )
         for row in (
             LeadQualification.objects.filter(prospect__created_by__in=authorized_usernames)
-            .values('qualification_status', 'prospect__created_by')
-            .annotate(c=Count('id'))
+            .values('prospect_id', 'qualification_status', 'email_status', 'prospect__created_by')
         ):
             q_status = row['qualification_status']
-            cnt = row['c']
-            funnel_counts['total'] += cnt
-            key = funnel_key_map.get(q_status)
-            if key:
-                funnel_counts[key] += cnt
+            e_status = (row['email_status'] or '').strip().lower()
+            funnel_counts['total'] += 1
+
             if q_status == LeadQualification.QualificationStatus.LEAD_QUALIFIED:
+                funnel_counts['lead_qualified'] += 1
                 uid = username_to_uid.get(row['prospect__created_by'])
                 if uid is not None:
-                    total_lq_by_uid[uid] += cnt
+                    total_lq_by_uid[uid] += 1
+            elif q_status == LeadQualification.QualificationStatus.LEAD_FREEZE:
+                funnel_counts['lead_freeze'] += 1
+            elif e_status == 'received response':
+                funnel_counts['received_response'] += 1
+            elif e_status in ('waiting for response', 'sent'):
+                funnel_counts['waiting_for_response'] += 1
+            elif row['prospect_id'] in prospect_ids_with_calls:
+                funnel_counts['call_follow_up'] += 1
+            else:
+                funnel_counts['ready_for_outreach'] += 1
 
         # 3. Qualification decisions on reporting date
         seen_decision_ids = set()

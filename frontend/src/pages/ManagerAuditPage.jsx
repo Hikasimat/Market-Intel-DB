@@ -319,12 +319,20 @@ const ManagerAuditPage = () => {
                                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                     prospect.qualification_status === 'Lead Qualified'
                                       ? 'bg-emerald-100 text-emerald-700'
-                                      : prospect.qualification_status === 'Disqualified'
+                                      : prospect.qualification_status === 'Lead Freeze'
                                       ? 'bg-rose-100 text-rose-700'
-                                      : 'bg-slate-100 text-slate-700'
+                                      : prospect.email_status && prospect.email_status !== 'Not Sent'
+                                      ? 'bg-sky-100 text-sky-700'
+                                      : 'bg-indigo-50 text-indigo-700'
                                   }`}
                                 >
-                                  {prospect.qualification_status || 'Unqualified'}
+                                  {prospect.qualification_status === 'Lead Qualified'
+                                    ? 'Lead Qualified'
+                                    : prospect.qualification_status === 'Lead Freeze'
+                                    ? 'Lead Not Qualified'
+                                    : prospect.email_status && prospect.email_status !== 'Not Sent'
+                                    ? prospect.email_status
+                                    : 'Ready for Outreach'}
                                 </span>
                                 {prospect.attended_meeting && (
                                   <div className="text-[10px] font-bold text-indigo-600 mt-1">Meeting Attended</div>
