@@ -2671,6 +2671,7 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
             payload = dict(sync_res['unsent_analysis'])
             payload['pruned_sent_drafts'] = sync_res['pruned_sent_drafts']
             payload['deduplicated_drafts'] = sync_res['deduplicated_drafts']
+            payload['reconciled_ownership_count'] = sync_res['reconciled_ownership_count']
             payload['newly_drafted_count'] = sync_res['newly_drafted_count']
             payload['remaining_undrafted_count'] = sync_res['remaining_undrafted_count']
             payload['sync_in_progress'] = sync_res['sync_in_progress']
@@ -2725,6 +2726,7 @@ class EmailCampaignViewSet(viewsets.ModelViewSet):
             **sync_res['unsent_analysis'],
             'pruned_sent_drafts': sync_res['pruned_sent_drafts'],
             'deduplicated_drafts': sync_res['deduplicated_drafts'],
+            'reconciled_ownership_count': sync_res['reconciled_ownership_count'],
             'newly_drafted_count': sync_res['newly_drafted_count'],
             'remaining_undrafted_count': sync_res['remaining_undrafted_count'],
             'sync_in_progress': sync_res['sync_in_progress'],

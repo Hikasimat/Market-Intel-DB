@@ -1079,6 +1079,7 @@ class BulkEmailCampaignTests(TestCase):
         self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_pre).count(), 1)
         self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_mgr).count(), 1)
         self.assertEqual(EmailCampaignRecipient.objects.filter(prospect=p_new).count(), 1)
+        self.assertEqual(EmailCampaignRecipient.objects.get(prospect=p_new).campaign.created_by, pre_user)
 
     @mock.patch('email_ai.services.generate_personalized_email')
     def test_live_sync_endpoint_respects_max_drafts_and_returns_remaining(self, mock_gen):
@@ -1124,3 +1125,211 @@ class BulkEmailCampaignTests(TestCase):
 
         self.assertEqual(EmailCampaign.objects.count(), 1)
         self.assertEqual(EmailCampaign.objects.first().recipients.count(), 5)
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_manager_with_zero_entered_prospects_never_gets_campaign_created_on_live_sync(self, mock_gen):
+        """Test 25: A Manager who entered 0 prospects never gets a campaign created under them during live-sync."""
+        self.prospect.delete()
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+
+        pre_user = User.objects.create_user(username='mohan_user', email='mohan@example.com', password='password123')
+        pre_user.profile.role = 'PRE'
+        pre_user.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=pre_user,
+            email='mohan@example.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        manager_user = User.objects.create_user(username='saif_manager', email='saif@example.com', password='password123')
+        manager_user.profile.role = 'MANAGER'
+        manager_user.profile.save()
+
+        for idx in range(1, 4):
+            Prospect.objects.create(
+                company_name=f'Mohan Entered Co {idx}',
+                country_head_office='UAE',
+                complete_address='Dubai',
+                official_email_address=f'mohan{idx}@co.ae',
+                primary_industries='Tech',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=pre_user.username,
+            )
+
+        res = sync_live_unsent_outreach_ai_drafts(user=manager_user, auto_draft=True)
+        self.assertEqual(res['newly_drafted_count'], 3)
+        self.assertEqual(EmailCampaign.objects.filter(created_by=manager_user).count(), 0)
+        self.assertEqual(EmailCampaign.objects.filter(created_by=pre_user).count(), 1)
+        self.assertEqual(EmailCampaign.objects.get(created_by=pre_user).recipients.count(), 3)
+
+    def test_reconcile_draft_campaign_ownership_reassigns_existing_manager_drafts_to_prospect_creator(self):
+        """Test 26: Pure-DRAFT manager campaigns (single and mixed creators) are reassigned to actual prospect creators while COMPLETED campaigns stay untouched."""
+        self.prospect.delete()
+
+        pre_user = User.objects.create_user(username='creator_a', email='creatora@example.com', password='password123')
+        pre_user.profile.role = 'PRE'
+        pre_user.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=pre_user,
+            email='creatora@gmail.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        pre_user_2 = User.objects.create_user(username='creator_b', email='creatorb@example.com', password='password123')
+        pre_user_2.profile.role = 'PRE'
+        pre_user_2.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=pre_user_2,
+            email='creatorb@gmail.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        manager_user = User.objects.create_user(username='mgr_rec', email='mgrrec@example.com', password='password123')
+        manager_user.profile.role = 'MANAGER'
+        manager_user.profile.save()
+
+        c21 = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 21',
+            created_by=manager_user,
+            sender_email='mgrrec@example.com',
+            subject='C21',
+            body='Body',
+            status=EmailCampaign.Status.DRAFT,
+        )
+        for idx in range(1, 4):
+            p = Prospect.objects.create(
+                company_name=f'CreatorA Co {idx}',
+                country_head_office='UAE',
+                complete_address='Dubai',
+                official_email_address=f'ca{idx}@example.ae',
+                primary_industries='Tech',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=pre_user.username,
+            )
+            EmailCampaignRecipient.objects.create(
+                campaign=c21,
+                email_address=p.official_email_address,
+                prospect=p,
+                section_number=1,
+                queue_order=idx - 1,
+                status=EmailCampaignRecipient.Status.DRAFT,
+            )
+
+        c22 = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 22',
+            created_by=manager_user,
+            sender_email='mgrrec@example.com',
+            subject='C22',
+            body='Body',
+            status=EmailCampaign.Status.DRAFT,
+        )
+        mixed_specs = [
+            (pre_user, 'ca4@example.ae'),
+            (pre_user, 'ca5@example.ae'),
+            (pre_user_2, 'cb1@example.ae'),
+            (pre_user_2, 'cb2@example.ae'),
+        ]
+        for idx, (creator, email) in enumerate(mixed_specs):
+            p = Prospect.objects.create(
+                company_name=f'Mixed Co {idx}',
+                country_head_office='UAE',
+                complete_address='Dubai',
+                official_email_address=email,
+                primary_industries='Tech',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=creator.username,
+            )
+            EmailCampaignRecipient.objects.create(
+                campaign=c22,
+                email_address=p.official_email_address,
+                prospect=p,
+                section_number=1,
+                queue_order=idx,
+                status=EmailCampaignRecipient.Status.DRAFT,
+            )
+
+        c_done = EmailCampaign.objects.create(
+            name='AI Outreach Campaign — Campaign 10',
+            created_by=manager_user,
+            sender_email='mgrrec@example.com',
+            subject='Done',
+            body='Body',
+            status=EmailCampaign.Status.COMPLETED,
+        )
+
+        res = sync_live_unsent_outreach_ai_drafts(user=manager_user, auto_draft=False)
+        self.assertEqual(res['reconciled_ownership_count'], 7)
+        self.assertEqual(EmailCampaign.objects.filter(created_by=manager_user, status=EmailCampaign.Status.DRAFT).count(), 0)
+        self.assertEqual(EmailCampaignRecipient.objects.filter(campaign__created_by=pre_user).count(), 5)
+        self.assertEqual(EmailCampaignRecipient.objects.filter(campaign__created_by=pre_user_2).count(), 2)
+        c_done.refresh_from_db()
+        self.assertEqual(c_done.created_by, manager_user)
+        c21.refresh_from_db()
+        self.assertEqual(c21.sender_email, 'creatora@gmail.com')
+
+    @mock.patch('email_ai.services.generate_personalized_email')
+    def test_manager_generate_ai_drafts_attributes_campaigns_to_prospect_creators(self, mock_gen):
+        """Test 27: Manual create_ai_drafted_campaigns invoked by a Manager attributes campaigns to each prospect's creator."""
+        self.prospect.delete()
+        mock_gen.side_effect = lambda **kw: {
+            'subject': f"Subj {kw.get('company_name')}",
+            'body': f"Body {kw.get('company_name')}",
+            'provider': 'gemini',
+            'model': 'gemini-flash-lite-latest',
+            'context_used': {},
+        }
+
+        pre_user = User.objects.create_user(username='owner_pre', email='owner@example.com', password='password123')
+        pre_user.profile.role = 'PRE'
+        pre_user.profile.save()
+        GoogleMailCredentials.objects.create(
+            user=pre_user,
+            email='owner@gmail.com',
+            access_token_encrypted='dummy',
+            is_active=True,
+        )
+
+        manager_user = User.objects.create_user(username='mgr_gen', email='mgrgen@example.com', password='password123')
+        manager_user.profile.role = 'MANAGER'
+        manager_user.profile.save()
+
+        pids = []
+        for idx in range(1, 3):
+            p = Prospect.objects.create(
+                company_name=f'Manual Gen Co {idx}',
+                country_head_office='UAE',
+                complete_address='Dubai',
+                official_email_address=f'manual{idx}@example.ae',
+                primary_industries='Tech',
+                company_structure='Parent',
+                operational_status='Active',
+                primary_offering_type='Products',
+                created_by=pre_user.username,
+            )
+            pids.append(str(p.id))
+
+        from prospects.campaign_service import create_ai_drafted_campaigns
+        camps = create_ai_drafted_campaigns(
+            user=manager_user,
+            name='Team Outreach',
+            prospect_ids=pids,
+        )
+        self.assertEqual(EmailCampaign.objects.filter(created_by=manager_user).count(), 0)
+        self.assertEqual(len(camps), 1)
+        self.assertEqual(camps[0].created_by, pre_user)
+        self.assertEqual(camps[0].sender_email, 'owner@gmail.com')

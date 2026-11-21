@@ -214,7 +214,7 @@ export default function BulkCampaignModal({ isOpen = true, onClose, onSelectReci
       if (data.newly_drafted_count > 0) {
         toast.success(`Live AI Drafter: Automatically drafted ${data.newly_drafted_count} customized email(s) for unsent outreach records!`);
       }
-      if (data.newly_drafted_count > 0 || data.pruned_sent_drafts > 0 || data.deduplicated_drafts > 0) {
+      if (data.newly_drafted_count > 0 || data.pruned_sent_drafts > 0 || data.deduplicated_drafts > 0 || data.reconciled_ownership_count > 0) {
         fetchCampaigns();
       }
     } catch (err) {
