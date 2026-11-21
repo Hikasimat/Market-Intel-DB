@@ -53,7 +53,7 @@ const ManagerAuditPage = () => {
         highlighted_fields: reverifyFields,
         manager_notes: reverifyNotes,
       });
-      toast.success('Audit Report sent to PRE user for correction.');
+      toast.success('Audit Report sent to user for correction.');
       setSelectedAuditRecord(null);
       setReverifyFields([]);
       setReverifyNotes('');
@@ -116,13 +116,13 @@ const ManagerAuditPage = () => {
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 md:p-7 flex flex-col md:flex-row items-start md:items-center justify-between gap-5 shadow-sm">
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 text-indigo-100 text-[11px] font-bold uppercase tracking-wider mb-2.5 border border-white/15">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> Unified PRE Quality Assurance
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> Unified User Quality Assurance
           </div>
           <h1 className="text-2xl md:text-3xl font-black text-white tracking-tight">
             Daily Audit &amp; Re-Verification
           </h1>
           <p className="text-slate-300 text-xs sm:text-sm max-w-2xl mt-1">
-            Review sampled prospect records, outreach qualification outcomes, and daily PRE activities in one unified workspace.
+            Review sampled prospect records, outreach qualification outcomes, and daily user activities in one unified workspace.
           </p>
         </div>
 
@@ -155,7 +155,7 @@ const ManagerAuditPage = () => {
       {/* Summary Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
-          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active PREs</p>
+          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active Users</p>
           <p className="text-2xl font-black text-slate-900 mt-1">
             {summary.active_pre_users ?? 0}{' '}
             <span className="text-xs font-semibold text-slate-400">/ {summary.total_pre_users ?? 0}</span>
@@ -238,20 +238,20 @@ const ManagerAuditPage = () => {
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h2 className="text-base font-black text-slate-900">PRE Prospect &amp; Outreach Audit</h2>
+                  <h2 className="text-base font-black text-slate-900">User Prospect &amp; Outreach Audit</h2>
                   <p className="text-xs text-slate-500">
-                    Up to 10 automatically sampled records per active PRE user with qualification status and daily activities.
+                    Up to 10 automatically sampled records per active user with qualification status and daily activities.
                   </p>
                 </div>
                 {allSamples.length > 0 && (
                   <div className="flex items-center gap-2">
-                    <label className="text-xs font-bold text-slate-700">PRE User:</label>
+                    <label className="text-xs font-bold text-slate-700">User:</label>
                     <div className="w-52">
                       <SearchableSelect
                         value={selectedPreUserId}
                         onChange={(val) => setSelectedPreUserId(val || 'ALL')}
                         options={[
-                          { value: 'ALL', label: `All Active PREs (${allSamples.length})` },
+                          { value: 'ALL', label: `All Active Users (${allSamples.length})` },
                           ...allSamples.map((sg) => ({
                             value: String(sg.pre_user_id),
                             label: `${sg.pre_name} (${sg.entered_total})`,
@@ -265,7 +265,7 @@ const ManagerAuditPage = () => {
 
               {visibleSamples.length === 0 ? (
                 <div className="text-center py-12 text-slate-500 text-xs bg-slate-50 rounded-xl border border-slate-100">
-                  No PRE records found for {reportingDate}.
+                  No user records found for {reportingDate}.
                 </div>
               ) : (
                 visibleSamples.map((sampleGroup) => (
@@ -407,7 +407,7 @@ const ManagerAuditPage = () => {
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider text-[10px]">
                         <th className="p-3">Prospect</th>
-                        <th className="p-3">Assigned PRE</th>
+                        <th className="p-3">Assigned User</th>
                         <th className="p-3">Flagged Fields &amp; Notes</th>
                         <th className="p-3">Status</th>
                         <th className="p-3">Timestamps</th>
@@ -473,7 +473,7 @@ const ManagerAuditPage = () => {
                   Audit Record: {selectedAuditRecord.company_name}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Select fields that require correction by the owning PRE user.
+                  Select fields that require correction by the owning user.
                 </p>
               </div>
               <button

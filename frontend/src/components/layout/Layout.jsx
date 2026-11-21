@@ -378,7 +378,7 @@ const Layout = () => {
                         {user.first_name ? `${user.first_name} ${user.last_name || ''}` : user.username}
                       </div>
                       <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider truncate">
-                        {user.role}
+                        {user.role === 'PRE' ? 'User' : user.role}
                       </div>
                     </div>
                   </div>
@@ -502,7 +502,7 @@ const Layout = () => {
                     {user.first_name?.[0] || user.username?.[0] || 'U'}
                   </div>
                   <div className="absolute left-full ml-3 px-2.5 py-1 bg-[#18181b] text-white text-[11px] font-semibold rounded-md shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 whitespace-nowrap flex items-center">
-                    {user.first_name ? `${user.first_name} ${user.last_name || ''}` : user.username} ({user.role})
+                    {user.first_name ? `${user.first_name} ${user.last_name || ''}` : user.username} ({user.role === 'PRE' ? 'User' : user.role})
                     <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 bg-[#18181b] rotate-45" />
                   </div>
                 </div>

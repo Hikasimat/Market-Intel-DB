@@ -222,7 +222,7 @@ const ManagerDashboardPage = () => {
       title: 'Prospects Entered',
       value: summary.prospects_entered ?? 0,
       badge: `${summary.total_prospects ?? 0} total`,
-      sub: `${summary.active_pre_users ?? 0} / ${meta.team_size ?? team.length} PRE active`,
+      sub: `${summary.active_pre_users ?? 0} / ${meta.team_size ?? team.length} users active`,
       icon: Zap,
       color: 'text-indigo-600',
       bg: 'bg-indigo-50',
@@ -309,7 +309,7 @@ const ManagerDashboardPage = () => {
             Manager <span className="text-indigo-600">Real-Time Dashboard</span>
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 font-medium mt-1">
-            Unified PRE pipeline performance, live outreach telemetry, WhatsApp AI monitoring, and daily audit status.
+            Unified user pipeline performance, live outreach telemetry, WhatsApp AI monitoring, and daily audit status.
           </p>
         </div>
 
@@ -613,7 +613,7 @@ const ManagerDashboardPage = () => {
               <div>
                 <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
                   <Users className="w-4 h-4 text-indigo-600" />
-                  PRE Team Live Performance &amp; Channel Health
+                  User Team Live Performance &amp; Channel Health
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   Merged Prospect Research &amp; Outreach accountability for {dashboard.date} (plus live portfolio queues)
@@ -626,7 +626,7 @@ const ManagerDashboardPage = () => {
                     type="text"
                     value={teamSearch}
                     onChange={(e) => setTeamSearch(e.target.value)}
-                    placeholder="Filter PRE user..."
+                    placeholder="Filter user..."
                     className="pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 w-44 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
@@ -650,7 +650,7 @@ const ManagerDashboardPage = () => {
               <table className="min-w-full divide-y divide-slate-100">
                 <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">PRE Member &amp; Integrations</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">User &amp; Integrations</th>
                     <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Prospects</th>
                     <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Qualified</th>
                     <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-500 uppercase tracking-wider">Calls</th>
@@ -665,7 +665,7 @@ const ManagerDashboardPage = () => {
                   {filteredTeam.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="px-6 py-10 text-center text-xs text-slate-400 italic">
-                        No PRE users match the current filter.
+                        No users match the current filter.
                       </td>
                     </tr>
                   ) : (
@@ -779,7 +779,7 @@ const ManagerDashboardPage = () => {
                 Unified Daily Quality Audit &amp; Re-Verification Tracker
               </h2>
               <p className="text-xs text-amber-800 font-medium mt-1">
-                Sample up to 10 prospects per PRE user, inspect outreach &amp; qualification state together, and track{' '}
+                Sample up to 10 prospects per user, inspect outreach &amp; qualification state together, and track{' '}
                 <strong>{summary.pending_audit_reverifications ?? 0}</strong> pending re-verification request(s).
               </p>
             </div>
@@ -870,7 +870,7 @@ const ManagerDashboardPage = () => {
               <table className="min-w-full divide-y divide-slate-100">
                 <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">PRE Owner</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">User Owner</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Session &amp; Phone</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Status</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">AI Auto-Reply</th>
@@ -883,7 +883,7 @@ const ManagerDashboardPage = () => {
                   {waSessions.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-6 py-8 text-center text-xs text-slate-400 italic">
-                        No WhatsApp sessions registered for authorized PRE users.
+                        No WhatsApp sessions registered for authorized users.
                       </td>
                     </tr>
                   ) : (
@@ -964,7 +964,7 @@ const ManagerDashboardPage = () => {
                 <thead className="bg-slate-50">
                   <tr>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Prospect / Contact</th>
-                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Host PRE</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Host User</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Scheduled</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Provider</th>
                     <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-500 uppercase tracking-wider">Rec / Transcript</th>
@@ -1027,7 +1027,7 @@ const ManagerDashboardPage = () => {
                 <div>
                   <h2 className="text-sm font-black text-amber-950 flex items-center gap-2">
                     <ClipboardList className="w-4 h-4 text-amber-600" />
-                    Pending PRE Action Queue
+                    Pending User Action Queue
                   </h2>
                   <p className="text-[11px] text-slate-600 mt-0.5">
                     {tasksOverview.email_reply_pending ?? 0} Email Replies · {tasksOverview.whatsapp_escalation_pending ?? 0} WhatsApp Escalations ·{' '}

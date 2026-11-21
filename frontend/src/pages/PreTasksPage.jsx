@@ -98,10 +98,10 @@ const PreTasksPage = () => {
     setCompletingPreTaskId(taskId);
     try {
       await api.post(`/pre-tasks/${taskId}/complete/`);
-      toast.success('PRE task marked as completed.');
+      toast.success('Task marked as completed.');
       loadPreTasks();
     } catch (err) {
-      toast.error(err?.response?.data?.error || 'Failed to complete PRE task.');
+      toast.error(err?.response?.data?.error || 'Failed to complete task.');
     } finally {
       setCompletingPreTaskId(null);
     }
@@ -257,7 +257,7 @@ const PreTasksPage = () => {
 
         {isManager && availableUsers.length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
-            <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Assigned PRE:</label>
+            <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Assigned User:</label>
             <div className="w-48"><SearchableSelect
               value={managerUserFilter}
               onChange={(val) => setManagerUserFilter(val)}
@@ -315,7 +315,7 @@ const PreTasksPage = () => {
                     <td className="px-3.5 py-2.5 align-top">
                       <div className="flex flex-col gap-1">
                         <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-100 w-max">
-                          <span className="text-[9px] font-bold text-indigo-700 uppercase">Assigned PRE:</span>
+                          <span className="text-[9px] font-bold text-indigo-700 uppercase">Assigned User:</span>
                           <span className="text-[10px] font-bold text-slate-800">{task.prospect.created_by || 'Unknown'}</span>
                         </div>
                         <div className="text-[9px] text-slate-500 font-medium">
@@ -376,7 +376,7 @@ const PreTasksPage = () => {
               <tr className="bg-slate-50/60 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-100">
                 <th className="px-3.5 py-2">Source & Contact</th>
                 <th className="px-3.5 py-2">Task & Conversation History</th>
-                {isManager && <th className="px-3.5 py-2">Assigned PRE</th>}
+                {isManager && <th className="px-3.5 py-2">Assigned User</th>}
                 <th className="px-3.5 py-2 text-right">Actions</th>
               </tr>
             </thead>
@@ -464,7 +464,7 @@ const PreTasksPage = () => {
                     {isManager && (
                       <td className="px-3.5 py-2.5 align-top">
                         <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-100">
-                          <span className="text-[9px] font-bold text-indigo-700 uppercase">PRE:</span>
+                          <span className="text-[9px] font-bold text-indigo-700 uppercase">User:</span>
                           <span className="text-[10px] font-bold text-slate-800">{pt.assigned_pre_username || 'Unassigned'}</span>
                         </div>
                         <div className="text-[9px] text-slate-500 mt-1">

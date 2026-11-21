@@ -991,7 +991,7 @@ export default function LqWorkspaceModal({
             issue_details: `The phone number is invalid. Please find the correct contact number.`,
             verification_checklist: updatedChecklist
           });
-          toast.info(`Issue reported to PRE: Invalid Number (${fieldToMark === 'keyContacts' ? 'Key Contact' : 'Official Number'}).`);
+          toast.info(`Issue reported to user: Invalid Number (${fieldToMark === 'keyContacts' ? 'Key Contact' : 'Official Number'}).`);
           setLocalIssueSent(true);
         } catch (err) {
           console.error("Failed to report invalid number issue", err);

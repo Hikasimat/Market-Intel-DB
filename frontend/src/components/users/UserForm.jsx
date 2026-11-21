@@ -123,7 +123,7 @@ const UserForm = ({ isOpen, onClose, userToEdit }) => {
                   value={formData.role} 
                   onChange={(val) => setFormData(prev => ({...prev, role: val}))}
                   options={[
-                    { value: 'PRE', label: 'Prospect Research Engineer (PRE)' },
+                    { value: 'PRE', label: 'User' },
                     { value: 'MANAGER', label: 'Manager' },
                     { value: 'DM', label: 'Digital Marketing' }
                   ]}

@@ -71,7 +71,7 @@ const UserManagementPage = () => {
           <p className="mt-0.5 text-xs text-slate-500">
             {isManager
               ? 'Create, edit, and manage user accounts (Manager cannot modify superusers).'
-              : 'Create, edit, and manage user accounts and their roles (PRE / LQ / MANAGER / DM).'}
+              : 'Create, edit, and manage user accounts and their roles (User / Manager / DM).'}
           </p>
         </div>
         <div className="mt-3 sm:mt-0">
@@ -143,7 +143,7 @@ const UserManagementPage = () => {
                           : user.role === 'DM'
                           ? 'Digital Marketing'
                           : user.role === 'PRE'
-                          ? 'Prospect Research Engineer'
+                          ? 'User'
                           : user.role === 'MANAGER'
                           ? 'Manager'
                           : user.role}

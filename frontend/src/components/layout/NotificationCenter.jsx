@@ -143,7 +143,7 @@ export default function NotificationCenter() {
       id: `audit-${audit.id}`,
       type: 'audit',
       item: audit,
-      message: `PRE User ${audit.pre_user_name || 'Unknown'} corrected fields for ${audit.prospect_company_name}.`,
+      message: `User ${audit.pre_user_name || 'Unknown'} corrected fields for ${audit.prospect_company_name}.`,
       time: formatTimeForUser(new Date().toISOString(), user?.timezone),
     };
     // Ensure we don't duplicate active toasts

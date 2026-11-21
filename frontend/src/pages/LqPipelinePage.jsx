@@ -320,7 +320,7 @@ const LqPipelinePage = ({ filter = 'all', embedded = false }) => {
 
   const incorrectNames = incorrectFields.map(key => fieldNames[key]);
   const autoCategory = incorrectNames.join(', ');
-  const autoDetails = incorrectNames.length > 0 ? `The following fields are incorrect and need to be fixed by PRE:\n- ${incorrectNames.join('\n- ')}` : '';
+  const autoDetails = incorrectNames.length > 0 ? `The following fields are incorrect and need to be fixed by user:\n- ${incorrectNames.join('\n- ')}` : '';
 
   const handleSubmitIssue = () => {
     dispatch(reportIssueToPre({

@@ -345,7 +345,7 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
                         <Users className="w-4 h-4 text-sky-600 flex-shrink-0" />
                         <span>{u.name} &ndash; Daily Email Activity</span>
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                          {u.role}
+                          {u.role === 'PRE' ? 'User' : u.role}
                         </span>
                       </h3>
                       <p className="text-xs text-slate-500 mt-0.5 truncate">
@@ -430,13 +430,13 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
         <select
           value={preUserId}
           onChange={(e) => { setPreUserId(e.target.value); setPage(1); }}
-          aria-label="Filter by PRE user"
+          aria-label="Filter by user"
           className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
         >
-          <option value="all">All PRE Users ({preUsers.length})</option>
+          <option value="all">All Users ({preUsers.length})</option>
           {preUsers.map((u) => (
             <option key={u.id} value={String(u.id)}>
-              {u.name} ({u.role}) — {u.thread_count}
+              {u.name} ({u.role === 'PRE' ? 'User' : u.role}) — {u.thread_count}
             </option>
           ))}
         </select>
@@ -522,7 +522,7 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
         <table className="min-w-full divide-y divide-slate-100">
           <thead className="bg-slate-50">
             <tr>
-              <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">PRE User</th>
+              <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">User</th>
               <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Prospect / Contact</th>
               <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Subject &amp; Snippet</th>
               <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">AI Summary</th>
@@ -536,7 +536,7 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
             {emailActivityLoading && threads.length === 0 ? (
               <tr>
                 <td colSpan={8} className="px-6 py-10 text-center text-slate-400 text-sm">
-                  Loading PRE email conversations...
+                  Loading user email conversations...
                 </td>
               </tr>
             ) : threads.length === 0 ? (
@@ -666,7 +666,7 @@ export default function ManagerEmailActivitySection({ selectedDate }) {
                 </h3>
                 {selectedEmailThread && (
                   <p className="text-xs text-slate-500 mt-0.5">
-                    PRE: <strong>{selectedEmailThread.pre_user?.name}</strong> · Correspondent: <strong>{selectedEmailThread.correspondent_email}</strong>
+                    User: <strong>{selectedEmailThread.pre_user?.name}</strong> · Correspondent: <strong>{selectedEmailThread.correspondent_email}</strong>
                     {selectedEmailThread.prospect_name ? ` · Prospect: ${selectedEmailThread.prospect_name}` : ''}
                   </p>
                 )}
