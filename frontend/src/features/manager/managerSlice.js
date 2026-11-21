@@ -3,10 +3,25 @@ import api from '../../services/api';
 
 export const fetchManagerDashboard = createAsyncThunk(
   'manager/fetchDashboard',
-  async (date, { rejectWithValue }) => {
+  async (arg, { rejectWithValue }) => {
     try {
+      const date = typeof arg === 'string' ? arg : arg?.date;
       const params = date ? { date } : {};
       const response = await api.get('/manager-dashboard/', { params });
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.response?.data || err.message);
+    }
+  }
+);
+
+export const fetchManagerAudit = createAsyncThunk(
+  'manager/fetchAudit',
+  async (arg, { rejectWithValue }) => {
+    try {
+      const date = typeof arg === 'string' ? arg : arg?.date;
+      const params = date ? { date } : {};
+      const response = await api.get('/manager-dashboard/audit/', { params });
       return response.data;
     } catch (err) {
       return rejectWithValue(err.response?.data || err.message);
@@ -97,7 +112,12 @@ const managerSlice = createSlice({
   initialState: {
     dashboard: null,
     loading: false,
+    refreshing: false,
     error: null,
+    lastUpdatedAt: null,
+    auditData: null,
+    auditLoading: false,
+    auditError: null,
     emailActivity: {
       results: [],
       pre_users: [],
@@ -126,6 +146,7 @@ const managerSlice = createSlice({
     clearDashboard: (state) => {
       state.dashboard = null;
       state.error = null;
+      state.lastUpdatedAt = null;
     },
     clearSelectedEmailThread: (state) => {
       state.selectedEmailThread = null;
@@ -134,17 +155,44 @@ const managerSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchManagerDashboard.pending, (state) => {
-        state.loading = true;
+      .addCase(fetchManagerDashboard.pending, (state, action) => {
+        const arg = action.meta.arg;
+        const isSilent = Boolean(typeof arg === 'object' && arg?.silent);
+        if (isSilent && state.dashboard) {
+          state.refreshing = true;
+        } else if (state.dashboard) {
+          state.refreshing = true;
+        } else {
+          state.loading = true;
+        }
         state.error = null;
       })
       .addCase(fetchManagerDashboard.fulfilled, (state, action) => {
         state.loading = false;
+        state.refreshing = false;
         state.dashboard = action.payload;
+        state.lastUpdatedAt = action.payload?.meta?.generated_at || new Date().toISOString();
       })
       .addCase(fetchManagerDashboard.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.payload || action.error.message;
+        state.refreshing = false;
+        const arg = action.meta.arg;
+        const isSilent = Boolean(typeof arg === 'object' && arg?.silent);
+        if (!isSilent || !state.dashboard) {
+          state.error = action.payload || action.error.message;
+        }
+      })
+      .addCase(fetchManagerAudit.pending, (state) => {
+        state.auditLoading = true;
+        state.auditError = null;
+      })
+      .addCase(fetchManagerAudit.fulfilled, (state, action) => {
+        state.auditLoading = false;
+        state.auditData = action.payload;
+      })
+      .addCase(fetchManagerAudit.rejected, (state, action) => {
+        state.auditLoading = false;
+        state.auditError = action.payload || action.error.message;
       })
       .addCase(fetchManagerEmailActivity.pending, (state) => {
         state.emailActivityLoading = true;

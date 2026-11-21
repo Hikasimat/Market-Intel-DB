@@ -137,6 +137,7 @@ const Layout = () => {
   } else if (user?.role === 'MANAGER') {
     primaryNavItems.push(
       { path: '/manager-dashboard', label: 'Manager Dashboard', icon: Shield },
+      { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/pre-tasks', label: 'Tasks', icon: ClipboardList },
       { 
         path: '/prospects', 
@@ -145,7 +146,6 @@ const Layout = () => {
         subItems: [
           { path: '/prospects', label: 'Prospect Directory', exact: true },
           { path: '/prospects?tab=outreach', label: 'Outreach', exact: true },
-          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
         ]
       },
       { path: '/calendar', label: 'Calendar', icon: Calendar },
@@ -156,11 +156,9 @@ const Layout = () => {
         badge: unreadCount > 0 ? unreadCount : null,
         subItems: [
           { path: '/inbox', label: 'Email Inbox', exact: true },
-          { path: '/email-campaigns', label: 'Email Campaign', exact: true },
+          { path: '/email-campaigns', label: 'Email Campaigns', exact: true },
         ]
       },
-      { path: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, badge: whatsappUnreadCount > 0 ? whatsappUnreadCount : null },
-      { path: '/manager-audit', label: 'Daily Audit', icon: ClipboardList },
       { path: '/key-people', label: 'Key People', icon: UserCircle },
       { path: '/market-events', label: 'Market Events', icon: Calendar },
       { path: '/users', label: 'User Management', icon: Users }
@@ -217,7 +215,16 @@ const Layout = () => {
           <div className="flex flex-col h-full w-full">
             {/* Header: 3D Cube Logo + Brand Title + Collapse Button */}
             <div className="flex items-center justify-between px-2 pt-1 pb-3 shrink-0">
-              <Link to="/dashboard" className="flex items-center gap-2.5 group cursor-pointer">
+              <Link
+                to={
+                  user?.role === 'MANAGER'
+                    ? '/manager-dashboard'
+                    : user?.role === 'DM'
+                    ? '/digital-marketing'
+                    : '/dashboard'
+                }
+                className="flex items-center gap-2.5 group cursor-pointer"
+              >
                 <CubeLogo className="w-6 h-6 transition-transform group-hover:scale-105" />
                 <span className="font-bold text-slate-900 text-lg tracking-tight">MarketIntel DB</span>
               </Link>
@@ -311,7 +318,7 @@ const Layout = () => {
               })}
 
               {/* Collapsible Apps Section matching Image 1 */}
-              {!sidebarSearch && (
+              {!sidebarSearch && user?.role !== 'MANAGER' && (
                 <div className="pt-1">
                   <button
                     type="button"
@@ -465,22 +472,26 @@ const Layout = () => {
                 );
               })}
 
-              {/* Divider matching Image 1 */}
-              <div className="w-8 border-t border-slate-200/80 my-1" />
+              {user?.role !== 'MANAGER' && (
+                <>
+                  {/* Divider matching Image 1 */}
+                  <div className="w-8 border-t border-slate-200/80 my-1" />
 
-              {/* Apps icon in rail */}
-              <div className="group relative flex items-center justify-center">
-                <Link
-                  to="/prospects"
-                  className="p-2.5 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100/80 transition"
-                >
-                  <Layers className="w-4 h-4 shrink-0" />
-                </Link>
-                <div className="absolute left-full ml-3 px-2.5 py-1 bg-[#18181b] text-white text-[11px] font-semibold rounded-md shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 whitespace-nowrap flex items-center">
-                  Apps
-                  <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 bg-[#18181b] rotate-45" />
-                </div>
-              </div>
+                  {/* Apps icon in rail */}
+                  <div className="group relative flex items-center justify-center">
+                    <Link
+                      to="/prospects"
+                      className="p-2.5 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100/80 transition"
+                    >
+                      <Layers className="w-4 h-4 shrink-0" />
+                    </Link>
+                    <div className="absolute left-full ml-3 px-2.5 py-1 bg-[#18181b] text-white text-[11px] font-semibold rounded-md shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 whitespace-nowrap flex items-center">
+                      Apps
+                      <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 bg-[#18181b] rotate-45" />
+                    </div>
+                  </div>
+                </>
+              )}
             </nav>
 
             {/* Bottom Profile in rail */}

@@ -155,7 +155,12 @@ const PreTasksPage = () => {
     });
   }
 
-  const availableUsers = Array.from(new Set(tasks.map(t => t.prospect?.created_by))).filter(Boolean);
+  const availableUsers = Array.from(
+    new Set([
+      ...tasks.map((t) => t.prospect?.created_by),
+      ...preTasks.map((t) => t.assigned_pre_username),
+    ])
+  ).filter(Boolean);
   
   const filteredTasks = isManager && managerUserFilter !== 'ALL'
     ? tasks.filter(t => t.prospect?.created_by === managerUserFilter)
@@ -210,24 +215,20 @@ const PreTasksPage = () => {
     <div className="space-y-4 min-h-full flex-1 flex flex-col pb-2">
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-2xl shadow-xs border border-slate-200/80 shrink-0">
-        {!isManager ? (
-          <div className="flex bg-slate-100 p-0.5 rounded-xl">
-            <button
-              onClick={() => setActiveTab('PENDING')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'PENDING' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
-            >
-              Pending Tasks
-            </button>
-            <button
-              onClick={() => setActiveTab('COMPLETED')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'COMPLETED' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
-            >
-              Completed Tasks
-            </button>
-          </div>
-        ) : (
-          <h2 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Pending PRE Tasks</h2>
-        )}
+        <div className="flex bg-slate-100 p-0.5 rounded-xl">
+          <button
+            onClick={() => setActiveTab('PENDING')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'PENDING' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
+          >
+            Pending Tasks
+          </button>
+          <button
+            onClick={() => setActiveTab('COMPLETED')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === 'COMPLETED' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}
+          >
+            Completed Tasks
+          </button>
+        </div>
         
         {activeTab === 'COMPLETED' && (
           <div className="flex items-center gap-3 flex-wrap">
@@ -473,15 +474,21 @@ const PreTasksPage = () => {
                     )}
                     <td className="px-3.5 py-2.5 align-top text-right">
                       {activeTab === 'PENDING' ? (
-                        <button
-                          type="button"
-                          disabled={completingPreTaskId === pt.id}
-                          onClick={() => handleCompletePreTaskItem(pt.id)}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[10px] font-bold transition inline-flex items-center gap-1 shadow-2xs"
-                        >
-                          <CheckCircle className="w-3 h-3" />
-                          {completingPreTaskId === pt.id ? 'Completing...' : 'Mark Complete'}
-                        </button>
+                        isManager ? (
+                          <div className="px-3 py-1 bg-amber-50 text-amber-700 rounded-lg text-[10px] font-bold border border-amber-200 inline-flex items-center gap-1">
+                            Pending
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={completingPreTaskId === pt.id}
+                            onClick={() => handleCompletePreTaskItem(pt.id)}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[10px] font-bold transition inline-flex items-center gap-1 shadow-2xs"
+                          >
+                            <CheckCircle className="w-3 h-3" />
+                            {completingPreTaskId === pt.id ? 'Completing...' : 'Mark Complete'}
+                          </button>
+                        )
                       ) : (
                         <div className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold border border-emerald-200 inline-flex items-center gap-1">
                           <CheckCircle className="w-3 h-3" /> Completed
